@@ -1010,6 +1010,8 @@ public class Setup : Form
     }
 
     // A .cue names the .bin of every track; Track 1 is the first FILE line.
+    // 22.10.2026: a renamed dump may keep the old file name in its .cue - then the .bin next to it with the
+    // .cue's own name.
     static string CueToBin(string cue)
     {
         try {
@@ -1019,8 +1021,11 @@ public class Setup : Form
                 int a = l.IndexOf('"'), b = a >= 0 ? l.IndexOf('"', a + 1) : -1;
                 string name = (a >= 0 && b > a) ? l.Substring(a + 1, b - a - 1) : l.Substring(4).Trim().Split(' ')[0];
                 string bin = Path.Combine(Path.GetDirectoryName(cue), name);
-                return File.Exists(bin) ? bin : null;
+                if (File.Exists(bin)) return bin;
+                break;
             }
+            string own = Path.ChangeExtension(cue, ".bin");
+            if (File.Exists(own)) return own;
         } catch { }
         return null;
     }

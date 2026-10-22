@@ -1,4 +1,4 @@
-DINO CRISIS - Modern Edition v1.0
+DINO CRISIS - Modern Edition v1.01
 
 Dino Crisis (PS1) for Windows: over-the-shoulder camera, widescreen,
 modern graphics.
