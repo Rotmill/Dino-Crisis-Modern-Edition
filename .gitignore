@@ -1,0 +1,11 @@
+# Setup carries these, they are not kept in git
+mod/tools/llvm/
+mod/tools/python/
+mod/sdl2/
+mod/vulkan/
+
+# Build outputs
+*.exe
+*.pdb
+__pycache__/
+*.pyc

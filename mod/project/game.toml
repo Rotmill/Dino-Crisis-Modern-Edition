@@ -1,0 +1,21 @@
+[game]
+name = "Dino Crisis"
+id   = "SLUS_009.22"
+exe  = "SLUS_009.22"
+disc = "Dino Crisis (USA) (v1.1)/Dino Crisis (USA) (v1.1) (Track 1).bin"
+
+# From PS-X EXE header
+load_address = "0x80018000"
+entry_pc     = "0x8001A1C8"
+text_size    = "0x00099800"
+stack_base   = "0x801FFFF0"
+
+[recompiler]
+seeds   = "seeds/dc1_seeds.txt"
+out_dir = "generated"
+strict  = false
+
+[runtime]
+window_title = "Dino Crisis ME"
+disc_speed   = "2x"
+debug_port   = 4471
