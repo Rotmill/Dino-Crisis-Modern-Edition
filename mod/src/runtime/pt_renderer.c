@@ -725,9 +725,9 @@ static void aim_fresh_check(const char *what, int differ, int a, int b) {
     static long n = 0, bad = 0;
     n++;
     if (differ && ++bad <= 20)
-        fprintf(stderr, "aimfresh: %s РАСХОЖДЕНИЕ #%ld: по спискам %d, по всей таблице %d (штамп %u)%c", what, bad, a, b, (unsigned)s_pgeo_stamp, 10);
+        fprintf(stderr, "aimfresh: %s MISMATCH #%ld: by the lists %d, by the whole table %d (stamp %u)%c", what, bad, a, b, (unsigned)s_pgeo_stamp, 10);
     if (n == 1 || (n % 200) == 0)
-        fprintf(stderr, "aimfresh: сверок %ld, расхождений %ld; в списках штампов сейчас %d + %d записей из %u (DC_AIM_FRESH=2)%c",
+        fprintf(stderr, "aimfresh: %ld checks, %ld mismatches; the stamp lists now hold %d + %d records of %u (DC_AIM_FRESH=2)%c",
                 n, bad, s_pgeo_fresh_n[s_pgeo_fresh_cur], s_pgeo_fresh_n[s_pgeo_fresh_cur ^ 1], (unsigned)PGEO_HASH, 10);
 }
 int dc_aim_geom_ray(uint32_t actor) {
@@ -1559,7 +1559,7 @@ int dc_char_prim_ok(void) {                  /* полигон, только ч�
             for (int i = 0; i < nc; i++) {
                 const int ok2 = (cc[i] >= 0xB9280u && cc[i] < 0xB9300u) ||
                                 (cc[i] >= 0xB7ACCu && cc[i] < 0xB7ACCu + 16u * 608u && ((cc[i] - 0xB7ACCu) % 608u) == 0u);
-                fprintf(stderr, " %05X:%ld%s", cc[i], cn[i], ok2 ? "" : "(не персонаж)");
+                fprintf(stderr, " %05X:%ld%s", cc[i], cn[i], ok2 ? "" : "(not a character)");
             }
             fprintf(stderr, "%c", 10); nc = 0;
         }
@@ -4231,7 +4231,7 @@ static void zfopt_read(void) {
             if (strcmp(line, names[i]) == 0) { s_zfo_has[i] = 1; s_zfo_val[i] = (float)atof(eq + 1); }
     }
     fclose(f);
-    fprintf(stderr, "zfight: настройки раздела F8 загружены из dc_zfopt_user.cfg%c", 10);
+    fprintf(stderr, "zfight: the F8 section settings loaded from dc_zfopt_user.cfg%c", 10);
 }
 #ifdef DCME_RELEASE   /* ME V3 z-fight options: end */
 #undef GetFileAttributesExA
@@ -4854,12 +4854,12 @@ static void zf_analyze(void) {
                   { const char *es = getenv("DC_MESH_SCALE"); if (es) sc = (float)atof(es); }
                   int c4 = (int)lroundf(sc * 4.f); if (c4 < 1) c4 = 1; if (c4 > 31) c4 = 31;
                   s_subst[pg].scale4 = c4;
-                  fprintf(stderr, "zfight: mesh subst page %d: масштаб %.2f (плотность рабицы %.4f n %d, решёток %.4f n %d [%.4f..%.4f])%c",
+                  fprintf(stderr, "zfight: mesh subst page %d: scale %.2f (chain-link density %.4f n %d, grates %.4f n %d [%.4f..%.4f])%c",
                           pg, c4 / 4.0, mg, gn, mr, rn, rn ? rd[0] : 0.f, rn ? rd[rn - 1] : 0.f, 10); }
-                fprintf(stderr, "zfight: mesh subst page %d: рабица tp %04X cl %04X uv %d..%d x %d..%d, окно (%d,%d)%c",
+                fprintf(stderr, "zfight: mesh subst page %d: chain-link tp %04X cl %04X uv %d..%d x %d..%d, window (%d,%d)%c",
                         pg, tpv, bestCl, bu0, bu1, bv0, bv1, wu, wv, 10);
             } else
-                fprintf(stderr, "zfight: mesh subst page %d: рабица tp %04X cl %04X uv %d..%d x %d..%d — чистого окна 64x64 нет%c",
+                fprintf(stderr, "zfight: mesh subst page %d: chain-link tp %04X cl %04X uv %d..%d x %d..%d - no clean 64x64 window%c",
                         pg, tpv, bestCl, bu0, bu1, bv0, bv1, 10);
         }
     }
@@ -4926,7 +4926,7 @@ static void zf_analyze(void) {
                                                    for (int t = 0; t < ntw; t++) zf_keep_insert(twins[t]); }
         }
     }
-    fprintf(stderr, "zfight: комната проанализирована — полигонов %d, накрытых %d, скрытых решёток %d (из них дизеринг-двойников %d; tol %.0f, сдвиг %.0f, auto %d); двусторонних из пар лицо/изнанка %d%c",
+    fprintf(stderr, "zfight: room analysed - %d polygons, %d covered, %d hidden grates (%d of them dither twins; tol %.0f, shift %.0f, auto %d); %d two-sided from front/back pairs%c",
             s_zfp_n, s_zf_n, s_zf_hide_n, s_zf_hide_dith_n, tol, s_zf_shift, s_zf_auto, s_zf_keep_n, 10);
     /* 14.09: дизеринг-решётки БЕЗ двойника — почему: ближайшая по плоскости
      * альфа-решётка той же нормали (Δd, кусок, площади, вершины внутри?) */
@@ -4946,10 +4946,10 @@ static void zf_analyze(void) {
                   float ddv = fabsf(P->d - Q->d);
                   if (ddv < bdd) { bdd = ddv; best = Q; }
               }
-              if (!best) { fprintf(stderr, "zfight: dither %08X piece %d tp %04X area %.0f d %.0f — нет альфа-решётки в той же ориентации%c", P->rec, P->piece, P->tp, P->area, P->d, 10); shown++; continue; }
+              if (!best) { fprintf(stderr, "zfight: dither %08X piece %d tp %04X area %.0f d %.0f - no alpha grate in the same orientation%c", P->rec, P->piece, P->tp, P->area, P->d, 10); shown++; continue; }
               int in = 1;
               for (int k = 0; k < P->nv && in; k++) if (!zf_inside(best->v, best->nv, best->area, P->v[k][0], P->v[k][1], 1.0f)) in = 0;
-              fprintf(stderr, "zfight: dither %08X piece %d tp %04X area %.0f d %.0f — ближайшая решётка %08X piece %d tp %04X area %.0f dd %.1f qn %s inside %d%c",
+              fprintf(stderr, "zfight: dither %08X piece %d tp %04X area %.0f d %.0f - the nearest grate %08X piece %d tp %04X area %.0f dd %.1f qn %s inside %d%c",
                       P->rec, P->piece, P->tp, P->area, P->d, best->rec, best->piece, best->tp, best->area, bdd,
                       (best->qn == P->qn) ? "same" : "DIFF", in, 10);
               shown++;
@@ -4988,7 +4988,7 @@ void dc_zf_dbg_drawn_report(void) {   /* вызывается из zf_walk_end �
         if (cov) tot_cov++;
         if (s_zf_drawn[k]) { drawn++; if (cov) drawn_cov++; }
     }
-    fprintf(stderr, "zfight: набор %d, рисовалось игрой %d, из накрытых (%d) рисовалось %d%c", s_zfp_n, drawn, tot_cov, drawn_cov, 10);
+    fprintf(stderr, "zfight: set %d, drawn by the game %d, of the covered (%d) drawn %d%c", s_zfp_n, drawn, tot_cov, drawn_cov, 10);
 }
 /* конец обхода: подпись состава кусков (сменилась — добрать в набор);
  * набор пополнился — пересчёт, не чаще раза в 30 кадров */
@@ -5059,7 +5059,7 @@ static void zfs_load(void) {
     s_zfs_gen++;
     dc_mf_close(f);
     { int known = 0; for (int i = 0; i < s_zfs_n; i++) if (s_zfs[i].room >= 0) known++;
-      fprintf(stderr, "zfight: %d выбранных полигонов загружено (комната известна у %d)%c", s_zfs_n, known, 10); }
+      fprintf(stderr, "zfight: %d picked polygons loaded (room known for %d)%c", s_zfs_n, known, 10); }
 }
 /* 19.10.2026: выбор F8 (до 256 строк, у игрока 212) спрашивают на каждом полигоне комнаты - линейный поиск стоил 2.5 % главного
  * потока (сейв 7, турбо). Битовая карта ключей отвечает «нет в выборе» одной пробой; если бит стоит - тот же линейный поиск (ответ
@@ -5150,7 +5150,7 @@ static void zfs_room_tick(void) {
             }
         if (named) s_zfs_dirty = 1;
         if (s_zfs_n > 0)
-            fprintf(stderr, "zfight: комната %d — выбранных полигонов в ней %d (из дополнения комнаты %d; номер комнаты записан %d)%c",
+            fprintf(stderr, "zfight: room %d - %d picked polygons in it (%d from the room's addition; room number recorded %d)%c",
                     room, found, fsub, named, 10);
     }
     if (s_zfs_dirty) { s_zfs_dirty = 0; zfs_save(); }
@@ -5194,18 +5194,18 @@ static void zf_pick_finish(void) {
     { extern uint64_t s_frame_count;
       fprintf(stderr, "zfight: pick finish at frame %llu: tested %ld (no-w %ld), inside %ld%c",
               (unsigned long long)s_frame_count, s_zf_pick_tested, s_zf_pick_now, s_zf_pick_inside, 10); }
-    if (!s_zf_pick_best_key) { fprintf(stderr, "zfight: pick — под центром экрана нет полигона комнаты%c", 10); return; }
+    if (!s_zf_pick_best_key) { fprintf(stderr, "zfight: pick - no room polygon under the screen center%c", 10); return; }
     int i = zfs_find(s_zf_pick_best_key);
     if (i >= 0) {
         for (int k = i; k + 1 < s_zfs_n; k++) s_zfs[k] = s_zfs[k + 1];
         s_zfs_n--; s_zfs_gen++;
-        fprintf(stderr, "zfight: pick — полигон %08X (rec %06X) убран из выбора%c", s_zf_pick_best_key, s_zf_pick_best_rec, 10);
+        fprintf(stderr, "zfight: pick - polygon %08X (rec %06X) removed from the picks%c", s_zf_pick_best_key, s_zf_pick_best_rec, 10);
     } else if (s_zfs_n < ZFS_MAX) {
         s_zfs[s_zfs_n].key = s_zf_pick_best_key; s_zfs[s_zfs_n].off = 0; s_zfs[s_zfs_n].hide = 0;
         s_zfs[s_zfs_n].room = dc_room_effective();   /* 17.09 день: список F8 по комнатам */
         s_zfs[s_zfs_n].inroom = 1;                    /* 17.09 вечер: выбран здесь — в списке этой комнаты */
         s_zfs_n++; s_zfs_gen++;
-        fprintf(stderr, "zfight: pick — полигон %08X (rec %06X, z %.0f) выбран в комнате %d, всего %d%c",
+        fprintf(stderr, "zfight: pick - polygon %08X (rec %06X, z %.0f) picked in room %d, %d in all%c",
                 s_zf_pick_best_key, s_zf_pick_best_rec, s_zf_pick_best_z, s_zfs[s_zfs_n - 1].room, s_zfs_n, 10);
     }
     /* 13.09 ДИАГНОСТИКА ВЫБОРА (игрок: «решётки двойные, и не везде»): что за
@@ -5215,7 +5215,7 @@ static void zf_pick_finish(void) {
         const ZfPoly *P = NULL;
         for (int k = 0; k < s_zfp_n; k++) if (s_zfp[k].rec == s_zf_pick_best_key) { P = &s_zfp[k]; break; }
         if (!P) {
-            fprintf(stderr, "zfight: pick — полигона %08X нет в наборе анализа (набор %d)%c", s_zf_pick_best_key, s_zfp_n, 10);
+            fprintf(stderr, "zfight: pick - polygon %08X is not in the analysis set (set %d)%c", s_zf_pick_best_key, s_zfp_n, 10);
         } else {
             static const int bpp[4] = { 4, 8, 15, 15 };
             float bx0 = P->v[0][0], bx1 = bx0, by0 = P->v[0][1], by1 = by0;
@@ -5223,7 +5223,7 @@ static void zf_pick_finish(void) {
                 if (P->v[i][0] < bx0) bx0 = P->v[i][0]; if (P->v[i][0] > bx1) bx1 = P->v[i][0];
                 if (P->v[i][1] < by0) by0 = P->v[i][1]; if (P->v[i][1] > by1) by1 = P->v[i][1];
             }
-            fprintf(stderr, "zfight: pick — ПОЛИГОН %08X: piece %d nv %d tp %04X (%dbpp, page %d,%d) cl %04X alpha %d dens %.3f area %.0f ax %d n %.2f,%.2f,%.2f d %.0f bbox2d (%.0f,%.0f)-(%.0f,%.0f) covered %d hidden %d%c",
+            fprintf(stderr, "zfight: pick - POLYGON %08X: piece %d nv %d tp %04X (%dbpp, page %d,%d) cl %04X alpha %d dens %.3f area %.0f ax %d n %.2f,%.2f,%.2f d %.0f bbox2d (%.0f,%.0f)-(%.0f,%.0f) covered %d hidden %d%c",
                     P->rec, P->piece, P->nv, P->tp, bpp[(P->tp >> 7) & 3], (P->tp & 0xF) * 64, ((P->tp >> 4) & 1) * 256, P->cl,
                     P->alpha, P->dens, P->area, P->ax, P->n[0], P->n[1], P->n[2], P->d, bx0, by0, bx1, by1,
                     zf_lookup(P->rec), zf_hidden(P->rec), 10);
@@ -5241,12 +5241,12 @@ static void zf_pick_finish(void) {
                 }
                 if (qx1 < bx0 - 4.f || qx0 > bx1 + 4.f || qy1 < by0 - 4.f || qy0 > by1 + 4.f) continue;
                 shown++;
-                fprintf(stderr, "zfight:   в той же плоскости %08X: piece %d nv %d tp %04X (%dbpp, page %d,%d) cl %04X alpha %d dens %.3f area %.0f d %.0f (dd %.1f) bbox2d (%.0f,%.0f)-(%.0f,%.0f) covered %d hidden %d%c",
+                fprintf(stderr, "zfight:   in the same plane %08X: piece %d nv %d tp %04X (%dbpp, page %d,%d) cl %04X alpha %d dens %.3f area %.0f d %.0f (dd %.1f) bbox2d (%.0f,%.0f)-(%.0f,%.0f) covered %d hidden %d%c",
                         Q->rec, Q->piece, Q->nv, Q->tp, bpp[(Q->tp >> 7) & 3], (Q->tp & 0xF) * 64, ((Q->tp >> 4) & 1) * 256, Q->cl,
                         Q->alpha, Q->dens, Q->area, Q->d, Q->d - P->d, qx0, qy0, qx1, qy1,
                         zf_lookup(Q->rec), zf_hidden(Q->rec), 10);
             }
-            if (!shown) fprintf(stderr, "zfight:   в той же плоскости других полигонов нет%c", 10);
+            if (!shown) fprintf(stderr, "zfight:   no other polygons in the same plane%c", 10);
         }
     }
     s_zf_ping_key = s_zf_pick_best_key; s_zf_ping_left = 60;
@@ -5306,7 +5306,7 @@ static void zfopt_save(void) {
     if (strcmp(buf, last) == 0) return;          /* ползунок: не писать одно и то же */
     FILE *f = NULL;   /* ME (17.09.2026) z-fight options: nothing is written in a release */
     if (!f) return;
-    fprintf(f, "# F8, раздел Z-fight: пишется при каждом изменении (15.09)\n%s", buf);
+    fprintf(f, "# F8, Z-fight section: written at every change (15.09)\n%s", buf);
     fclose(f);
     memcpy(last, buf, sizeof last);
 }
@@ -5629,11 +5629,11 @@ int dc_room_taken(uint32_t data_ptr) {
       if (hb < 0) { const char *e = getenv("DC_ROOM_HANDBACK"); hb = (e && *e == '1') ? 1 : 0; }   /* ВЫКЛ: давал артефакты */
       { static long dn=0; static int dbg=-1;
         if (dbg<0){const char*e=getenv("DC_ROOM_HANDBACK_DBG"); dbg=(e&&*e=='1')?1:0;}
-        if (dbg && ++dn<=30) fprintf(stderr, "handback: вызов #%ld растр=%ld всего=%ld n=%d%c", dn, s_rl_tris_r, s_rl_tris, s_rl_n, 10); }
+        if (dbg && ++dn<=30) fprintf(stderr, "handback: call #%ld raster=%ld total=%ld n=%d%c", dn, s_rl_tris_r, s_rl_tris, s_rl_n, 10); }
       { extern int dcvk_stream_room_verts(void);
       if (hb && dcvk_stream_room_verts() <= 0) {
           static long n = 0;
-          if (++n <= 8) fprintf(stderr, "room: наш обход не дал ни одного треугольника — кадр рисует игра #%ld%c", n, 10);
+          if (++n <= 8) fprintf(stderr, "room: our walk gave no triangles - the game draws the frame #%ld%c", n, 10);
           return 0; } } }
     /* WE TAKE THE WHOLE ROOM BLOCK, so matching group pointers one by one was
      * both fragile and pointless - measured, the submitter is handed 0x100078
@@ -5985,7 +5985,7 @@ static int dc_ga_game_halo_ray(const float c[3], const float dir[3], const float
             const float fac = nx_ * d[0] + ny_ * d[1] + nz_ * d[2];
             if (dbg >= 2)                                                 /* все пересечения линии (DC_HALO_DBG=2) */
                 fprintf(stderr, "gamehalo_hit: t %.0f rec %06X list %d nv %d %s%c", t * maxb, g->rec & 0xFFFFFFu, ix, g->nv,
-                        fac > 0.f ? "лицом к камере игры" : "спиной (игра не рисует)", 10);
+                        fac > 0.f ? "facing the game's camera" : "back-facing (the game does not draw it)", 10);
             if (s_ga_front_only && !(fac > 0.f)) continue;
             if (t < tmin) { tmin = t; hrec = g->rec; }
         }
@@ -5996,8 +5996,8 @@ static int dc_ga_game_halo_ray(const float c[3], const float dir[3], const float
         *place = (dist > 4.f) ? dist - 4.f : 0.f;
         ok = (*place > 1.f) ? 1 : 0;
     }
-    if (dbg) fprintf(stderr, "gamehalo: centre %.0f,%.0f,%.0f (от камеры игры %.0f) -> %s %.0f ед. позади (поверхность %06X, проверено %d полигонов)%c",
-                     c[0], c[1], c[2], sqrtf(c[0]*c[0] + c[1]*c[1] + c[2]*c[2]), ok ? "садится на поверхность" : "остаётся",
+    if (dbg) fprintf(stderr, "gamehalo: centre %.0f,%.0f,%.0f (from the game's camera %.0f) -> %s %.0f units behind (surface %06X, %d polygons checked)%c",
+                     c[0], c[1], c[2], sqrtf(c[0]*c[0] + c[1]*c[1] + c[2]*c[2]), ok ? "sits on the surface" : "stays",
                      tmin <= 1.f ? tmin * maxb : -1.f, hrec & 0xFFFFFFu, tested, 10);
     return ok;
 }
@@ -6172,13 +6172,13 @@ int dc_ga_game_halo(const float c[3], float out[3]) {
                     for (int a = 0; a < 3; a++) A->L[a] = pa[a] * d0 + pa[3 + a] * d1 + pa[6 + a] * d2;
                     A->col = col; A->pass = s_ga_pass;
                     best = (int)(A - an); bperp = 0.f;
-                    if (dbg) fprintf(stderr, "gamehalo_los: colour %d — new lamp %d at %.0f,%.0f,%.0f (%s, %.0f; quad %.0f from the game eye; eye "
+                    if (dbg) fprintf(stderr, "gamehalo_los: colour %d - new lamp %d at %.0f,%.0f,%.0f (%s, %.0f; quad %.0f from the game eye; eye "
                                      "%.0f,%.0f,%.0f quad %.0f,%.0f,%.0f)%c", col, best, A->L[0], A->L[1], A->L[2], how, place, qd,
                                      ew[0], ew[1], ew[2], cw[0], cw[1], cw[2], 10);
                 } else {
                     int k = 0; for (int j = 1; j < 8; j++) if (miss_pass[j] < miss_pass[k]) k = j;
                     miss_col[k] = col; miss_pass[k] = s_ga_pass;
-                    if (dbg) fprintf(stderr, "gamehalo_los: colour %d — no surface on the line from the game eye (quad %.0f away; eye %.0f,%.0f,%.0f "
+                    if (dbg) fprintf(stderr, "gamehalo_los: colour %d - no surface on the line from the game eye (quad %.0f away; eye %.0f,%.0f,%.0f "
                                      "quad %.0f,%.0f,%.0f; lists %d/%d)%c", col, qd, ew[0], ew[1], ew[2], cw[0], cw[1], cw[2], s_ga_n[la], s_ga_n[lb], 10);
                     if (dbg >= 2) {                                           /* грани списка у квада (≤ 400 ед.) */
                         int shown = 0;
@@ -7701,10 +7701,10 @@ static void zc_analyze(void) {
     zc_decide();
     int nobj = 0;
     for (int i = 0; i < s_zc_n; i++) nobj += s_zc[i].obj;
-    fprintf(stderr, "zfight: порядок консоли — полигонов %d (из них объектов %d), спорящих пар %d, двойников на одних вершинах %d, "
-                    "одинаковых на вид %d, пар лицо/изнанка %d%s; вперёд %d (слоёв до %d, решено живыми записями %d), двойников назад %d, "
-                    "изнанка отбрасывается у %d; %u мс%c",
-            s_zc_n, nobj, fights, dups, same, twins, overflow ? " (таблица пар полна)" : "", s_zc_stat_moved, s_zc_stat_maxlev,
+    fprintf(stderr, "zfight: console order - %d polygons (%d of them objects), %d contested pairs, %d twins on the same vertices, "
+                    "%d identical-looking, %d front/back pairs%s; forward %d (up to %d layers, %d decided by live records), twins back %d, "
+                    "back face dropped for %d; %u ms%c",
+            s_zc_n, nobj, fights, dups, same, twins, overflow ? " (the pair table is full)" : "", s_zc_stat_moved, s_zc_stat_maxlev,
             s_zc_stat_auth, s_zc_stat_dup, s_zc_stat_twin, SDL_GetTicks() - t0, 10);
     s_zc_last_run = s_frame_count;
 }
@@ -7732,7 +7732,7 @@ static void zc_walk_end(void) {
         int m = s_zc_stat_moved, t = s_zc_stat_twin;
         zc_decide();
         if (m != s_zc_stat_moved || t != s_zc_stat_twin)
-            fprintf(stderr, "zfight: порядок консоли перерешён — вперёд %d (было %d), изнанка у %d (было %d), решено живыми записями %d%c",
+            fprintf(stderr, "zfight: console order decided again - forward %d (was %d), back face for %d (was %d), %d decided by live records%c",
                     s_zc_stat_moved, m, s_zc_stat_twin, t, s_zc_stat_auth, 10);
     }
 }
@@ -9302,7 +9302,7 @@ static void rl_emit_poly(const uint8_t *ram, uint32_t rec, int nv,
                   for (int k = 0; k < nv; k++) { hu[k] = (int)v[k].u; hv[k] = (int)v[k].v; }
                   keep = dc_tex_hazard_pub(tp, cl, hu, hv, nv);
                   if (keep) { static long nhz = 0;
-                      if (++nhz <= 3) fprintf(stderr, "hazard: изнанка чёрно-жёлтой разметки оставлена #%ld (страница %u, палитра %u)%c",
+                      if (++nhz <= 3) fprintf(stderr, "hazard: back face of the black-and-yellow marking kept #%ld (page %u, palette %u)%c",
                                               nhz, (unsigned)tp, (unsigned)cl, 10); }
               }
               /* ⭐ 23.09 (игрок, склад ST10C: «я укажу какие нужно сделать двусторонними»): текстуры из списка
@@ -9316,7 +9316,7 @@ static void rl_emit_poly(const uint8_t *ram, uint32_t rec, int nv,
                   for (int k = 0; k < nv; k++) { tu[k] = (int)v[k].u; tv[k] = (int)v[k].v; }
                   keep = dc_tex_twosided_pub(tp, cl, tu, tv, nv);
                   if (keep) { static long nts = 0; s_rl_twosided++;
-                      if (++nts <= 3) fprintf(stderr, "twosided: изнанка полигона комнаты оставлена #%ld (tp %04X, палитра %04X)%c",
+                      if (++nts <= 3) fprintf(stderr, "twosided: back face of a room polygon kept #%ld (tp %04X, palette %04X)%c",
                                               nts, (unsigned)tp, (unsigned)cl, 10); }
               }
               if (!keep) { s_rl_backcull++; continue; } } }
@@ -9592,7 +9592,7 @@ static void mt_flush(const uint8_t *ram) {
     }
     { static int lh = -1, lk = -1, lhd = -1, n = 0;
       if ((hidden != lh || kept != lk || held != lhd) && n < 60 && s_rl_target == 1) { lh = hidden; lk = kept; lhd = held; n++;
-          fprintf(stderr, "mesh twin: решёток скрыто %d (накрыты рабицей; из них %d — их рабица уехала, лист держим скрытым), нарисовано %d, рабицы в кадре %d%c",
+          fprintf(stderr, "mesh twin: %d grates hidden (covered by chain-link; %d of them - their chain-link moved away, the sheet is kept hidden), %d drawn, chain-link in the frame %d%c",
                   hidden, held, kept, s_mt_gn, 10); } }
     s_mt_dn = 0;
 }
@@ -10098,7 +10098,7 @@ static void rl_emit_walk_body(void) {
                     if (s_rl_have[k2] && s_rl_prevgp[k2] == refgp && s_rl_passno - s_rl_prevseen[k2] <= 1) {
                         static int nlog = 0;
                         if (nlog < 40) { nlog++;
-                            fprintf(stderr, "refnew: slot %d grp %06X — та же группа в прошлом проходе была в слоте %d: переезд по таблице, не прячем%c",
+                            fprintf(stderr, "refnew: slot %d grp %06X - the same group was in slot %d in the previous pass: a move within the table, not hidden%c",
                                     vs_refk, refgp & 0xFFFFFFu, k2, 10); }
                         ref_new_own = 0;
                     }
@@ -10123,8 +10123,8 @@ static void rl_emit_walk_body(void) {
                     if (inb) {
                         static int nlog2 = 0;
                         if (nlog2 < 40) { nlog2++;
-                            fprintf(stderr, "refnew: slot %d grp %06X — тело комнаты из сборки (без места и поворота), не отдельный объект: "
-                                            "не прячем, путь fillm (DC_ROOM_REF_NEW_BODY=0 — как было)%c", vs_refk, refgp & 0xFFFFFFu, 10); }
+                            fprintf(stderr, "refnew: slot %d grp %06X - the room body from the build (no place and turn), not a separate object: "
+                                            "not hidden, the fillm path (DC_ROOM_REF_NEW_BODY=0 - as before)%c", vs_refk, refgp & 0xFFFFFFu, 10); }
                         ref_new_own = 0;
                     }
                 }
@@ -10603,7 +10603,7 @@ static void rl_emit_walk_body(void) {
               { static int nshown = 0;
                 if (nshown < 60) { nshown++;
                     extern uint64_t gpu_flip_seq(void);
-                    fprintf(stderr, "refnew: f=%llu slot %d grp %06X — new largest piece without history, placed apart from slot %d (has history): not drawn this pass (DC_ROOM_REF_NEW_HIDE=0 off)%c",
+                    fprintf(stderr, "refnew: f=%llu slot %d grp %06X - new largest piece without history, placed apart from slot %d (has history): not drawn this pass (DC_ROOM_REF_NEW_HIDE=0 off)%c",
                             (unsigned long long)gpu_flip_seq(), k, gp & 0xFFFFFFu, ref_new_own - 1, 10); } }
               if (k < 90) s_on_flip[k] = on_flip_before;
               for (int q = 0; q < 3; q++) TR[q] = TRcur[q];
@@ -11068,7 +11068,7 @@ static void rl_emit_walk_body(void) {
                       static uint32_t shown_gp[16]; static int shown_n = 0; int had = 0;
                       for (int q = 0; q < shown_n; q++) if (shown_gp[q] == gp) { had = 1; break; }
                       if (!had && shown_n < 16) { shown_gp[shown_n++] = gp;
-                          fprintf(stderr, "room fill: grp %06X — indicator (%d polys) switched off by the game, not completed%c",
+                          fprintf(stderr, "room fill: grp %06X - indicator (%d polys) switched off by the game, not completed%c",
                                   gp & 0xFFFFFFu, n_tri + n_quad, 10); }
                       continue;
                   } } }
@@ -13287,7 +13287,7 @@ static void glamp_read(void) {
     if (glamp_check_on() && (n1 > GLAMP_MAX || n2 > GLAMP_MAX || n1 + n2 > GLAMP_MAX)) {
         static uint32_t bad = 0;
         if (ld != bad) { bad = ld;
-            fprintf(stderr, "gamelight: по адресу %08X не таблица ламп (счётчики %d+%d) — ламп нет, жду настоящую%c",
+            fprintf(stderr, "gamelight: no lamp table at %08X (counters %d+%d) - no lamps, waiting for the real one%c",
                     0x80000000u | ld, n1, n2, 10); }
         return;
     }
@@ -13314,7 +13314,7 @@ static void glamp_read(void) {
         L->set  = (i < n1) ? 1 : 2;
         L->s14  = (float)rrm_u16(ram, a + 14);
         if (glamp_check_on() && (L->rad <= 0.f || L->rad > 20000.f)) {   /* не лампа (мусор) — пропуск */
-            fprintf(stderr, "gamelight: запись %d пропущена — радиус %.0f%c", i, L->rad, 10);
+            fprintf(stderr, "gamelight: record %d skipped - radius %.0f%c", i, L->rad, 10);
             continue;
         }
         s_glamp_n++;
@@ -13323,11 +13323,11 @@ static void glamp_read(void) {
         static uint32_t pl = 0; static int pn = -1;
         if (ld == pl && s_glamp_n == pn) return;
         pl = ld; pn = s_glamp_n; }
-    fprintf(stderr, "gamelight: table at %08X — %d lamp(s) (%d+%d), directional %s dir=%.0f,%.0f,%.0f col=%.0f,%.0f,%.0f%c",
+    fprintf(stderr, "gamelight: table at %08X - %d lamp(s) (%d+%d), directional %s dir=%.0f,%.0f,%.0f col=%.0f,%.0f,%.0f%c",
             0x80000000u | ld, s_glamp_n, n1, n2, s_gdir_on ? "ON" : "off",
             s_gdir[0], s_gdir[1], s_gdir[2], s_gdircol[0], s_gdircol[1], s_gdircol[2], 10);
     for (int i = 0; i < s_glamp_n; i++)
-        fprintf(stderr, "  G%02d %s набор %d room=%.0f,%.0f,%.0f colour=%.0f,%.0f,%.0f (x%.2f) radius=%.0f сила %.0f%c",
+        fprintf(stderr, "  G%02d %s set %d room=%.0f,%.0f,%.0f colour=%.0f,%.0f,%.0f (x%.2f) radius=%.0f strength %.0f%c",
                 i, s_glamp[i].on ? "on " : "OFF", s_glamp[i].set,
                 s_glamp[i].p[0], s_glamp[i].p[1], s_glamp[i].p[2],
                 s_glamp[i].col[0], s_glamp[i].col[1], s_glamp[i].col[2],
@@ -13835,7 +13835,8 @@ enum { SHP_ON = 0, SHP_STR, SHP_SOFT, SHP_BIAS, SHP_FADE, SHP_SPREAD, SHP_RADK,
        SHP_MERGE, SHP_GAMELAMPS,                                                  /* 25.09 поздно: слияние ламп, лампы игры */
        SHP_V2, SHP_AMB, SHP_TEXMAX,                                               /* 27.09 (2): тени без зерна, доля света */
        SHP_MOON_CHR,                                                              /* 27.09 вечер: луна на персонажах без граней */
-       SHP_EXT, SHP_N };                                                          /* 19.10: тень и за радиусом лампы игры */
+       SHP_EXT,                                                                   /* 19.10: тень и за радиусом лампы игры */
+       SHP_STABLE, SHP_MERGE_D, SHP_N };                                          /* 23.10: тени не зависят от того, где Регина */
 typedef struct { const char *key; const char *env; float def, lo, hi; const char *hint; } ShPar;
 static const ShPar s_shp[SHP_N] = {
     /* ⭐ 18.09 вечер (игрок): по умолчанию ВЫКЛЮЧЕНО — игра выглядит как
@@ -13895,6 +13896,10 @@ static const ShPar s_shp[SHP_N] = {
      * её радиусе, и за краем тень гасла за 0.3 с целиком. Теперь, если ни одна лампа набора до него не достаёт, тень даёт
      * ближайшая (по доле радиуса) лампа за краем - и слабеет к нулю к ext радиусам (см. «ЛАМПЫ КАК У ИГРЫ») */
     { "ext",       "DC_SHADOW_EXT",    2.5f, 1.f,   4.f,    "тень и за радиусом лампы игры: слабеет к нулю к стольким её радиусам (1 — обрывается на радиусе, как было)" },
+    /* 23.10.2026 (игрок, слот 1, ST10D: «смотришь на Гейла, на тень под ним, и идёшь Региной вперёд и назад - тень меняется;
+     * сделай, чтобы тени были стабильны на всей комнате»): см. «СТАБИЛЬНЫЕ ТЕНИ» перед dc_shadow_draw */
+    { "stable",    "DC_SHADOW_STABLE",  1.f,    0.f, 1.f,    "тени не зависят от того, где Регина: группы ламп по их месту, слои - главным лампам каждого персонажа (0 - как было)" },
+    { "merge_d",   "DC_SHADOW_MERGE_D", 2000.f, 0.f, 8000.f, "при stable: лампы ближе этого к сильнейшей дают одну тень, единиц комнаты (merge 0 - у каждой своя)" },
 };
 static float s_shp_base[SHP_N];
 static int   s_shp_base_ok = 0;
@@ -13973,7 +13978,7 @@ static void shroom_load(void) {
             }
     }
     fclose(f);
-    fprintf(stderr, "shadow: правки на комнату из dc_shadows_user.cfg — %d комнат(ы)%c", s_shroom_n, 10);
+    fprintf(stderr, "shadow: per-room edits from dc_shadows_user.cfg - %d room(s)%c", s_shroom_n, 10);
 }
 #ifdef DCME_RELEASE   /* ME V3 shadow settings: end */
 #undef GetFileAttributesExA
@@ -14004,7 +14009,7 @@ static void shroom_save(void) {
 #endif
     FILE *f = fopen("dc_shadows_user.cfg", "w");
     if (!f) return;
-    fprintf(f, "# тени: правки на комнату (панель F8). Строка: <комната> <параметр> <значение>\n");
+    fprintf(f, "# shadows: per-room edits (the F8 panel). Line: <room> <parameter> <value>\n");
     for (int i = 0; i < s_shroom_n; i++)
         for (int k = 0; k < SHP_N; k++)
             if (s_shroom[i].has[k])
@@ -14127,13 +14132,13 @@ int dc_shadow_blob_hide(int textured, const float *fx, const float *fy, const fl
                 ndepth++;
                 if (ndepth <= 40) {
                     const uint8_t *rr = memory_get_ram_ptr();
-                    fprintf(stderr, "blobnodepth: #%ld размер=%.0fx%.0f центр=%.0f,%.0f w=%.1f,%.1f,%.1f цвет=%d tex=%u интерфейс=%d экран=%d режим=%d%c",
+                    fprintf(stderr, "blobnodepth: #%ld size=%.0fx%.0f center=%.0f,%.0f w=%.1f,%.1f,%.1f color=%d tex=%u ui=%d screen=%d mode=%d%c",
                             ndepth, x1 - x0, y1 - y0, (x0 + x1) * 0.5f, (y0 + y1) * 0.5f, w[0], w[1], w[2], r, tex,
                             g_sw_blob_ui, rr ? rr[0xB7878] : -1, rr ? rr[0xB92C8] : -1, 10);
                 }
             }
             if ((nall % 240) == 1)
-                fprintf(stderr, "blobmiss: кандидатов %ld, не спрятано: режим теней выкл %ld, без глубины %ld; спрятано только новым правилом %ld%c",
+                fprintf(stderr, "blobmiss: %ld candidates, not hidden: shadow mode off %ld, no depth %ld; hidden only by the new rule %ld%c",
                         nall, nmode, ndepth, nlive, 10);
         }
     }
@@ -14162,8 +14167,8 @@ int dc_shadow_blob_hide(int textured, const float *fx, const float *fy, const fl
         static long n = 0;
         if (n < 150 && (x1 - x0) < 260.f && (y1 - y0) < 260.f) {
             n++;
-            fprintf(stderr, "blob?: %s размер=%.0fx%.0f центр=%.0f,%.0f w=%.0f цвет=%d,%d,%d tex=%u%c",
-                    textured ? "тексту" : "плоский", x1 - x0, y1 - y0,
+            fprintf(stderr, "blob?: %s size=%.0fx%.0f center=%.0f,%.0f w=%.0f color=%d,%d,%d tex=%u%c",
+                    textured ? "textured" : "flat", x1 - x0, y1 - y0,
                     (x0 + x1) * 0.5f, (y0 + y1) * 0.5f, cw, r, g, b, tex, 10);
         }
     }
@@ -14179,7 +14184,7 @@ int dc_shadow_blob_hide(int textured, const float *fx, const float *fy, const fl
     { static int big = -1; if (big < 0) { const char *e = getenv("DC_SHADOW_BLOB_BIG"); big = (e && *e == '0') ? 0 : 1; }
       if (((x1 - x0) > 260.f || (y1 - y0) > 260.f) && !(big && (tex & 0x7Fu) == 0x5Eu)) return 0; }
     if (lg) { static long h = 0; if ((++h % 120) == 1)
-        fprintf(stderr, "blob: диск спрятан (%.0fx%.0f, w=%.0f, цвет %d)%c", x1 - x0, y1 - y0, cw, r, 10); }
+        fprintf(stderr, "blob: disc hidden (%.0fx%.0f, w=%.0f, color %d)%c", x1 - x0, y1 - y0, cw, r, 10); }
     (void)mx; (void)tex;
     return 1;
 }
@@ -14239,7 +14244,7 @@ static void shwhy(int k) {
     if (!on) return;
     static long wn = 0;
     if ((++wn % 120) == 1)
-        fprintf(stderr, "shadowwhy: без-окклюдеров %ld без-мира %ld без-ламп %ld сцена %ld без-камеры %ld ок %ld%c",
+        fprintf(stderr, "shadowwhy: no-occluders %ld no-world %ld no-lamps %ld scene %ld no-camera %ld ok %ld%c",
                 s_shwhy[0], s_shwhy[1], s_shwhy[2], s_shwhy[3], s_shwhy[4], s_shwhy[5], 10);
 }
 
@@ -14604,7 +14609,7 @@ int pt_shx_take(float *dst, int maxVerts, int vfloats) {
         }
     }
     if (lg && (++nk % 120) == 1)
-        fprintf(stderr, "shx: проход %d (в потоке %d, сейчас %d) — треугольников %d | всего: за краем %ld, спиной %ld, промах пула %ld, переполнение %ld, не персонаж %ld%c",
+        fprintf(stderr, "shx: pass %d (in the stream %d, now %d) - %d triangles | in all: past the edge %ld, back-facing %ld, pool miss %ld, overflow %ld, not a character %ld%c",
                 L ? L->pass : -1, want, g_dc_pass_id, nv / 3, s_shx_cnt[0], s_shx_cnt[1], s_shx_cnt[2], s_shx_cnt[3], s_shx_cnt[4], 10);
     return nv;
 }
@@ -14741,13 +14746,13 @@ static void tlamp_refresh(void) {
         n++;
     }
     s_tlamp_n = n;
-    fprintf(stderr, "texlamp: ламп-текстур %d (треугольников «светится» %d, из них полупрозрачных — не лампы: %d; коды:", n, nmark, nsemi);
+    fprintf(stderr, "texlamp: %d texture lamps (%d 'glows' triangles, of them semi-transparent - not lamps: %d; codes:", n, nmark, nsemi);
     for (int c = 0; c < 256; c++) if (codes[c >> 5] & (1u << (c & 31))) fprintf(stderr, " %02X", c);
-    fprintf(stderr, ") — тени от них%s%c", tlamp_on() ? "" : " (выкл: DC_SHADOW_TEXLAMPS=0)", 10);
+    fprintf(stderr, ") - shadows from them%s%c", tlamp_on() ? "" : " (off: DC_SHADOW_TEXLAMPS=0)", 10);
     for (int i = 0; i < n && i < 12; i++) {
         const float a = sqrtf(s_tl_A[i][0]*s_tl_A[i][0] + s_tl_A[i][1]*s_tl_A[i][1] + s_tl_A[i][2]*s_tl_A[i][2]);
         const float b = sqrtf(s_tl_B[i][0]*s_tl_B[i][0] + s_tl_B[i][1]*s_tl_B[i][1] + s_tl_B[i][2]*s_tl_B[i][2]);
-        fprintf(stderr, "  T%02d центр %.0f,%.0f,%.0f площадь %.0f форма %.0f x %.0f радиус %.0f%c", i,
+        fprintf(stderr, "  T%02d center %.0f,%.0f,%.0f area %.0f shape %.0f x %.0f radius %.0f%c", i,
                 s_tlamp[i].p[0], s_tlamp[i].p[1], s_tlamp[i].p[2], s_tl_area[i], 2.f * a, 2.f * b, s_tlamp[i].rad, 10);
     }
 }
@@ -14802,6 +14807,109 @@ static int tlamp_patch(int hd, const float at[3], float pmax, float P[3], float 
     for (int q = 0; q < 3; q++) { P[q] = c[q] + e1[q] * s + e2[q] * t; A[q] = e1[q] * pa; B[q] = e2[q] * pb; }
     return 1;
 }
+/* ===== СТАБИЛЬНЫЕ ТЕНИ (23.10.2026) ===== Игрок, слот 1 (ST10D, Гейл у сетки): «смотришь на Гейла, на тень под ним, и
+ * идёшь Региной вперёд и назад - видно, что тень меняется. Сделай, чтобы тени были стабильны на всей комнате и видны из самого
+ * дальнего угла, а не рандомно пропадают и меняются». Лампы теней и их слои зависели от того, где стоит Регина: (1) СЛИЯНИЕ шло
+ * по углу из её точки (tgt), центр группы - по весам от расстояний до персонажей: место слоя лампы Гейла ходило 565,-3301,-384
+ * -> 2097,-3159,-1240 -> 2431,-3191,-1367 (к T02 подмешивались T01 и T00), сила 1.6 -> 5.9 -> 4.8; (2) три слоя доставались
+ * трём сильнейшим лампам у кого угодно - лампы у Регины вытесняли лампу Гейла, и его тень гасла. Теперь (stable): группы - по
+ * месту самих ламп на всю комнату (лампа ближе merge_d к сильнейшей - в её группе, центр - по их силе), слои - сначала главной
+ * лампе каждого персонажа (Регине первой), затем вторым (у других персонажей раньше, чем у Регины: её тень и так меняется на
+ * ходу, а тень стоящего не должна), доля света - в том же порядке; пятно большой лампы-текстуры - над тем персонажем, ради
+ * кого взят слой. DC_SHADOW_STABLE=0 - как было. */
+typedef struct { int nl, n, head[GLAMP_MAX], grp[GLAMP_MAX], nm[GLAMP_MAX];
+                 float c[GLAMP_MAX][3], mn[GLAMP_MAX][3], mx[GLAMP_MAX][3], rad[GLAMP_MAX], pow[GLAMP_MAX]; } ShStGroups;
+static void sh_static_groups(const GameLamp *LMP, int n, float md, ShStGroups *G) {
+    if (n > GLAMP_MAX) n = GLAMP_MAX;
+    if (n < 0) n = 0;
+    int ord[GLAMP_MAX]; float pw[GLAMP_MAX], sw[GLAMP_MAX];
+    for (int i = 0; i < n; i++) { ord[i] = i; pw[i] = shadow_lamp_pow(&LMP[i]); }
+    for (int a = 0; a < n - 1; a++)                                   /* сильнейшие - головы групп */
+        for (int b = a + 1; b < n; b++)
+            if (pw[ord[b]] > pw[ord[a]] || (pw[ord[b]] == pw[ord[a]] && ord[b] < ord[a])) { const int t = ord[a]; ord[a] = ord[b]; ord[b] = t; }
+    G->nl = n; G->n = 0;
+    for (int q = 0; q < n; q++) {
+        const int i = ord[q]; const GameLamp *L = &LMP[i];
+        int g = -1;
+        if (md > 0.f)
+            for (int k = 0; k < G->n; k++) {
+                const float *H = LMP[G->head[k]].p;
+                const float dx = L->p[0] - H[0], dy = L->p[1] - H[1], dz = L->p[2] - H[2];
+                if (dx*dx + dy*dy + dz*dz <= md * md) { g = k; break; }
+            }
+        if (g < 0) {
+            g = G->n++;
+            G->head[g] = i; G->nm[g] = 0; G->pow[g] = 0.f; G->rad[g] = 0.f; sw[g] = 0.f;
+            for (int k = 0; k < 3; k++) { G->c[g][k] = 0.f; G->mn[g][k] = G->mx[g][k] = L->p[k]; }
+        }
+        G->grp[i] = g; G->nm[g]++;
+        const float w = pw[i] > 1e-4f ? pw[i] : 1e-4f;
+        for (int k = 0; k < 3; k++) {
+            G->c[g][k] += L->p[k] * w;
+            if (L->p[k] < G->mn[g][k]) G->mn[g][k] = L->p[k];
+            if (L->p[k] > G->mx[g][k]) G->mx[g][k] = L->p[k];
+        }
+        sw[g] += w;
+        if (L->on) G->pow[g] += pw[i];
+        const float r = L->rad > 0.f ? L->rad : 3000.f;
+        if (r > G->rad[g]) G->rad[g] = r;
+    }
+    for (int g = 0; g < G->n; g++) for (int k = 0; k < 3; k++) G->c[g][k] /= sw[g];
+}
+/* очередь групп кадра (stable): у каждого персонажа его группы по весу (у группы со слоем - запас x1.3), место r в этом ряду
+ * даёт ключ 2r + t: t = 0 для главной лампы Регины и для вторых и дальше у других персонажей, t = 1 - наоборот; ключ группы -
+ * наименьший по персонажам (меньше - раньше) */
+static void sh_stable_keys(int nc, int nch, float cwc[12][GLAMP_MAX], const int *lk, int nlay, int scene, int *key) {
+    float hw[GLAMP_MAX];
+    for (int k = 0; k < nc; k++) { hw[k] = 1.f; for (int L = 0; L < nlay; L++) if (lk && lk[L] == k) { hw[k] = 1.3f; break; } }
+    for (int c = 0; c < nch && c < 12; c++) {
+        int ord[GLAMP_MAX], no = 0;
+        for (int k = 0; k < nc; k++) if (cwc[c][k] > 0.f) ord[no++] = k;
+        for (int a = 0; a < no - 1; a++)
+            for (int b = a + 1; b < no; b++)
+                if (cwc[c][ord[b]] * hw[ord[b]] > cwc[c][ord[a]] * hw[ord[a]]) { const int t = ord[a]; ord[a] = ord[b]; ord[b] = t; }
+        const int reg = (c == 0 && !scene);
+        for (int r = 0; r < no; r++) {
+            const int kk = r * 2 + ((r == 0) ? (reg ? 0 : 1) : (reg ? 1 : 0));
+            if (kk < key[ord[r]]) key[ord[r]] = kk;
+        }
+    }
+}
+/* карта лампы (stable) - строго вниз, на весь круг, докуда видна её тень (радиус x fade), на уровне ног персонажей под ней:
+ * от того, где Регина, не зависит. Прежняя карта целилась в персонажей и концы их теней, и её ось ходила за Региной (у лампы
+ * Гейла T06 -0.02,0.65,0.76 -> 0.63,0.67,0.39 за пару шагов): Гейл съезжал к краю карты, где тень гаснет, и тексели его тени
+ * менялись. Высота - до самых низких ног в этом круге, ступенями по 250 (на ровном полу не меняется) */
+static void sh_down_frustum(const float L[3], float rad, float fade, float tan_min, const float *cx, const float *cy, const float *cz,
+                            int nch, float aim[3], float *znear, float *zfar, float *th) {
+    const float R = rad * fade;
+    float h = 0.f;
+    for (int c = 0; c < nch; c++) {
+        const float dx = cx[c] - L[0], dz = cz[c] - L[2];
+        if (dx*dx + dz*dz > R * R) continue;
+        const float d = cy[c] - L[1];                          /* ноги ниже лампы (Y вниз) */
+        if (d > h) h = d;
+    }
+    if (h <= 0.f) h = 1200.f;
+    h = ceilf(h / 250.f) * 250.f;
+    if (h < 500.f) h = 500.f;
+    float t = R / h;
+    const float tmax = tanf(1.396f);                           /* не шире 160°, как прежняя */
+    if (t < tan_min) t = tan_min;
+    if (t > tmax) t = tmax;
+    aim[0] = L[0]; aim[1] = L[1] + 1000.f; aim[2] = L[2];
+    *znear = 60.f;
+    *zfar = sqrtf(h * h * (1.f + t * t)) * 1.15f + 300.f;
+    *th = t;
+}
+/* персонаж, ради которого группа k в кадре (наибольший вес); prev - прежний (номер слота), держится, пока его вес не меньше
+ * 2/3 наибольшего */
+static int sh_owner(int k, int nch, float cwc[12][GLAMP_MAX], const int *chs, int prev) {
+    int best = -1; float bw = 0.f;
+    for (int c = 0; c < nch && c < 12; c++) if (cwc[c][k] > bw) { bw = cwc[c][k]; best = c; }
+    if (best < 0) return -1;
+    for (int c = 0; c < nch && c < 12; c++) if (chs[c] == prev && cwc[c][k] >= bw * 0.667f) return c;
+    return best;
+}
 void dc_shadow_draw(void) {
     s_shcl_n = 0;
     extern void dcvk_shadow_set(const float *vp, const float *par, const float *lpos,
@@ -14849,7 +14957,7 @@ void dc_shadow_draw(void) {
     const GameLamp *LMP = tex ? s_tlamp : s_glamp;
     const int NLMP = tex ? s_tlamp_n : s_glamp_n;
     { static int lt = -1; if (tex != lt) { lt = tex;
-          fprintf(stderr, "shadow: лампы — %s%c", tex ? "ТЕКСТУРЫ «светится» комнаты (их форма и размер)" : "таблица игры", 10); } }
+          fprintf(stderr, "shadow: lamps - %s%c", tex ? "the room's 'glows' TEXTURES (their shape and size)" : "the game's table", 10); } }
     const int moon = dc_moon_now();                 /* 25.09 вечер: луна — и там, где ламп нет вовсе */
     if (NLMP <= 0 && !moon) { shwhy(2); return; }
 
@@ -14859,10 +14967,10 @@ void dc_shadow_draw(void) {
     const float *R = Rb, *TR = TRb;
     { static int lastgc = -1;
       if (shgc != lastgc) { lastgc = shgc;
-          fprintf(stderr, "shadow: камера кадра — %s%c", shgc == 4 ? "ИГРЫ (сцена на движке; комнату рисует игра, рабочая камера игры)"
-                  : shgc == 3 ? "ИГРЫ (сцена на движке; комнату рисует игра, матрица из GTE)"
-                  : shgc == 2 ? "ИГРЫ (сцена на движке; комнату рисует игра, матрица с секций)"
-                  : shgc ? "ИГРЫ (сцена на движке, наша комната)" : "наша", 10); } }
+          fprintf(stderr, "shadow: frame camera - %s%c", shgc == 4 ? "the GAME's (an engine scene; the game draws the room, the game's working camera)"
+                  : shgc == 3 ? "the GAME's (an engine scene; the game draws the room, matrix from the GTE)"
+                  : shgc == 2 ? "the GAME's (an engine scene; the game draws the room, matrix from the sections)"
+                  : shgc ? "the GAME's (an engine scene, our room)" : "ours", 10); } }
 
     /* «видовое -> комната»: view = D*R*p + (D*TR + T), значит p = inv(D*R)*(view - c) */
     float DR[9];
@@ -14924,19 +15032,20 @@ void dc_shadow_draw(void) {
     /* персонажи для выбора ламп и для карты (25.09, дальность): Регина + занятые слоты актёров; рост — оценка сверху */
     const int reach = shadow_reach_on();
     float chx[12], chy[12], chz[12], chh[12]; int nch = 0;
-    chx[nch] = px; chy[nch] = py; chz[nch] = pz; chh[nch] = 1900.f; nch++;
+    int chs[12];                               /* 23.10: кто это - -1 Регина, номер слота актёра, 100+ группа заслонивших сцены */
+    chx[nch] = px; chy[nch] = py; chz[nch] = pz; chh[nch] = 1900.f; chs[nch] = -1; nch++;
     if (scene_chars) {                         /* 25.09: сцена — все группы заслонивших (ноги = наибольший y, ось вниз) */
         nch = 0;
         for (int c = 0; c < s_ocl_cnt && nch < 12; c++) {
             chx[nch] = s_ocl_c[c][0]; chz[nch] = s_ocl_c[c][2]; chy[nch] = s_ocl_hi[c][1];
             float hh = s_ocl_hi[c][1] - s_ocl_lo[c][1] + 150.f; if (hh < 600.f) hh = 600.f;
-            chh[nch] = hh; nch++;
+            chh[nch] = hh; chs[nch] = 100 + c; nch++;
         }
         { static long nl = 0;
           if (++nl == 1 || nl % 600 == 0) {
-              fprintf(stderr, "shadow: сцена — персонажи по заслонившим: %d%c", nch, 10);
+              fprintf(stderr, "shadow: scene - characters by occluders: %d%c", nch, 10);
               for (int c = 0; c < nch; c++)
-                  fprintf(stderr, "   #%d у %.0f,%.0f,%.0f рост %.0f%c", c, chx[c], chy[c], chz[c], chh[c], 10); } }
+                  fprintf(stderr, "   #%d at %.0f,%.0f,%.0f height %.0f%c", c, chx[c], chy[c], chz[c], chh[c], 10); } }
     } else if (reach)
         for (int k = 0; k < 10 && nch < 12; k++) {
             const uint32_t a = 0xB7ACCu + (uint32_t)k * 608u;
@@ -14945,11 +15054,13 @@ void dc_shadow_draw(void) {
             chy[nch] = (float)rrm_s16(ram, a + 34u);
             chz[nch] = (float)rrm_s16(ram, a + 36u);
             chh[nch] = (ram[a + 80u] == 0x0A) ? 6500.f : 2200.f;   /* тиранозавр (вид +80 = 0x0A) выше всех */
-            nch++;
+            chs[nch] = k; nch++;
         }
     /* лампы: включённые, в чьём радиусе стоит персонаж и которые выше него (25.09: любой персонаж, не только Регина) */
     int idx[GLAMP_MAX]; float wgt[GLAMP_MAX], dst[GLAMP_MAX];
     int nc = 0;
+    const int stable = dc_shadow_par(SHP_STABLE) > 0.5f;   /* 23.10: см. «СТАБИЛЬНЫЕ ТЕНИ» */
+    float cwl[12][GLAMP_MAX]; memset(cwl, 0, sizeof cwl);   /* 23.10: вес лампы для каждого персонажа */
     /* ===== ЛАМПЫ КАК У ИГРЫ (25.09 поздно) ===== Игрок: «лампы точно корректны? смотрю, как освещаются вертексы
      * (оригинальной системой псевдоосвещения), и тени от наших ламп с этим не совпадают». Игра (func_8004A910 ->
      * func_8004AB30 на объект) освещает персонажа так: слот 0 — общий направленный свет 1 (флаг +6 бит 0) ИЛИ ПЕРВАЯ ПО ПОРЯДКУ
@@ -14988,6 +15099,7 @@ void dc_shadow_draw(void) {
                         float br = L->col[0]; if (L->col[1] > br) br = L->col[1]; if (L->col[2] > br) br = L->col[2];
                         const float w = (br / 128.f) * (1.f - d / L->rad) * (L->s14 > 0.f ? L->s14 / 4096.f : 1.f);
                         if (w > gw[i]) { gw[i] = w; gd[i] = d; }
+                        if (w > cwl[c][i]) cwl[c][i] = w;
                         if (w > 0.f) gin[i] = 1;
                     }
                     break;
@@ -15009,6 +15121,7 @@ void dc_shadow_draw(void) {
                         float br = L->col[0]; if (L->col[1] > br) br = L->col[1]; if (L->col[2] > br) br = L->col[2];
                         const float w = (br / 128.f) * 1e-3f * k * (L->s14 > 0.f ? L->s14 / 4096.f : 1.f);
                         if (w > gw[bi]) { gw[bi] = w; gd[bi] = bd; }
+                        if (w > cwl[c][bi]) cwl[c][bi] = w;
                         if (k > gx[bi]) gx[bi] = k;
                     }
                 }
@@ -15027,6 +15140,7 @@ void dc_shadow_draw(void) {
         if (!L->on) continue;
         float rad = (L->rad > 0.f) ? L->rad * radk : 3000.f;
         float bk = -1.f, bd = 0.f;
+        float br = L->col[0]; if (L->col[1] > br) br = L->col[1]; if (L->col[2] > br) br = L->col[2];
         for (int c = 0; c < nch; c++) {
             float dx = L->p[0]-chx[c], dy = L->p[1]-chy[c], dz = L->p[2]-chz[c];
             float d = sqrtf(dx*dx + dy*dy + dz*dz);
@@ -15034,9 +15148,9 @@ void dc_shadow_draw(void) {
             if (L->p[1] > chy[c] - 150.f) continue;
             float k = 1.f - d / rad; if (k < 0.f) k = 0.f;
             if (k > bk) { bk = k; bd = d; }
+            if (c < 12) cwl[c][i] = (br / 128.f) * k;
         }
         if (bk < 0.f) continue;
-        float br = L->col[0]; if (L->col[1] > br) br = L->col[1]; if (L->col[2] > br) br = L->col[2];
         idx[nc] = i; dst[nc] = bd; wgt[nc] = (br / 128.f) * bk; nc++;
     }
     if (nc <= 0 && !moon) { shwhy(2); return; }
@@ -15058,6 +15172,34 @@ void dc_shadow_draw(void) {
     float clpow[GLAMP_MAX];                          /* 27.09 (2): сила света группы (сумма её ламп) — для доли света */
     int clnm[GLAMP_MAX];
     int ncl = 0;
+    float cwc[12][GLAMP_MAX];                        /* 23.10 (stable): вес группы для каждого персонажа */
+    memset(cwc, 0, sizeof cwc);
+    if (stable) {
+        /* 23.10: группы - по месту самих ламп (sh_static_groups); в группе этого кадра - её лампы-кандидаты (вес для персонажа -
+         * наибольший из её ламп), а место, радиус, сила и размах - всей группы: от того, где Регина, не зависят */
+        static ShStGroups G;
+        const float md = dc_shadow_par(SHP_MERGE) > 0.f ? dc_shadow_par(SHP_MERGE_D) : 0.f;
+        sh_static_groups(LMP, NLMP, md, &G);
+        { static int ln = -1, lg = -1; static float lmd = -1.f;
+          if (G.nl != ln || G.n != lg || md != lmd) { ln = G.nl; lg = G.n; lmd = md;
+              fprintf(stderr, "shadow: lamp groups by the lamps' own places (stable) - %d lamps -> %d groups (one shadow within %.0f units of the strongest)%c",
+                      G.nl, G.n, md, 10); } }
+        int gk[GLAMP_MAX]; for (int g = 0; g < GLAMP_MAX; g++) gk[g] = -1;
+        for (int a = 0; a < nc; a++) {                  /* кандидаты уже по весу: голова кадра - сильнейшая лампа-кандидат группы */
+            const int li = idx[a]; const float wa = wgt[a], da = dst[a];
+            const int g = (li >= 0 && li < G.nl) ? G.grp[li] : -1;
+            if (g < 0) continue;
+            int k = gk[g];
+            if (k < 0) {
+                if (ncl >= GLAMP_MAX) continue;
+                k = gk[g] = ncl++;
+                idx[k] = li; wgt[k] = wa; dst[k] = da;
+                for (int q = 0; q < 3; q++) { clp[k][q] = G.c[g][q]; clmin[k][q] = G.mn[g][q]; clmax[k][q] = G.mx[g][q]; }
+                clw[k] = wa > 1e-4f ? wa : 1e-4f; clrad[k] = G.rad[g]; clnm[k] = G.nm[g]; clpow[k] = G.pow[g];
+            }
+            for (int c = 0; c < nch && c < 12; c++) if (cwl[c][li] > cwc[c][k]) cwc[c][k] = cwl[c][li];
+        }
+    } else
     {   const float mang = dc_shadow_par(SHP_MERGE) * 3.14159265f / 180.f;
         const float cmin = cosf(mang);
         for (int a = 0; a < nc; a++) {
@@ -15111,6 +15253,8 @@ void dc_shadow_draw(void) {
     float v2pow[4] = { 0.f, 0.f, 0.f, 0.f }, v2ax[16], v2lp[32], v2lw[8];
     int v2mask = 0, v2nlo = 0;
     static int   s_v2on[4], s_v2hd[4], s_v2nm[4], s_v2pt[4], s_v2room = -99, s_v2tex = -1;
+    static int   s_v2own[4] = { -2, -2, -2, -2 }; static float s_v2anc[4][3];   /* 23.10 (stable): чей слой и где пятно */
+    int shk[8] = { 0 };                              /* 23.10: какие группы в доле света (строка DC_SHADOW_TRACE) */
     static float s_v2f[4], s_v2p[4][3], s_v2r[4], s_v2w[4], s_v2mn[4][3], s_v2mx[4][3];
     for (int q = 0; q < 16; q++) v2ax[q] = 0.f;
     if (v2) {
@@ -15119,7 +15263,7 @@ void dc_shadow_draw(void) {
         const int room = dc_room_effective();
         if (room != s_v2room || tex != s_v2tex) {           /* другая комната / другой источник ламп — слои с нуля */
             s_v2room = room; s_v2tex = tex;
-            for (int L = 0; L < 4; L++) { s_v2on[L] = 0; s_v2f[L] = 0.f; }
+            for (int L = 0; L < 4; L++) { s_v2on[L] = 0; s_v2f[L] = 0.f; s_v2own[L] = -2; }
         }
         int nlay = moon ? 3 : 4; if (maxl < nlay) nlay = maxl; if (nlay < 1) nlay = 1;
         for (int L = nlay; L < 4; L++) { s_v2on[L] = 0; s_v2f[L] = 0.f; }
@@ -15137,13 +15281,17 @@ void dc_shadow_draw(void) {
         }
         /* цель — nlay сильнейших; у кого слой уже есть — с запасом ×1.3 (равные лампы не перещёлкиваются) */
         unsigned char want[GLAMP_MAX]; memset(want, 0, sizeof want);
+        /* 23.10 (stable): раньше - очередь по персонажам (sh_stable_keys), внутри неё - сильнейшие */
+        int key[GLAMP_MAX];
+        for (int k = 0; k < nc; k++) key[k] = stable ? (1 << 20) : 0;
+        if (stable) sh_stable_keys(nc, nch, cwc, lk, nlay, scene_chars, key);
         for (int t = 0; t < nlay; t++) {
             int best = -1; float bw = 0.f;
             for (int k = 0; k < nc; k++) {
                 if (want[k]) continue;
                 float w = wgt[k];
                 for (int L = 0; L < nlay; L++) if (lk[L] == k) { w *= 1.3f; break; }
-                if (best < 0 || w > bw) { best = k; bw = w; }
+                if (best < 0 || key[k] < key[best] || (key[k] == key[best] && w > bw)) { best = k; bw = w; }
             }
             if (best < 0) break;
             want[best] = 1;
@@ -15165,7 +15313,7 @@ void dc_shadow_draw(void) {
             if (has) continue;
             int fl = -1; for (int L = 0; L < nlay; L++) if (!s_v2on[L]) { fl = L; break; }
             if (fl < 0) break;
-            s_v2on[fl] = 1; s_v2f[fl] = FSTEP; lk[fl] = k;
+            s_v2on[fl] = 1; s_v2f[fl] = FSTEP; lk[fl] = k; s_v2own[fl] = -2;
             for (int q = 0; q < 3; q++) { s_v2p[fl][q] = clp[k][q]; s_v2mn[fl][q] = clmin[k][q]; s_v2mx[fl][q] = clmax[k][q]; }
             s_v2r[fl] = clrad[k]; s_v2w[fl] = clpow[k]; s_v2hd[fl] = idx[k]; s_v2nm[fl] = clnm[k];
             shadow_reach_reset(GLAMP_MAX + fl);             /* ось и раскрытие карты слоя — с этой лампы заново */
@@ -15173,6 +15321,15 @@ void dc_shadow_draw(void) {
         n = 0;
         for (int L = 0; L < nlay; L++) if (s_v2on[L]) n = L + 1;
         if (moon) n = nlay;                                 /* луна — следующий слой после ламп */
+        /* 23.10 (stable): чей слой - пятно большой лампы-текстуры над этим персонажем (у Регины - сглаженная tgt, как было) */
+        for (int L = 0; L < nlay; L++) {
+            if (!s_v2on[L]) continue;
+            const int oc = (stable && lk[L] >= 0) ? sh_owner(lk[L], nch, cwc, chs, s_v2own[L]) : -1;
+            if (oc < 0 && stable && s_v2own[L] != -2) continue;   /* ни у кого веса нет (лампа уходит) - пятно где было */
+            s_v2own[L] = oc >= 0 ? chs[oc] : -1;
+            const int regi = (oc < 0 || (oc == 0 && !scene_chars));
+            for (int q = 0; q < 3; q++) s_v2anc[L][q] = regi ? tgt[q] : (q == 0 ? chx[oc] : q == 1 ? chy[oc] - 700.f : chz[oc]);
+        }
         for (int L = 0; L < n; L++) {
             for (int q = 0; q < 16; q++) vp[L*16+q] = 0.f;  /* пустой слой: в его карту ничего не ляжет */
             par[L*4+0] = 0.f; par[L*4+1] = 1.f; par[L*4+2] = 1.f; par[L*4+3] = 0.f;
@@ -15181,7 +15338,7 @@ void dc_shadow_draw(void) {
             if (!s_v2on[L]) continue;
             float Lr[3] = { s_v2p[L][0], s_v2p[L][1], s_v2p[L][2] };
             float PA[3], PB[3];                             /* большая лампа-текстура — пятно над персонажем (tlamp_patch) */
-            const int patch = tex ? tlamp_patch(s_v2hd[L], tgt, texmax, Lr, PA, PB) : 0;
+            const int patch = tex ? tlamp_patch(s_v2hd[L], stable ? s_v2anc[L] : tgt, texmax, Lr, PA, PB) : 0;
             s_v2pt[L] = patch;
             const float rad = s_v2r[L];
             float softi = soft;                             /* группа ламп — источник пошире */
@@ -15195,6 +15352,11 @@ void dc_shadow_draw(void) {
             float znear = dist * 0.2f; if (znear < 60.f) znear = 60.f;
             float zfar = dist + rad, th = tanhalf;
             float aim[3] = { tgt[0], tgt[1], tgt[2] };
+            if (stable) {                                   /* 23.10: строго вниз на весь круг тени (sh_down_frustum) */
+                sh_down_frustum(Lr, rad, fade, tanhalf, chx, chy, chz, nch, aim, &znear, &zfar, &th);
+                s_rf_half[GLAMP_MAX + L] = atanf(th); s_rf_ax[GLAMP_MAX + L][0] = 0.f; s_rf_ax[GLAMP_MAX + L][1] = 1.f; s_rf_ax[GLAMP_MAX + L][2] = 0.f;
+                s_rf_seen[GLAMP_MAX + L] = 0;                   /* к прежней карте (stable=0) - с нуля */
+            } else
             if (reach) shadow_reach_frustum(GLAMP_MAX + L, Lr, rad, radk, fade, tanhalf, chx, chy, chz, chh, nch, aim, &znear, &zfar, &th);
             shadow_build_vp(Lr, aim, znear, zfar, th, V2R, &vp[L*16]);
             /* полуоси полутени в плоскости карты (базис как в shadow_build_vp): лампа-текстура — её собственные полуоси */
@@ -15225,12 +15387,23 @@ void dc_shadow_draw(void) {
             v2mask |= 1 << L;
             for (int q = 0; q < 3; q++) { s_shcl_min[L][q] = s_v2mn[L][q]; s_shcl_max[L][q] = s_v2mx[L][q]; }
         }
-        /* лампы без своего слоя — только в долю света (до 8 сильнейших) */
-        for (int k = 0; k < nc && v2nlo < 8; k++) {
+        /* лампы без своего слоя — только в долю света (до 8 сильнейших); 23.10 (stable) - в той же очереди по персонажам */
+        int so[GLAMP_MAX];
+        for (int k = 0; k < nc; k++) so[k] = k;
+        if (stable)
+            for (int a = 0; a < nc - 1; a++)
+                for (int b = a + 1; b < nc; b++)
+                    if (key[so[b]] < key[so[a]] || (key[so[b]] == key[so[a]] && wgt[so[b]] > wgt[so[a]])) { const int t = so[a]; so[a] = so[b]; so[b] = t; }
+        for (int qk = 0; qk < nc && v2nlo < 8; qk++) {
+            const int k = so[qk];
             int inl = 0; for (int L = 0; L < nlay; L++) if (s_v2on[L] && lk[L] == k) inl = 1;
             if (inl) continue;
             float lpk[3] = { clp[k][0], clp[k][1], clp[k][2] }, PA[3], PB[3];
-            if (tex) (void)tlamp_patch(idx[k], tgt, texmax, lpk, PA, PB);   /* большая — её ближняя часть */
+            float anc[3] = { tgt[0], tgt[1], tgt[2] };
+            if (stable) { const int oc = sh_owner(k, nch, cwc, chs, -9);
+                          if (oc > 0 || (oc == 0 && scene_chars)) { anc[0] = chx[oc]; anc[1] = chy[oc] - 700.f; anc[2] = chz[oc]; } }
+            if (tex) (void)tlamp_patch(idx[k], anc, texmax, lpk, PA, PB);   /* большая — её ближняя часть */
+            shk[v2nlo] = k;
             float lv[3]; sh_room2view(R, TR, D, T, lpk, lv);
             v2lp[v2nlo*4+0] = lv[0]; v2lp[v2nlo*4+1] = lv[1]; v2lp[v2nlo*4+2] = lv[2]; v2lp[v2nlo*4+3] = clrad[k] * fade;
             v2lw[v2nlo] = clpow[k] * ((gamerule && idx[k] >= 0 && idx[k] < GLAMP_MAX) ? s_lfade[idx[k]] : 1.f);
@@ -15321,13 +15494,22 @@ void dc_shadow_draw(void) {
                 m[0] = hx / hl * cosf(ec); m[1] = -sinf(ec); m[2] = hz / hl * cosf(ec);
             } }
         const float Q = 1500.f, Dm = 30000.f;
-        const float F[3] = { floorf(chx[0] / Q + 0.5f) * Q, chy[0], floorf(chz[0] / Q + 0.5f) * Q };
+        /* 23.10 (stable): опора - середина всех персонажей, и в карту - все в 16000 от неё (было - Регина и всё в 9000 от неё: тот,
+         * кто дальше, оставался без лунной тени, а опора ползла за Региной) */
+        float Fx = chx[0], Fz = chz[0];
+        if (stable && nch > 1) {
+            float x0 = chx[0], x1 = chx[0], z0 = chz[0], z1 = chz[0];
+            for (int c = 1; c < nch; c++) { x0 = fminf(x0, chx[c]); x1 = fmaxf(x1, chx[c]); z0 = fminf(z0, chz[c]); z1 = fmaxf(z1, chz[c]); }
+            if (x1 - x0 < 30000.f && z1 - z0 < 30000.f) { Fx = 0.5f * (x0 + x1); Fz = 0.5f * (z0 + z1); }
+        }
+        const float F[3] = { floorf(Fx / Q + 0.5f) * Q, chy[0], floorf(Fz / Q + 0.5f) * Q };
+        const float mcut = stable ? 16000.f : 9000.f;
         const float Lm[3] = { F[0] + m[0] * Dm, F[1] + m[1] * Dm, F[2] + m[2] * Dm };
         const float ax[3] = { -m[0], -m[1], -m[2] };
         float need = 0.f, dmin = 1e30f, dmax = 0.f; int np = 0;
         for (int c = 0; c < nch; c++) {
             const float ddx = chx[c] - F[0], ddz = chz[c] - F[2];
-            if (ddx*ddx + ddz*ddz > 9000.f*9000.f) continue;
+            if (ddx*ddx + ddz*ddz > mcut * mcut) continue;
             float t = chh[c] / fmaxf(-m[1], 0.05f); if (t > 6000.f) t = 6000.f;
             const float P[3][3] = { { chx[c], chy[c], chz[c] }, { chx[c], chy[c] - chh[c], chz[c] },
                                     { chx[c] - m[0] * t, chy[c], chz[c] - m[2] * t } };
@@ -15403,9 +15585,9 @@ void dc_shadow_draw(void) {
             n++;
             { static int lr = -2; static long nl = 0; const int rr2 = dc_room_effective();
               if (rr2 != lr || (++nl % 1800) == 0) { lr = rr2;
-                  fprintf(stderr, "shadow: ЛУНА в комнате %d (%s) — к луне %.2f,%.2f,%.2f (высота %.0f°, %s), сила %.2f, поле ±%.0f ед.%c",
+                  fprintf(stderr, "shadow: MOON in room %d (%s) - towards the moon %.2f,%.2f,%.2f (elevation %.0f deg, %s), strength %.2f, field +-%.0f units%c",
                           rr2, dc_room_name(rr2), m[0], m[1], m[2], asinf(-m[1]) * 57.29578f,
-                          s_gdir_on ? "по общему свету комнаты" : "свет комнаты не задан — своё",
+                          s_gdir_on ? "by the room's ambient light" : "the room's light is not set - our own",
                           par[i*4+0], s_mw, 10); } }
         }
     }
@@ -15454,16 +15636,33 @@ void dc_shadow_draw(void) {
         static long nl2 = 0; static int lastm = -1;
         if (v2mask != lastm || (++nl2 % 600) == 1) {
             lastm = v2mask;
-            fprintf(stderr, "shadow v2: слоёв ламп %d (маска %X)%s, ламп только в долю света %d, общий свет %.2f:%c",
-                    nlamps, v2mask, moon ? " + луна" : "", v2nlo, dc_shadow_par(SHP_AMB), 10);
+            fprintf(stderr, "shadow v2: %d lamp layers (mask %X)%s, lamps only in the light share %d, ambient light %.2f:%c",
+                    nlamps, v2mask, moon ? " + moon" : "", v2nlo, dc_shadow_par(SHP_AMB), 10);
             for (int L = 0; L < nlamps && L < 4; L++)
                 if (s_v2on[L])
-                    fprintf(stderr, "   слой %d: %s%02d%s у %.0f,%.0f,%.0f радиус %.0f сила света %.2f появление %.2f -> тень %.2f | полуоси %.0f x %.0f (UV·расст.)%c",
-                            L, tex ? "T" : "G", s_v2hd[L], s_v2pt[L] ? " (пятно над персонажем)" : "",
+                    fprintf(stderr, "   layer %d: %s%02d%s at %.0f,%.0f,%.0f radius %.0f light strength %.2f fade-in %.2f -> shadow %.2f | half-axes %.0f x %.0f (UV*dist)%c",
+                            L, tex ? "T" : "G", s_v2hd[L], s_v2pt[L] ? " (a spot above the character)" : "",
                             s_v2p[L][0], s_v2p[L][1], s_v2p[L][2], s_v2r[L], s_v2w[L], s_v2f[L],
                             par[L*4+0], sqrtf(v2ax[L*4]*v2ax[L*4] + v2ax[L*4+1]*v2ax[L*4+1]),
                             sqrtf(v2ax[L*4+2]*v2ax[L*4+2] + v2ax[L*4+3]*v2ax[L*4+3]), 10);
         }
+        /* 23.10: DC_SHADOW_TRACE=1 - строка на кадр: слои (лампа, место, появление, сила тени, раскрытие и ось карты, чей) и лампы
+         * доли света - проверка, что тень стоящего персонажа не зависит от шагов Регины */
+        { static int tr = -1; if (tr < 0) { const char *e = getenv("DC_SHADOW_TRACE"); tr = (e && *e == '1') ? 1 : 0; }
+          if (tr) {
+              extern uint64_t s_frame_count;
+              fprintf(stderr, "shtrace: f=%llu regina %.0f,%.0f chars %d stable %d |", (unsigned long long)s_frame_count, px, pz, nch, stable);
+              for (int L = 0; L < nlamps && L < 4; L++)
+                  if (s_v2on[L]) {
+                      const int ri = GLAMP_MAX + L;
+                      fprintf(stderr, " L%d %s%02d at %.0f,%.0f,%.0f in %.2f str %.3f half %.1f ax %.2f,%.2f,%.2f who %d;", L, tex ? "T" : "G",
+                              s_v2hd[L], s_v2p[L][0], s_v2p[L][1], s_v2p[L][2], s_v2f[L], par[L*4+0], s_rf_half[ri] * 57.2958f,
+                              s_rf_ax[ri][0], s_rf_ax[ri][1], s_rf_ax[ri][2], s_v2own[L]);
+                  }
+              fprintf(stderr, " | share");
+              for (int j = 0; j < v2nlo; j++) fprintf(stderr, " %s%02d/%.2f", tex ? "T" : "G", idx[shk[j]], v2lw[j]);
+              fprintf(stderr, "%c", 10);
+          } }
     }
     /* ЗАМЕР (18.09 вечер): куда по нашей математике попадают ноги персонажа
      * в карте первой лампы — сверяется с тем, что видит шейдер (DC_SHADOW_DBG=5/6) */
@@ -15490,14 +15689,14 @@ void dc_shadow_draw(void) {
     { static long cnt = 0; static int last = -1;
       const int i0 = (nc > 0 && nlamps > 0) ? idx[0] : -1;
       if (i0 != last || (++cnt % 600) == 1) { last = i0;
-          fprintf(stderr, "shadow: %d lamp(s)%s, отладка %d, окклюдеров %d (Регина %ld, прочие %ld):%c",
-                  n, gamerule ? " (как у игры)" : "", dbg, s_occ_n, s_occ_kind[1], s_occ_kind[2], 10);
-          fprintf(stderr, "   из «прочих»: полупрозрачных %ld, без глубины %ld%c", s_occ_semi, s_occ_now, 10);
+          fprintf(stderr, "shadow: %d lamp(s)%s, debug %d, occluders %d (Regina %ld, others %ld):%c",
+                  n, gamerule ? " (as the game has it)" : "", dbg, s_occ_n, s_occ_kind[1], s_occ_kind[2], 10);
+          fprintf(stderr, "   of the 'others': semi-transparent %ld, without depth %ld%c", s_occ_semi, s_occ_now, 10);
           s_occ_kind[1] = s_occ_kind[2] = 0; s_occ_semi = s_occ_now = 0;
           for (int i = 0; i < nlamps && !v2; i++)          /* 27.09 (2): новый путь пишет свои строки «shadow v2:» */
-              fprintf(stderr, "   G%02d%s at %.0f,%.0f,%.0f dist %.0f rad %.0f -> strength %.2f | поле %.0f° на %d перс.%c",
-                      idx[i], clnm[i] > 1 ? (clnm[i] == 2 ? " +1 лампа рядом (одна тень)" : clnm[i] == 3 ? " +2 лампы рядом (одна тень)"
-                                                                                           : " + лампы рядом (одна тень)") : "",
+              fprintf(stderr, "   G%02d%s at %.0f,%.0f,%.0f dist %.0f rad %.0f -> strength %.2f | field %.0f deg on %d chars%c",
+                      idx[i], clnm[i] > 1 ? (clnm[i] == 2 ? " +1 lamp nearby (one shadow)" : clnm[i] == 3 ? " +2 lamps nearby (one shadow)"
+                                                                                           : " + lamps nearby (one shadow)") : "",
                       clp[i][0], clp[i][1], clp[i][2],
                       dst[i], clrad[i], par[i*4+0],
                       (reach ? (double)s_reach_half[idx[i]] : (double)atanf(tanhalf)) * 2.0 * 57.29578,
@@ -15788,7 +15987,7 @@ void dc_spec_frame(void) {
     { static int dbg = -1; static long k = 0;
       if (dbg < 0) { const char *e = getenv("DC_SPEC_LOG"); dbg = (e && *e == '1') ? 1 : 0; }
       if (dbg && (++k % 120) == 1) {
-          fprintf(stderr, "spec: ламп для бликов %d:", n);
+          fprintf(stderr, "spec: %d lamps for highlights:", n);
           for (int j = 0; j < n; j++) fprintf(stderr, " G%02d view %.0f,%.0f,%.0f r %.0f", idx[j], pos4[j*4], pos4[j*4+1], pos4[j*4+2], pos4[j*4+3]);
           fprintf(stderr, "%c", 10); } }
 }
@@ -15856,9 +16055,9 @@ void dc_vol_frame(void) {
     { static int dbg = -1; static long k = 0;
       if (dbg < 0) { const char *e = getenv("DC_VOL_LOG"); dbg = (e && *e == '1') ? 1 : 0; }
       if (dbg && (++k % 120) == 1) {
-          fprintf(stderr, "vol: ламп для дымки %d:", n);
+          fprintf(stderr, "vol: %d lamps for the haze:", n);
           for (int j = 0; j < n; j++)
-              fprintf(stderr, " G%02d room %.0f,%.0f,%.0f view %.0f,%.0f,%.0f r %.0f col %.2f,%.2f,%.2f слой %d", idx[j],
+              fprintf(stderr, " G%02d room %.0f,%.0f,%.0f view %.0f,%.0f,%.0f r %.0f col %.2f,%.2f,%.2f layer %d", idx[j],
                       s_glamp[idx[j]].p[0], s_glamp[idx[j]].p[1], s_glamp[idx[j]].p[2], pos4[j*4], pos4[j*4+1], pos4[j*4+2],
                       pos4[j*4+3], col4[j*4], col4[j*4+1], col4[j*4+2], (int)col4[j*4+3]);
           fprintf(stderr, "%c", 10); } }
@@ -15892,7 +16091,7 @@ void dc_refl_frame(void) {
     { static int dbg = -1; static long k = 0;
       if (dbg < 0) { const char *e = getenv("DC_FX_LOG"); dbg = (e && *e == '1') ? 1 : 0; }
       if (dbg && (++k % 120) == 1)
-          fprintf(stderr, "refl: пол y=%.0f (%s) — в виде n=%.2f,%.2f,%.2f d=%.0f%c", fy, gc ? "сцена" : "игрок", n[0], n[1], n[2], d, 10); }
+          fprintf(stderr, "refl: floor y=%.0f (%s) - in view n=%.2f,%.2f,%.2f d=%.0f%c", fy, gc ? "scene" : "player", n[0], n[1], n[2], d, 10); }
 }
 
 void dc_room_emit_live(void) {
@@ -15917,7 +16116,7 @@ void dc_room_emit_missing(void) {
     const uint64_t f0 = gpu_flip_seq();
     { static long dn = 0; static int dbg = -1;
       if (dbg < 0) { const char *e = getenv("DC_ROOM_ALWAYS_DBG"); dbg = (e && *e == '1') ? 1 : 0; }
-      if (dbg && ++dn <= 40) fprintf(stderr, "roomalways: вызов #%ld live=%d flip=%llu emitted=%llu n=%d%c",
+      if (dbg && ++dn <= 40) fprintf(stderr, "roomalways: call #%ld live=%d flip=%llu emitted=%llu n=%d%c",
                                      dn, dc_room_live_on(), (unsigned long long)f0,
                                      (unsigned long long)s_rl_emitted_frame, s_rl_n, 10); }
     if (!en || !dc_room_live_on()) return;
@@ -15932,7 +16131,7 @@ void dc_room_emit_missing(void) {
     if (s_rl_n > 0) {
         s_rl_emitted_frame = f;
         static long n = 0;
-        if (++n <= 8) fprintf(stderr, "room: кадр без примитивов комнаты от игры — обход сделан сам #%ld%c", n, 10);
+        if (++n <= 8) fprintf(stderr, "room: a frame without the game's room primitives - the walk was done by us #%ld%c", n, 10);
     }
 }
 
@@ -19137,7 +19336,7 @@ static void vz_frame_check(const uint8_t *ram) {
                 s_vz_live = 0;
                 static int said = 0; static unsigned long long n = 0;
                 if (!said || (++n % 600) == 0) { said = 1;
-                    fprintf(stderr, "versions: сцена — комната целиком, версии чужого ракурса не выбрасываем (DC_SCENE_FULLROOM=0 off)%c", 10); }
+                    fprintf(stderr, "versions: scene - the whole room, other-shot versions are kept (DC_SCENE_FULLROOM=0 off)%c", 10); }
             }
         }
     }
@@ -19979,7 +20178,7 @@ void dc_room_showall_tick(void) {
               if (npoly < minpoly) {
                   static long nskip = 0;
                   if (((st & 3u) != 3u) && ++nskip < 40)
-                      fprintf(stderr, "showall: slot %d grp %06X — %d polys, indicator variant, not forced%c",
+                      fprintf(stderr, "showall: slot %d grp %06X - %d polys, indicator variant, not forced%c",
                               i, gpa, npoly, 10);
                   continue;
               } } }
@@ -20027,7 +20226,7 @@ void dc_room_showall_tick(void) {
                   static long nsk = 0; static uint32_t lk = 0xFFFFFFFFu, lg = 0;
                   if (((uint32_t)i != lk || gpc != lg) && ++nsk < 120) {
                       lk = (uint32_t)i; lg = gpc;
-                      fprintf(stderr, "showall: slot %d grp %06X — the game never had it on, not forced%c",
+                      fprintf(stderr, "showall: slot %d grp %06X - the game never had it on, not forced%c",
                               i, gpc, 10);
                   }
                   continue;

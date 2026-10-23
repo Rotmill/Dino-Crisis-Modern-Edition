@@ -122,8 +122,8 @@ static const char* hle_name(int vec, uint32_t fn) {
 void hle_bios_report(void) {
     if (!hle_bios_enabled()) return;
     fprintf(stderr,
-            "hle: сводка (исключений %llu, обслужено игрой %llu, вход в обработчик игры %llu, "
-            "штатных выходов %llu; события: доставлено %llu, никто не слушал %llu)\n",
+            "hle: summary (exceptions %llu, served by the game %llu, entries into the game's handler %llu, "
+            "normal exits %llu; events: delivered %llu, nobody listening %llu)\n",
             (unsigned long long)s_exc_count, (unsigned long long)s_exc_handled,
             (unsigned long long)s_hook_calls, (unsigned long long)s_rfe_calls,
             (unsigned long long)s_deliver_hits, (unsigned long long)s_deliver_miss);
@@ -133,7 +133,7 @@ void hle_bios_report(void) {
             fprintf(stderr, "  %s(%02X) %-22s %8u%s\n",
                     VECNAME[v], f, hle_name(v, (uint32_t)f),
                     s_calls[v][f] + s_missing[v][f],
-                    s_missing[v][f] ? "   ← НЕ РЕАЛИЗОВАНО" : "");
+                    s_missing[v][f] ? "   <- NOT IMPLEMENTED" : "");
         }
     }
     /* Признак «точка входа игры сработала»: от него зависит скорость привода
@@ -144,7 +144,7 @@ void hle_bios_report(void) {
     {
         extern int fntrace_is_game_started(void);
         extern int cdrom_streaming(void);
-        fprintf(stderr, "  игра стартовала: %d, привод в потоке: %d\n",
+        fprintf(stderr, "  game started: %d, drive on a thread: %d\n",
                 fntrace_is_game_started(), cdrom_streaming());
     }
 
@@ -155,7 +155,7 @@ void hle_bios_report(void) {
     {
         extern volatile uint32_t g_dc_fn_ring[32];
         extern volatile uint32_t g_dc_fn_pos;
-        fprintf(stderr, "  последние функции игры:");
+        fprintf(stderr, "  last game functions:");
         for (int k = 1; k <= 24; k++)
             fprintf(stderr, " %08X", g_dc_fn_ring[(g_dc_fn_pos - (uint32_t)k) & 31u]);
         fprintf(stderr, "\n");
@@ -165,7 +165,7 @@ void hle_bios_report(void) {
     for (uint32_t i = 0; i < EV_COUNT; i++) {
         uint32_t e = EV_ADDR(i), st = psx_read_word(e + 4);
         if (st == 0) continue;
-        fprintf(stderr, "  событие %u: класс %08X спец %04X режим %04X состояние %04X обработчик %08X\n",
+        fprintf(stderr, "  event %u: class %08X spec %04X mode %04X state %04X handler %08X\n",
                 i, psx_read_word(e), psx_read_word(e + 8), psx_read_word(e + 0x0C),
                 st, psx_read_word(e + 0x10));
     }
@@ -303,7 +303,7 @@ static uint32_t hle_OpenEvent(CPUState* cpu) {
         ww(e + 0x10, func);
         return 0xF1000000u | i;
     }
-    fprintf(stderr, "hle: OpenEvent — таблица событий заполнена\n");
+    fprintf(stderr, "hle: OpenEvent - the event table is full\n");
     return 0xFFFFFFFFu;
 }
 
@@ -403,7 +403,7 @@ static uint32_t hle_WaitEvent(CPUState* cpu, uint32_t desc) {
         if ((spins & 0xFFFu) == 0xFFFu) debug_server_poll();
         if (spins == 30000000UL)
             fprintf(stderr,
-                    "hle: WaitEvent долго ждёт %08X (класс %08X спец %04X) из ra=%08X\n",
+                    "hle: WaitEvent waits long for %08X (class %08X spec %04X) from ra=%08X\n",
                     desc, rw(e + 0), rw(e + 8), cpu->gpr[31]);
     }
 }
@@ -434,7 +434,7 @@ static void hle_SysEnqIntRP(uint32_t prio, uint32_t elem) {
     if (prio >= IRQ_PRIO) prio = IRQ_PRIO - 1;
     ww(elem + 0, s_irq_chain[prio]);
     s_irq_chain[prio] = elem;
-    fprintf(stderr, "hle: SysEnqIntRP prio=%u элемент=%08X (handler=%08X verifier=%08X)\n",
+    fprintf(stderr, "hle: SysEnqIntRP prio=%u entry=%08X (handler=%08X verifier=%08X)\n",
             prio, elem, rw(elem + 4), rw(elem + 8));
 }
 
@@ -688,7 +688,7 @@ static void hle_exception(CPUState* cpu) {
     }
 #define HLE_EXC_RESTORE() do { cpu->gpr[29] = saved_sp; cpu->gpr[30] = saved_fp; } while (0)
     if (s_exc_count <= 5)
-        fprintf(stderr, "hle: исключение #%llu, I_STAT=%08X I_MASK=%08X, цепочки %08X/%08X/%08X/%08X\n",
+        fprintf(stderr, "hle: exception #%llu, I_STAT=%08X I_MASK=%08X, chains %08X/%08X/%08X/%08X\n",
                 (unsigned long long)s_exc_count, rw(0x1F801070u), rw(0x1F801074u),
                 s_irq_chain[0], s_irq_chain[1], s_irq_chain[2], s_irq_chain[3]);
     /* Порядок ровно как у ретейла: его очередь приоритета 1 (счётчики) →
@@ -780,7 +780,7 @@ static uint32_t hle_OpenTh(uint32_t pc, uint32_t sp, uint32_t gp) {
         psx_thread_retire(0xA0000000u + HLE_TCB_ADDR + i * TCB_STRIDE);
         return 0xFF000000u | i;
     }
-    fprintf(stderr, "hle: OpenTh — свободных потоков нет\n");
+    fprintf(stderr, "hle: OpenTh - no free threads\n");
     return 0xFFFFFFFFu;
 }
 
@@ -795,7 +795,7 @@ static uint32_t hle_CloseTh(uint32_t handle) {
 static uint32_t hle_ChangeTh(CPUState* cpu, uint32_t handle) {
     int i = th_index(handle);
     if (i < 0) {
-        fprintf(stderr, "hle: ChangeTh с негодным дескриптором %08X\n", handle);
+        fprintf(stderr, "hle: ChangeTh with a bad handle %08X\n", handle);
         return 0;
     }
     uint32_t target = 0xA0000000u + HLE_TCB_ADDR + (uint32_t)i * TCB_STRIDE;
@@ -808,17 +808,17 @@ static uint32_t hle_ChangeTh(CPUState* cpu, uint32_t handle) {
     int log = (thdbg > 0);
     if (log) {
         thdbg--;
-        fprintf(stderr, "hle: ChangeTh -> поток %d (TCB %08X), ra=%08X, состояние цели %08X\n",
+        fprintf(stderr, "hle: ChangeTh -> thread %d (TCB %08X), ra=%08X, target state %08X\n",
                 i, target, cpu->gpr[31], rw(TCB_ADDR(i)));
     }
 
     uint32_t ok = psx_change_thread(cpu, target) ? 1u : 0u;
 
     if (log)
-        fprintf(stderr, "hle: ChangeTh вернулся, результат %u, текущий TCB %08X\n",
+        fprintf(stderr, "hle: ChangeTh returned, result %u, current TCB %08X\n",
                 ok, rw(0x80000000u + HLE_PCB_ADDR));
     if (!ok)
-        fprintf(stderr, "hle: ChangeTh %08X не удалось (TCB %08X)\n", handle, target);
+        fprintf(stderr, "hle: ChangeTh %08X failed (TCB %08X)\n", handle, target);
     return ok;
 }
 
@@ -865,7 +865,7 @@ static int card_log_on(void) {
  * другую пару, наш DONE уходит в никуда, и она сообщает об ошибке. */
 static void card_log_events(const char* when) {
     if (!card_log_on()) return;
-    fprintf(stderr, "card: события на момент «%s»:\n", when);
+    fprintf(stderr, "card: events at '%s':\n", when);
     int n = 0;
     for (uint32_t i = 0; i < EV_COUNT; i++) {
         uint32_t e = EV_ADDR(i);
@@ -876,11 +876,11 @@ static void card_log_events(const char* when) {
          * что игра открыла с «ошибочным» спецом 0x8000 */
         uint32_t spec = rw(e + 0x08);
         if (cls != 0xF4000001u && cls != 0xF0000011u && spec != 0x8000u) continue;
-        fprintf(stderr, "card:   ev%02u класс=%08X спец=%04X режим=%04X состояние=%04X обработчик=%08X\n",
+        fprintf(stderr, "card:   ev%02u class=%08X spec=%04X mode=%04X state=%04X handler=%08X\n",
                 i, cls, spec, rw(e + 0x0C), st, rw(e + 0x10));
         n++;
     }
-    if (!n) fprintf(stderr, "card:   (ни одного события класса карты не открыто)\n");
+    if (!n) fprintf(stderr, "card:   (no memory card event is open)\n");
 }
 /* Доставка с отчётом: нашёлся ли получатель.
  * ⭐ 09.09: шлём ОБА класса — и «железный» HwCARD (0xF0000011), и
@@ -896,10 +896,10 @@ static void card_deliver_now(CPUState* cpu, uint32_t spec) {
         uint64_t before_hit = s_deliver_hits, before_miss = s_deliver_miss;
         hle_DeliverEvent(cpu, CLS[k], spec);
         if (card_log_on())
-            fprintf(stderr, "card:   -> событие класс=%08X спец=%04X %s\n",
+            fprintf(stderr, "card:   -> event class=%08X spec=%04X %s\n",
                     CLS[k], spec,
-                    (s_deliver_hits > before_hit) ? "ДОСТАВЛЕНО" :
-                    (s_deliver_miss > before_miss) ? "НИКТО НЕ СЛУШАЕТ" : "?");
+                    (s_deliver_hits > before_hit) ? "DELIVERED" :
+                    (s_deliver_miss > before_miss) ? "NOBODY LISTENING" : "?");
     }
 }
 /* Завершение операции карты: не мгновенно, а через DC_CARD_DELAY вертикальных
@@ -928,8 +928,8 @@ static uint32_t hle_card_read(CPUState* cpu, uint32_t chan, uint32_t sector, uin
     int card = card_of(chan);
     int ok = memcard_is_present(card) && memcard_read_sector(card, (int)sector, buf) == 0;
     if (card_log_on())
-        fprintf(stderr, "card: read  слот=%d сектор=%u -> %s (ra=%08X)\n",
-                card, sector, ok ? "ok" : "ОШИБКА", cpu->gpr[31]);
+        fprintf(stderr, "card: read  slot=%d sector=%u -> %s (ra=%08X)\n",
+                card, sector, ok ? "ok" : "ERROR", cpu->gpr[31]);
     if (!ok) { card_deliver(cpu, CARD_SPEC_ERROR); return 0; }
     for (int i = 0; i < 128; i++) wb(cpu, dst + (uint32_t)i, buf[i]);
     card_deliver(cpu, CARD_SPEC_DONE);
@@ -943,9 +943,9 @@ static uint32_t hle_card_write(CPUState* cpu, uint32_t chan, uint32_t sector, ui
     int ok = memcard_is_present(card) && memcard_write_sector(card, (int)sector, buf) == 0;
     if (card_log_on()) {
         static int first = 1;
-        if (first) { first = 0; card_log_events("первая запись сектора"); }
-        fprintf(stderr, "card: write слот=%d сектор=%u -> %s (ra=%08X, первые байты %02X%02X%02X%02X)\n",
-                card, sector, ok ? "ok" : "ОШИБКА", cpu->gpr[31],
+        if (first) { first = 0; card_log_events("first sector write"); }
+        fprintf(stderr, "card: write slot=%d sector=%u -> %s (ra=%08X, first bytes %02X%02X%02X%02X)\n",
+                card, sector, ok ? "ok" : "ERROR", cpu->gpr[31],
                 buf[0], buf[1], buf[2], buf[3]);
     }
     if (!ok) { card_deliver(cpu, CARD_SPEC_ERROR); return 0; }
@@ -954,7 +954,7 @@ static uint32_t hle_card_write(CPUState* cpu, uint32_t chan, uint32_t sector, ui
      * закрыли не через штатный выход. 18.10.2026: файл не записался (полный
      * диск, нет прав) - игре ошибка записи, как от сбойной карты, а не «готово». */
     if (memcard_flush_checked(card) != 0) {
-        fprintf(stderr, "card: файл карты %d не записан - игре ошибка записи\n", card);
+        fprintf(stderr, "card: memory card file %d not written - the game gets a write error\n", card);
         card_deliver(cpu, CARD_SPEC_ERROR);
         return 0;
     }
@@ -1079,7 +1079,7 @@ static void card_cache_dir(CPUState* cpu, int card) {
         static int said[2] = { 0, 0 };
         if (card_log_on() && !said[card]) {
             said[card] = 1;
-            fprintf(stderr, "card: директория слота %d выложена в кэш ядра 0x%08X\n",
+            fprintf(stderr, "card: slot %d directory placed in the kernel cache 0x%08X\n",
                     card, CARD_DIRCACHE + (uint32_t)(card * CARD_DIR_N * 32));
         }
     }
@@ -1135,7 +1135,7 @@ static void hle_dcb_ensure(void) {
         return;
     hle_dcb_init();
     if (card_log_on())
-        fprintf(stderr, "card: таблица устройств восстановлена (0x150 была 0x%08X)\n", had);
+        fprintf(stderr, "card: device table restored (0x150 was 0x%08X)\n", had);
 }
 
 /* ---- firstfile / nextfile (B0 0x42 / 0x43) -------------------------------
@@ -1169,7 +1169,7 @@ static int card_dir_next(CPUState* cpu, int card, int from, uint32_t entry, cons
         ww(entry + 32, (uint32_t)((i + 1) * CARD_BLK_SECTORS));  /* начальный сектор */
         ww(entry + 36, 0);
         if (card_log_on())
-            fprintf(stderr, "card: найден файл «%s» (запись %d, %u байт)\n",
+            fprintf(stderr, "card: found file '%s' (entry %d, %u bytes)\n",
                     nm, i, crd32(fr + 4));
         return i;
     }
@@ -1179,7 +1179,7 @@ static uint32_t hle_firstfile(CPUState* cpu, uint32_t path_addr, uint32_t entry)
     char path[64]; guest_str(cpu, path_addr, path, sizeof path);
     int card; const char* name;
     if (!card_path(path, &card, &name) || !memcard_is_present(card)) {
-        if (card_log_on()) fprintf(stderr, "card: firstfile «%s» — устройства нет\n", path);
+        if (card_log_on()) fprintf(stderr, "card: firstfile '%s' - no such device\n", path);
         s_ff.active = 0;
         return 0;
     }
@@ -1214,7 +1214,7 @@ static int hle_file_open(CPUState* cpu, uint32_t name_addr, uint32_t mode) {
     char path[64]; guest_str(cpu, name_addr, path, sizeof path);
     int card; const char* name;
     if (!card_path(path, &card, &name)) {
-        if (card_log_on()) fprintf(stderr, "card: open «%s» — путь не карты\n", path);
+        if (card_log_on()) fprintf(stderr, "card: open '%s' - not a memory card path\n", path);
         return -1;
     }
     if (!memcard_is_present(card)) return -1;
@@ -1225,11 +1225,11 @@ static int hle_file_open(CPUState* cpu, uint32_t name_addr, uint32_t mode) {
         int blocks = (int)((mode >> 16) & 0xFFFFu);
         first = card_create(card, name, blocks ? blocks : 1);
         if (card_log_on())
-            fprintf(stderr, "card: создан «%s» на %d блок(ов) -> запись %d\n",
+            fprintf(stderr, "card: created '%s', %d block(s) -> entry %d\n",
                     name, blocks ? blocks : 1, first);
     }
     if (first < 0) {
-        if (card_log_on()) fprintf(stderr, "card: open «%s» режим %08X — файла нет\n", name, mode);
+        if (card_log_on()) fprintf(stderr, "card: open '%s' mode %08X - no such file\n", name, mode);
         return -1;
     }
     for (int i = 0; i < CARD_FD_N; i++) {
@@ -1242,7 +1242,7 @@ static int hle_file_open(CPUState* cpu, uint32_t name_addr, uint32_t mode) {
         s_cfd[i].pos = 0;  s_cfd[i].size = size;
         snprintf(s_cfd[i].name, sizeof s_cfd[i].name, "%s", name);
         if (card_log_on())
-            fprintf(stderr, "card: open «%s» режим %08X -> fd=%d (блок %d, %d байт)\n",
+            fprintf(stderr, "card: open '%s' mode %08X -> fd=%d (block %d, %d bytes)\n",
                     name, mode, i + 1, first, size);
         return i + 1;                                   /* дескриптор 1..8 */
     }
@@ -1283,13 +1283,13 @@ static int hle_file_rw(CPUState* cpu, int fd, uint32_t addr, int len, int writin
     }
     /* сразу в файл карты; 18.10.2026: не записался - игре ошибка носителя («Save failed»), а не «сохранено» */
     if (writing && done && memcard_flush_checked(s_cfd[i].card) != 0) {
-        fprintf(stderr, "card: файл карты %d не записан - игре ошибка записи\n", s_cfd[i].card);
+        fprintf(stderr, "card: memory card file %d not written - the game gets a write error\n", s_cfd[i].card);
         io_fail = 1;
     }
     if (card_log_on())
-        fprintf(stderr, "card: %s fd=%d %d/%d байт (позиция %d)%s\n",
+        fprintf(stderr, "card: %s fd=%d %d/%d bytes (position %d)%s\n",
                 writing ? "write" : "read ", fd, done, len, s_cfd[i].pos,
-                io_fail ? "  ОШИБКА НОСИТЕЛЯ" : "");
+                io_fail ? "  MEDIA ERROR" : "");
     /* ⭐ 09.09: событие «ошибка» шлём ТОЛЬКО при отказе носителя. Игра пишет
      * сейв кусками по 2432 байта, и последний кусок упирается в конец файла
      * (8192 = 3×2432 + 896): раньше мы на этом слали спец 8000, игра его
@@ -1315,7 +1315,7 @@ static int hle_file_close_cpu(CPUState* cpu, int fd) {
      * которого игра строит список сохранений, обновляем сразу. */
     card_cache_dir(cpu, s_cfd[fd - 1].card);
     if (card_log_on())
-        fprintf(stderr, "card: close fd=%d «%s»\n", fd, s_cfd[fd - 1].name);
+        fprintf(stderr, "card: close fd=%d '%s'\n", fd, s_cfd[fd - 1].name);
     s_cfd[fd - 1].used = 0;
     return fd;
 }
@@ -1503,7 +1503,7 @@ static int hle_call_b0(CPUState* cpu, uint32_t fn) {
     case 0x12:                                        /* InitPAD */
         s_pad_buf[0] = a0; s_pad_len[0] = a1;
         s_pad_buf[1] = cpu->gpr[6]; s_pad_len[1] = cpu->gpr[7];
-        fprintf(stderr, "hle: InitPAD буферы %08X(%u) и %08X(%u)\n",
+        fprintf(stderr, "hle: InitPAD buffers %08X(%u) and %08X(%u)\n",
                 s_pad_buf[0], s_pad_len[0], s_pad_buf[1], s_pad_len[1]);
         cpu->gpr[2] = 0;
         return 1;
@@ -1680,7 +1680,7 @@ int hle_bios_dispatch(CPUState* cpu, uint32_t addr, uint32_t phys) {
         s_calls[vec][fn]++;
     } else {
         if (!s_missing[vec][fn])
-            fprintf(stderr, "hle: НЕ РЕАЛИЗОВАНО %s(%02X) %s — вернул 0 (ra=%08X)\n",
+            fprintf(stderr, "hle: NOT IMPLEMENTED %s(%02X) %s - returned 0 (ra=%08X)\n",
                     VECNAME[vec], fn, hle_name(vec, fn), cpu->gpr[31]);
         s_missing[vec][fn]++;
         cpu->gpr[2] = 0;
@@ -1707,19 +1707,22 @@ static void write_trampoline(uint32_t at, uint32_t target, int reg) {
 
 uint32_t hle_bios_boot(CPUState* cpu, const char* exe_path, uint32_t stack_base) {
     s_cpu = cpu;
+    /* 23.10.2026: the log names the file, not the folder - no player's path in it */
+    const char* exe_name = exe_path;
+    for (const char* q = exe_path; *q; q++) if (*q == '\\' || *q == '/') exe_name = q + 1;
     FILE* f = fopen(exe_path, "rb");
     if (!f) {
-        fprintf(stderr, "hle: не открыть EXE игры: %s\n", exe_path);
+        fprintf(stderr, "hle: cannot open the game's EXE: %s\n", exe_name);
         return 0;
     }
     uint8_t hdr[0x800];
     if (fread(hdr, 1, sizeof hdr, f) != sizeof hdr) {
-        fprintf(stderr, "hle: короткий заголовок PS-X EXE: %s\n", exe_path);
+        fprintf(stderr, "hle: PS-X EXE header too short: %s\n", exe_name);
         fclose(f);
         return 0;
     }
     if (memcmp(hdr, "PS-X EXE", 8) != 0) {
-        fprintf(stderr, "hle: не PS-X EXE: %s\n", exe_path);
+        fprintf(stderr, "hle: not a PS-X EXE: %s\n", exe_name);
         fclose(f);
         return 0;
     }
@@ -1789,7 +1792,7 @@ uint32_t hle_bios_boot(CPUState* cpu, const char* exe_path, uint32_t stack_base)
     cpu->cop0[12] = 0x00000000u;   /* SR: BEV=0, прерывания включит игра */
 
     fprintf(stderr,
-            "hle: своё ядро — загрузил %s (pc=%08X gp=%08X text=%08X..%08X sp=%08X)\n",
-            exe_path, pc0, gp0, t_addr, t_addr + t_size, cpu->gpr[29]);
+            "hle: own kernel - loaded %s (pc=%08X gp=%08X text=%08X..%08X sp=%08X)\n",
+            exe_name, pc0, gp0, t_addr, t_addr + t_size, cpu->gpr[29]);
     return pc0;
 }

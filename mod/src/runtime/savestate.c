@@ -274,7 +274,7 @@ uint32_t savestate_do_load(CPUState* cpu) {
     { extern void memory_modram_load(FILE *f); if (!c.error) memory_modram_load(f); }   /* 06.10.2026: память модов, если есть */
     fclose(f);
     if (c.error) {
-        fprintf(stderr, "savestate: READ ERROR mid-load — state is torn, aborting\n");
+        fprintf(stderr, "savestate: READ ERROR mid-load - state is torn, aborting\n");
         dc_osd("Quicksave %d: load failed", savestate_slot());
         return 0;
     }
@@ -369,7 +369,7 @@ void savestate_entry_hook(CPUState* cpu, uint32_t func_addr) {
         return;   /* try again at a later frame boundary */
     }
     if (s_defer >= 4000ul)
-        fprintf(stderr, "savestate: bus never went idle — saving anyway (state may be torn)\n");
+        fprintf(stderr, "savestate: bus never went idle - saving anyway (state may be torn)\n");
     s_defer = 0;
     g_savestate_pending &= ~SS_REQ_SAVE;
     savestate_do_save(cpu, func_addr);
@@ -420,13 +420,13 @@ void savestate_dispatch_hook(CPUState* cpu, uint32_t target) {
                 if (!wait0) wait0 = s_frame_count ? s_frame_count : 1;
                 if (s_frame_count - wait0 < (uint64_t)lim) {
                     if (!said) { said = 1;
-                        fprintf(stderr, "savestate: ядро ещё без обработчиков игры (SysEnqIntRP/HookEntryInt) — жду её старта, потом гружу\n");
+                        fprintf(stderr, "savestate: the kernel has no game handlers yet (SysEnqIntRP/HookEntryInt) - waiting for the game to start, then loading\n");
                         dc_osd("Quicksave %d loads once the game starts", savestate_slot()); }
                     return;
                 }
-                fprintf(stderr, "savestate: обработчики не зарегистрированы за %d кадров — гружу как есть\n", lim);
+                fprintf(stderr, "savestate: handlers not registered within %d frames - loading as is\n", lim);
             } else if (said) {
-                fprintf(stderr, "savestate: ядро готово (обработчики игры на месте) — гружу\n");
+                fprintf(stderr, "savestate: the kernel is ready (the game's handlers are in place) - loading\n");
             }
             wait0 = 0; said = 0;
         }

@@ -60,6 +60,10 @@ Windows 10 or 11, 64-bit, a graphics card with Vulkan.
 
 - Windows 11 Smart App Control. If setup stops at "Recompiling the game to C", this Windows feature is probably on. It only lets through apps it already knows, and the game is built from your disc right on your PC, so to Windows it is a brand-new app. To install and play, set Smart App Control to Off (Windows Security > App & browser control > Smart App Control settings) and run setup again.
 
+## Reporting a problem
+
+Send the log to the developer: `DinoCrisisME_log.txt` next to `DinoCrisisME.exe`, or `install-log.txt` in the install folder if setup stopped. Attach it to an [issue](../../issues), or use the Discord link in the game's main menu.
+
 ## What is in this repository
 
 - `mod/` - everything Setup uses to build the game:

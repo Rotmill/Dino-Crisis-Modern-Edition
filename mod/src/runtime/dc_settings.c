@@ -1231,7 +1231,7 @@ void dc_menu_save(void) {
 /* То же без строки «Настройки сохранены»: её показывает только меню, и при
  * сохранении с экрана выбора языка она всплыла бы при следующем открытии. */
 void dc_menu_save_quiet(void) {
-    if (!menu_write()) fprintf(stderr, "dc_settings: не удалось записать dc_user.cfg\n");
+    if (!menu_write()) fprintf(stderr, "dc_settings: failed to write dc_user.cfg\n");
 }
 
 int g_dc_menu_loading = 0;
@@ -1269,7 +1269,7 @@ void dc_menu_load(void) {
     g_dc_menu_loading = 0;
     fclose(f);
     if (applied)
-        fprintf(stderr, "dc_settings: dc_user.cfg — применено значений: %d\n", applied);
+        fprintf(stderr, "dc_settings: dc_user.cfg - %d values applied\n", applied);
 }
 
 /* ---- состояние ------------------------------------------------------------ */

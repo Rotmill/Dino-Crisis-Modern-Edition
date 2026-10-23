@@ -1,4 +1,4 @@
-DINO CRISIS - Modern Edition v1.02
+DINO CRISIS - Modern Edition v1.03
 
 Dino Crisis (PS1) for Windows: over-the-shoulder camera, widescreen,
 modern graphics.
@@ -41,6 +41,14 @@ KNOWN ISSUES
   PC, so to Windows it is a brand-new app. To install and play, set
   Smart App Control to Off (Windows Security > App & browser control >
   Smart App Control settings) and run setup again.
+
+
+PROBLEMS
+
+  Send the log to the developer (Discord link in the main menu, or
+  github.com/Rotmill/Dino-Crisis-Modern-Edition/issues):
+  DinoCrisisME_log.txt next to DinoCrisisME.exe, or install-log.txt in
+  the install folder if setup stopped.
 
 
 Quicksave: F10 save, Del load, PageUp / PageDown slot (50 slots, data\quicksaves).

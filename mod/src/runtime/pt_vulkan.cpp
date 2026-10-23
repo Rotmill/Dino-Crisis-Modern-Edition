@@ -123,6 +123,19 @@ extern "C" int ptvk_init(void)
         const int score = gq ? type : -1;              /* 18.10.2026: discrete > integrated > virtual */
         vlog("[VK]  - %s  Vulkan %u.%u  graphics+compute=%s  score %d\n", props.deviceName,
              VK_API_VERSION_MAJOR(props.apiVersion), VK_API_VERSION_MINOR(props.apiVersion), gq ? "yes" : "no", score);
+        {   /* 23.10.2026 (GitHub #2: a crash after the shader preparation on Intel UHD 630 with nothing to go by): every
+             * device and its driver into the game's log - pt_vk.txt is off in a release (dc_boot.c) */
+            VkPhysicalDeviceDriverProperties drv{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES };
+            VkPhysicalDeviceProperties2 p2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
+            if (props.apiVersion >= VK_API_VERSION_1_2) p2.pNext = &drv;
+            vkGetPhysicalDeviceProperties2(pd, &p2);
+            static const char* const kType[5] = { "other", "integrated", "discrete", "virtual", "CPU" };
+            fprintf(stderr, "render: Vulkan device %s (%s), Vulkan %u.%u.%u, driver %s %s (0x%08X), id %04X:%04X, graphics+compute %s\n",
+                    props.deviceName, props.deviceType <= VK_PHYSICAL_DEVICE_TYPE_CPU ? kType[props.deviceType] : "other",
+                    VK_API_VERSION_MAJOR(props.apiVersion), VK_API_VERSION_MINOR(props.apiVersion), VK_API_VERSION_PATCH(props.apiVersion),
+                    drv.driverName[0] ? drv.driverName : "?", drv.driverInfo, props.driverVersion, props.vendorID, props.deviceID,
+                    gq ? "yes" : "no");
+        }
         if (score > bestScore) { bestScore = score; s_phys = pd;
                                  snprintf(s_vkDev, sizeof s_vkDev, "%s", props.deviceName); }
         else if (!s_vkDev[0]) snprintf(s_vkDev, sizeof s_vkDev, "%s", props.deviceName);
@@ -249,6 +262,9 @@ extern "C" int ptvk_init(void)
 
     VkPhysicalDeviceProperties props; vkGetPhysicalDeviceProperties(s_phys, &props);
     vlog("[VK] device ready: %s\n", props.deviceName);
+    fprintf(stderr, "render: Vulkan ready on %s; textures from mods %s, frame to Direct3D 11 without a copy %s\n",
+            props.deviceName, g_vk_nonuniform_tex ? "yes" : "no (no non-uniform indexing)",
+            g_vk_d3d11_share ? "possible" : "no (no external memory / keyed mutex)");
     s_vkReady = true;
     return 1;
 }
@@ -299,7 +315,7 @@ static volatile LONG s_vkLost = 0;
 extern "C" int ptvk_lost(void) { return s_vkLost ? 1 : 0; }
 extern "C" void ptvk_mark_lost(int vkresult) {
     if (InterlockedExchange(&s_vkLost, 1) == 0)
-        fprintf(stderr, "render: видеокарта потеряна (VkResult %d) - графика Vulkan выключена до перезапуска игры\n", vkresult);
+        fprintf(stderr, "render: Vulkan device lost (VkResult %d) - Vulkan graphics are off until the game restarts\n", vkresult);
 }
 extern "C" int ptvk_wait_fence(VkFence f) {
     if (s_vkLost) return 0;
@@ -307,7 +323,7 @@ extern "C" int ptvk_wait_fence(VkFence f) {
         const VkResult r = vkWaitForFences(s_device, 1, &f, VK_TRUE, 1000000000ULL);
         if (r == VK_SUCCESS) return 1;
         if (r != VK_TIMEOUT || sec >= 60) { ptvk_mark_lost((int)r); return 0; }
-        if (sec == 3) fprintf(stderr, "render: видеокарта занята уже 4 с - жду дальше\n");
+        if (sec == 3) fprintf(stderr, "render: the graphics card has been busy for 4 s - still waiting\n");
     }
 }
 static void beginCmd() {

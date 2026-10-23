@@ -718,7 +718,7 @@ static void report_strangers(const char *base)
             for (int i = 0; i < s_n && !found; i++)
                 if ((!strcmp(s_f[i].cat, cats[c]) || (s_f[i].old_cat && !strcmp(s_f[i].old_cat, cats[c]))) &&
                     !_stricmp(s_f[i].name, nm)) found = 1;
-            if (!found) fprintf(stderr, "mods: %s\\%s — no game file of that name in this folder, ignored\n", cats[c], nm);
+            if (!found) fprintf(stderr, "mods: %s\\%s - no game file of that name in this folder, ignored\n", cats[c], nm);
         } while (FindNextFileA(h, &fd));
         FindClose(h);
     }
@@ -770,10 +770,10 @@ static int mod_open(DiscFile *f, const char *base)
     else if (ms == f->nsec * 2336u) mode = M_RAW2336;
     if (mode == M_NONE) {
         if (!f->stream)
-            fprintf(stderr, "mods: %s\\%s is %u bytes, the game has room for %u (%u sectors) — ignored\n",
+            fprintf(stderr, "mods: %s\\%s is %u bytes, the game has room for %u (%u sectors) - ignored\n",
                     f->cat, f->name, ms, f->nsec * 2048u, f->nsec);
         else
-            fprintf(stderr, "mods: %s\\%s is %u bytes — a stream must be %u raw sectors: %u bytes (2352 each) or %u (2336) — ignored\n",
+            fprintf(stderr, "mods: %s\\%s is %u bytes - a stream must be %u raw sectors: %u bytes (2352 each) or %u (2336) - ignored\n",
                     f->cat, f->name, ms, f->nsec, f->nsec * 2352u, f->nsec * 2336u);
         fclose(fp);
         return 0;
@@ -806,7 +806,7 @@ void dc_mods_init(void *iso_handle)
     mods_base(base, sizeof base);
     for (int i = 0; i < s_n; i++) s_active += mod_open(&s_f[i], base);
     report_strangers(base);
-    fprintf(stderr, "mods: game files %d, replaced by mods %d (folder %s)\n", s_n, s_active, base);
+    fprintf(stderr, "mods: game files %d, replaced by mods %d\n", s_n, s_active);   /* 23.10.2026: no folder - the log must not carry the player's paths */
     audio_movie_load(base);
     { extern void dc_meshrep_boot(const char *mods); dc_meshrep_boot(base); }   /* 05.10 ночь (2): меши из glTF (dc_meshrep.cpp) */
     { char src[MAX_PATH]; mods_src(src, sizeof src); live_start(src); }      /* 10.10: сторож - на настоящей папке mods */
@@ -884,7 +884,7 @@ static int slus_apply_fp(uint8_t *body, FILE *fp)
     size_t got = m ? fread(m, 1, (size_t)n, fp) : 0;
     fclose(fp);
     if (!m || got != (size_t)n || memcmp(m, "PS-X EXE", 8) != 0 || le32(m + 0x18) != s_exe_taddr || (uint32_t)n - 0x800u != s_exe_size) {
-        fprintf(stderr, "mods: other\\SLUS_009.22 is not this game's program (another size or address) — ignored\n");
+        fprintf(stderr, "mods: other\\SLUS_009.22 is not this game's program (another size or address) - ignored\n");
         free(m);
         return 0;
     }
@@ -942,7 +942,7 @@ int dc_mods_exe_patch(uint32_t t_addr, uint8_t *body, uint32_t size)
     s_exe_taddr = t_addr; s_exe_size = size;
     const int changed = exe_build(s_exe_cur);
     memcpy(body, s_exe_cur, size);
-    if (changed) fprintf(stderr, "mods: other\\SLUS_009.22 — %d bytes of the game's data replaced (%d places)\n", changed, s_nexe);
+    if (changed) fprintf(stderr, "mods: other\\SLUS_009.22 - %d bytes of the game's data replaced (%d places)\n", changed, s_nexe);
     return changed;
 }
 
@@ -1276,7 +1276,7 @@ static int snd_scan_file(DiscFile *f, const char *dir, int sfx)
             const uint64_t pk = path_key(wp);
             pcm = keep_take(pk, st, &fr, &rate, &loop);           /* 06.10.2026: тот же файл — его звук, без декода */
             if (!pcm) {
-                if (!wav_load(wp, &pcm, &fr, &ch, &rate, &loop)) { fprintf(stderr, "mods: %s — not a WAV I can read, ignored\n", wp); continue; }
+                if (!wav_load(wp, &pcm, &fr, &ch, &rate, &loop)) { fprintf(stderr, "mods: %s - not a WAV I can read, ignored\n", wp); continue; }
                 if (ch != 1) {                                     /* голос SPU — моно */
                     uint32_t mf = 0;
                     int16_t *m = pcm_convert(pcm, fr, ch, rate, 1, rate, &mf);
@@ -1407,7 +1407,7 @@ static void movie_init(const char *base)
         for (uint32_t k = 0; k < f->nsec && k < 64 && first == 0xFFFFFFFFu; k++)
             if (iso_read_sector(s_iso, f->lba + k, u, 2048) && u[0] == 0x60 && u[1] == 0x01 && u[2] == 0x01 && u[3] == 0x80)
                 first = (uint32_t)(u[8] | (u[9] << 8) | (u[10] << 16) | ((uint32_t)u[11] << 24));
-        if (first == 0xFFFFFFFFu) { fprintf(stderr, "mods: movie\\%s — no video in the game's %s, ignored\n", stem, f->name); continue; }
+        if (first == 0xFFFFFFFFu) { fprintf(stderr, "mods: movie\\%s - no video in the game's %s, ignored\n", stem, f->name); continue; }
         DcMovie *nm = (DcMovie *)realloc(s_mov, (size_t)(s_nmov + 1) * sizeof *nm);
         if (!nm) break;
         s_mov = nm;
@@ -1454,7 +1454,7 @@ static void movie_init(const char *base)
             }
             free(lbas);
         }
-        fprintf(stderr, "mods: movie\\%s\\%s.mp4 — instead of %s (first frame %u, sound %s)\n", stem, stem, f->name, first,
+        fprintf(stderr, "mods: movie\\%s\\%s.mp4 - instead of %s (first frame %u, sound %s)\n", stem, stem, f->name, first,
                 s_nxa > nxa_before ? "from the MP4" : "the game's");
     }
 #else
@@ -1525,7 +1525,7 @@ static void audio_init(const char *base)
         } while (FindNextFileA(h, &fd));
         FindClose(h);
     }
-    if (nsmp || nxa || nsong) fprintf(stderr, "mods: sounds from WAV — %d samples, %d XA channels, %d songs\n", nsmp, nxa, nsong);
+    if (nsmp || nxa || nsong) fprintf(stderr, "mods: sounds from WAV - %d samples, %d XA channels, %d songs\n", nsmp, nxa, nsong);
 #else
     (void)base;
 #endif
@@ -1924,7 +1924,7 @@ static void live_start(const char *base)
     SetThreadPriority(t, THREAD_PRIORITY_BELOW_NORMAL);
     CloseHandle(t);
     s_live = 1;
-    fprintf(stderr, "mods: changes in %s are picked up while the game runs (DC_MODS_LIVE=0 - off)\n", s_live_base);
+    fprintf(stderr, "mods: changes in the mods folder are picked up while the game runs (DC_MODS_LIVE=0 - off)\n");
 #else
     (void)base;
 #endif

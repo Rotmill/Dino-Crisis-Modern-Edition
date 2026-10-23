@@ -1158,11 +1158,11 @@ void load_entry(Entry* e) {
                                           : (gltf_load(e->path, g, err) && build_mesh(g, e->kind == 0, e->node, e->mesh, err));
     if (!ok) {
         e->err = err;
-        fprintf(stderr, "mods: %s — not used: %s%c", e->rel.c_str(), err.c_str(), 10);
+        fprintf(stderr, "mods: %s - not used: %s%c", e->rel.c_str(), err.c_str(), 10);
         e->state = -1;                           // последним: снятую с подмены запись после этого можно освободить
         return;
     }
-    if (e->mesh.idx.empty()) fprintf(stderr, "mods: %s — empty: the game's mesh is hidden%c", e->rel.c_str(), 10);
+    if (e->mesh.idx.empty()) fprintf(stderr, "mods: %s - empty: the game's mesh is hidden%c", e->rel.c_str(), 10);
     gpu_prep(e);                             // 06.10.2026 (2): склейка для видеокарты — здесь, до «готово», а не в кадре игры
     pick_build(e);                           // 06.10.2026: тело для прицела
     e->state = 2;
@@ -1416,7 +1416,7 @@ bool ready(Entry* e) {
         for (RTex& t : m.texs) {
             t.idx = dcvk_rep_tex_add(t.path.empty() ? nullptr : t.path.c_str(), t.png.empty() ? nullptr : t.png.data(), t.png.size(),
                                      t.rgba.empty() ? nullptr : t.rgba.data(), t.w, t.h, t.repeat ? 1 : 0);
-            if (t.idx < 0) { e->state = -1; fprintf(stderr, "mods: %s — the video card cannot take its pictures%c", e->rel.c_str(), 10); return false; }
+            if (t.idx < 0) { e->state = -1; fprintf(stderr, "mods: %s - the video card cannot take its pictures%c", e->rel.c_str(), 10); return false; }
         }
     }
     bool ok = true;
@@ -1492,7 +1492,7 @@ Entry* group_entry(const uint8_t* R, uint32_t hdr, int lit, uint64_t owner = 0) 
         if (s_log && k.ok) {
             static int n = 0;
             if (n < 400) { n++; fprintf(stderr, "meshrep: group %06X %s key %016llx%s%c", hdr, lit ? "lit" : "room",
-                                       (unsigned long long)k.key, s_group.count(k.key) || s_group_own.count(k.key) ? " — replaced" : "", 10); }
+                                       (unsigned long long)k.key, s_group.count(k.key) || s_group_own.count(k.key) ? " - replaced" : "", 10); }
         }
     }
     if (!it->second.ok) return nullptr;
@@ -1772,7 +1772,7 @@ void draw_tris(const Inst& in, float H, float OFX, float OFY, float wsx, float d
 void say_once(Entry* e, const char* what) {
     if (e->said) return;
     e->said = 1;
-    fprintf(stderr, "mods: %s — %s%c", e->rel.c_str(), what, 10);
+    fprintf(stderr, "mods: %s - %s%c", e->rel.c_str(), what, 10);
 }
 
 // персонаж по контексту: заголовок модели, ключ, запись (кэш на сборку списка)
@@ -1804,7 +1804,7 @@ CtxKey* ctx_actor(const uint8_t* R, uint32_t ctx) {
         static std::unordered_set<uint64_t> seen;
         if (seen.size() < 200 && seen.insert(c.key).second)
             fprintf(stderr, "meshrep: actor ctx %06X model %06X bones %d key %016llx%s%c", ctx, hdr, c.nb, (unsigned long long)c.key,
-                    c.e ? " — replaced" : "", 10);
+                    c.e ? " - replaced" : "", 10);
     }
     return &c;
 }
@@ -1964,7 +1964,7 @@ extern "C" void dc_meshrep_boot(const char* mods) {
     s_on = 1;
     int na = 0, ng = 0;
     for (auto& x : S.ent) (x->kind == 0 ? na : ng)++;
-    fprintf(stderr, "mods: meshes from mods (glTF, FBX, OBJ) — %d characters, %d groups%c", na, ng, 10);
+    fprintf(stderr, "mods: meshes from mods (glTF, FBX, OBJ) - %d characters, %d groups%c", na, ng, 10);
     std::vector<Entry*> todo;
     for (auto& x : S.ent) todo.push_back(x.get());
     s_ent = std::move(S.ent);
@@ -2330,7 +2330,7 @@ void gpu_build(Entry* e) {
     for (GVtx& g : e->gpv) g.slot = mslot[(size_t)g.slot];
     e->gpu = dcvk_mesh_add(e->gpv.data(), (int)e->gpv.size(), e->gpi.data(), (int)e->gpi.size());
     if (e->gpu >= 0)
-        fprintf(stderr, "mods: %s — %d triangles on the video card (%d vertices)%c", e->rel.c_str(), (int)(e->gpi.size() / 3), (int)e->gpv.size(), 10);
+        fprintf(stderr, "mods: %s - %d triangles on the video card (%d vertices)%c", e->rel.c_str(), (int)(e->gpi.size() / 3), (int)e->gpv.size(), 10);
     std::vector<GVtx>().swap(e->gpv);            // копия в видеопамяти; при отказе — путь процессора по e->mesh
     std::vector<uint32_t>().swap(e->gpi);
     e->prepped = false;

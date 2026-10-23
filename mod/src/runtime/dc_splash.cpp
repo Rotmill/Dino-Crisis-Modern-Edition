@@ -74,9 +74,9 @@ extern "C" const unsigned char *dc_embedded(const char *name, unsigned *size);
 #  define DC_SPLASH_EMBEDDED 1
 #endif
 
-static_assert(DC_SPLASH_LANGS == DC_LANG_COUNT, "языки картинок (render.py) и меню (dc_settings.h) разошлись");
-static_assert(DC_SPLASH_SLOTS == DCS_COUNT, "кнопки схемы (render.py, ctrl.html) и DCS_* (dc_splash.h) разошлись");
-static_assert(DC_SPLASH_LBL_NONE_F == DCA_COUNT, "подписи атласа (slots.html) и DCA_* (dc_splash.h) разошлись");
+static_assert(DC_SPLASH_LANGS == DC_LANG_COUNT, "the languages of the pictures (render.py) and of the menu (dc_settings.h) differ");
+static_assert(DC_SPLASH_SLOTS == DCS_COUNT, "the scheme buttons (render.py, ctrl.html) and DCS_* (dc_splash.h) differ");
+static_assert(DC_SPLASH_LBL_NONE_F == DCA_COUNT, "the atlas labels (slots.html) and DCA_* (dc_splash.h) differ");
 
 /* ⭐ 04.10.2026 (вечер, 7), игрок: «в начальные экраны после экрана с выбором языка сделай экран — дисклеймер о том, что
  * это мод и он бесплатен и т.д. А так напиши, что опции можно менять в модерн опциях». SPL_DISC — «о моде»
@@ -212,13 +212,13 @@ static SDL_Texture *tex_get(SDL_Renderer *r, const char *name)
     std::vector<unsigned char> file, px;
     const unsigned char *p = nullptr; size_t n = 0; int w = 0, h = 0;
     if (!asset_bytes(name, file, &p, &n) || !png_decode(p, n, px, &w, &h)) {
-        std::fprintf(stderr, "splash: нет картинки %s (assets/ui или вшитые данные)\n", name);
+        std::fprintf(stderr, "splash: no picture %s (assets/ui or the built-in data)\n", name);
         s_missing.push_back(name);
         return nullptr;
     }
     SDL_Texture *t = SDL_CreateTexture(r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, w, h);
     if (!t) {
-        std::fprintf(stderr, "splash: текстура %s %dx%d: %s\n", name, w, h, SDL_GetError());
+        std::fprintf(stderr, "splash: texture %s %dx%d: %s\n", name, w, h, SDL_GetError());
         s_missing.push_back(name);
         return nullptr;
     }
@@ -233,7 +233,7 @@ static SDL_Texture *tex_get(SDL_Renderer *r, const char *name)
     }
     if (slot->t) SDL_DestroyTexture(slot->t);
     slot->key = name; slot->t = t; slot->used = ++s_use_tick;
-    std::fprintf(stderr, "splash: %s %dx%d за %.0f мс\n", name, w, h,
+    std::fprintf(stderr, "splash: %s %dx%d in %.0f ms\n", name, w, h,
                  (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / (double)SDL_GetPerformanceFrequency());
     return t;
 }
@@ -412,8 +412,8 @@ static void open_ctrl(void)
     m[0] = 0;
     for (int s = 0; s < DCS_COUNT; s++)
         k += std::snprintf(m + k, sizeof m - (size_t)k, "%s%x", s ? "," : "", slot_mask(s));
-    std::fprintf(stderr, "splash: раскладка управления (%s, вкладка %s, язык %s; схема из input.ini, маски DCA по DCS: %s)\n",
-                 s_from_menu ? "из меню" : "запуск", s_tab ? "клавиатура" : "геймпад",
+    std::fprintf(stderr, "splash: controls layout (%s, tab %s, language %s; scheme from input.ini, DCA masks by DCS: %s)\n",
+                 s_from_menu ? "from the menu" : "start", s_tab ? "keyboard" : "gamepad",
                  k_splash_lang_code[lang_now()], m);
 }
 
@@ -431,7 +431,7 @@ static void lang_pick(int i)
 {
     s_sel = s_hl = i;
     if (s_h.set_lang) s_h.set_lang(i);
-    std::fprintf(stderr, "splash: язык %s\n", k_splash_lang_code[i]);
+    std::fprintf(stderr, "splash: language %s\n", k_splash_lang_code[i]);
 }
 
 /* 04.10 (7): «о моде» — бесплатный фанатский мод, не Capcom, настройки — в MODERN OPTIONS */
@@ -454,12 +454,12 @@ static int disc_rumenu(void)
 static void open_disc(void)
 {
     s_screen = SPL_DISC;
-    std::fprintf(stderr, "splash: о моде (язык %s)\n", k_splash_lang_code[lang_now()]);
+    std::fprintf(stderr, "splash: about the mod (language %s)\n", k_splash_lang_code[lang_now()]);
 }
 static void disc_done(void)
 {
     if (s_next_ctrl) { s_next_ctrl = 0; open_ctrl(); }
-    else dc_splash_close("о моде прочитано");
+    else dc_splash_close("about the mod read");
 }
 
 /* «Продолжить» (или «назад» = пропустить с тем, что выбрано). */
@@ -468,7 +468,7 @@ static void lang_done(void)
     if (s_h.lang_chosen) s_h.lang_chosen();
     if (s_next_disc) { s_next_disc = 0; open_disc(); }
     else if (s_next_ctrl) { s_next_ctrl = 0; open_ctrl(); }
-    else dc_splash_close("язык выбран");
+    else dc_splash_close("language chosen");
 }
 
 extern "C" void dc_splash_init(const DcSplashHooks *h)
@@ -484,7 +484,7 @@ extern "C" void dc_splash_boot(int show_lang)
         s_next_ctrl = 1;
         s_next_disc = disc_on();
         open_lang();
-        std::fprintf(stderr, "splash: выбор языка\n");
+        std::fprintf(stderr, "splash: language selection\n");
     } else if (disc_on()) {
         s_next_ctrl = 1;
         s_next_disc = 0;
@@ -534,7 +534,7 @@ extern "C" void dc_splash_close(const char *why)
     s_closed_tick = SDL_GetTicks();
     tex_free_all();
     s_missing.clear();
-    std::fprintf(stderr, "splash: закрыт (%s)\n", why ? why : "");
+    std::fprintf(stderr, "splash: closed (%s)\n", why ? why : "");
 }
 
 extern "C" int dc_splash_action(int act, int from_pad)
@@ -586,7 +586,7 @@ extern "C" int dc_splash_action(int act, int from_pad)
     case DC_MENU_PAGE_PREV:
     case DC_MENU_PAGE_NEXT: s_tab ^= 1; break;
     case DC_MENU_OK:
-    case DC_MENU_BACK:  dc_splash_close(s_from_menu ? "назад в меню" : "дальше в игру"); break;
+    case DC_MENU_BACK:  dc_splash_close(s_from_menu ? "back to the menu" : "on into the game"); break;
     case DC_MENU_UP:
     case DC_MENU_DOWN:  break;
     default: return 0;
@@ -733,7 +733,7 @@ extern "C" void dc_splash_present(SDL_Renderer *r, int lw, int lh)
         }
     }
     if (pad_tab ? !(ttabs && tlbl && tico && tp) : !tl) {
-        dc_splash_close("нет картинок экрана");             /* не держать игру на чёрном экране */
+        dc_splash_close("no screen pictures");             /* не держать игру на чёрном экране */
         return;
     }
     SDL_Texture *tb = bg_get(r);
@@ -922,7 +922,7 @@ extern "C" void dc_splash_feedback_present(SDL_Renderer *r, int lw, int lh, int 
  * меню, таблица и переводы — dc_settings.c. Строки нет в атласе (пункт
  * добавили, а render.py не прогнали) — остаётся прежнее меню (dc_menu_draw). */
 
-static_assert(DC_MT_LANGS == DC_SPLASH_LANGS, "языки атласа меню и экранов запуска разошлись");
+static_assert(DC_MT_LANGS == DC_SPLASH_LANGS, "the languages of the menu atlas and of the start screens differ");
 
 enum {
     M_TABS_Y = 40,                        /* лента вкладок: верх рамки (как в ctrl.html) */
@@ -981,7 +981,7 @@ static int mt_page_ok(int L, const DcMenuRow *rows, int n)
 {
     auto miss = [](const char *what) -> int {
         if (!s_mt_warned) {
-            std::fprintf(stderr, "menu: в атласе нет строки «%s» — прежнее меню (прогони render.py)\n", what);
+            std::fprintf(stderr, "menu: the atlas has no string '%s' - the old menu (run render.py)\n", what);
             s_mt_warned = 1;
         }
         return 0;
@@ -1143,7 +1143,7 @@ extern "C" int dc_menu_ui_ready(void)
         std::vector<unsigned char> buf;
         const unsigned char *p = nullptr; size_t n = 0;
         s_mt_ok[L] = asset_bytes(name, buf, &p, &n) ? 1 : -1;
-        if (s_mt_ok[L] < 0) std::fprintf(stderr, "menu: нет %s — прежнее меню\n", name);
+        if (s_mt_ok[L] < 0) std::fprintf(stderr, "menu: no %s - the old menu\n", name);
     }
     if (s_mt_ok[L] < 0) return 0;
     DcMenuRow rows[64];

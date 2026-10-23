@@ -175,13 +175,13 @@ void worker() {
         if (id != cur_id) {
             ahead_ok = false; have.t = -1;
             if (!rd.open(path)) {
-                std::fprintf(stderr, "mods: movie %ls — cannot decode the video, the game's own is shown%c", path.c_str(), 10);
+                std::fprintf(stderr, "mods: movie %ls - cannot decode the video, the game's own is shown%c", path.c_str(), 10);
                 cur_id = id;    // не пытаться снова, пока не сменится ролик
                 rd.eof = true;
                 continue;
             }
             cur_id = id;
-            std::fprintf(stderr, "mods: movie %ls %dx%d — shown instead of the game's%c", path.c_str(), rd.w, rd.h, 10);
+            std::fprintf(stderr, "mods: movie %ls %dx%d - shown instead of the game's%c", path.c_str(), rd.w, rd.h, 10);
         }
         if (have.t >= 0 && t + 0.25 < have.t) {             // ролик пошёл сначала
             rd.rewind(); ahead_ok = false; have.t = -1;

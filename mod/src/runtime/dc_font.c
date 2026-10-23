@@ -305,8 +305,8 @@ int dc_font_init(void)
         if (sys_ui_font(sys, sizeof sys) && try_load(sys)) goto done;
     }
 
-    fprintf(stderr, "dc_font: шрифт не найден "
-                    "(положи ttf в assets/fonts/dc_ui.ttf или задай DC_FONT)\n");
+    fprintf(stderr, "dc_font: font not found "
+                    "(put a ttf into assets/fonts/dc_ui.ttf or set DC_FONT)\n");
     return 0;
 
 done:
@@ -329,10 +329,10 @@ done:
         if (!try_load_fallback(fb) && sys_ui_font(sys, sizeof sys))
             try_load_fallback(sys);   /* ME: the same system font - V1 copied Bahnschrift into fonts\dc_ui_fallback.ttf too */
     }
-    fprintf(stderr, "dc_font: загружен %s%s%s, кегль %d px, высота строки %d, сглаживание %s, жирный: %s, запасной: %s\n",
-            s_path, s_family[0] ? " — " : "", s_family, s_size, dc_font_line_height(),
-            s_antialias ? "вкл" : "выкл", s_ready_b ? s_path_b : "нет файла (берётся обычный)",
-            s_ready_fb ? s_path_fb : "нет");
+    fprintf(stderr, "dc_font: loaded %s%s%s, size %d px, line height %d, antialiasing %s, bold: %s, fallback: %s\n",
+            s_path, s_family[0] ? " - " : "", s_family, s_size, dc_font_line_height(),
+            s_antialias ? "on" : "off", s_ready_b ? s_path_b : "no file (the regular one is used)",
+            s_ready_fb ? s_path_fb : "none");
     return 1;
 }
 
@@ -377,7 +377,7 @@ int dc_font_pixel_em(void)
             cached = upm / step;          /* сколько исходных пикселей в em */
     }
     s_pixel_em = cached;
-    if (cached) fprintf(stderr, "dc_font: пиксельная сетка — %d px на em\n", cached);
+    if (cached) fprintf(stderr, "dc_font: pixel grid - %d px per em\n", cached);
     return cached;
 }
 int dc_font_use_file(const char *path)
@@ -392,8 +392,8 @@ int dc_font_use_file(const char *path)
         s_antialias = (strstr(s_family, "Pixel") == NULL && strstr(s_path, "pixel") == NULL) ? 1 : 0;
         cache_clear();
     }
-    fprintf(stderr, "dc_font: основной шрифт -> %s%s%s (кегль %d, сглаживание %s)\n",
-            s_path, s_family[0] ? " — " : "", s_family, s_size, s_antialias ? "вкл" : "выкл");
+    fprintf(stderr, "dc_font: main font -> %s%s%s (size %d, antialiasing %s)\n",
+            s_path, s_family[0] ? " - " : "", s_family, s_size, s_antialias ? "on" : "off");
     return 1;
 }
 static int try_load_bold(const char *path);      /* ниже по файлу */
@@ -437,7 +437,7 @@ int dc_font_apply_language(int lang)
         if (!got) { s_ready_b = 0; s_path_b[0] = 0; }
         int saved = s_size; s_size = 0; dc_font_set_size(saved);
         cache_clear();
-        fprintf(stderr, "dc_font: жирный -> %s\n", s_ready_b ? s_path_b : "нет файла (утолщение обычного)");
+        fprintf(stderr, "dc_font: bold -> %s\n", s_ready_b ? s_path_b : "no file (the regular one thickened)");
     }
     /* Иероглифы — системный шрифт Windows под язык (см. s_info_cjk). 19.10: на языках без иероглифов - при первом знаке. */
     {
@@ -450,7 +450,7 @@ int dc_font_apply_language(int lang)
         else if (s_ready_cjk && strstr(s_path_cjk, want)) s_cjk_pending = 0;   /* уже загружен свой */
         else {
             s_cjk_pending = 1;
-            fprintf(stderr, "dc_font: иероглифы -> при первом знаке (DC_FONT_CJK_EAGER=1 - сразу)\n");
+            fprintf(stderr, "dc_font: CJK glyphs -> at the first character (DC_FONT_CJK_EAGER=1 - at once)\n");
         }
     }
     return 1;
@@ -470,7 +470,7 @@ static int cjk_load_for_lang(int lang, int clear)
         snprintf(cj, sizeof cj, "%s/Fonts/%s", (win && *win) ? win : "C:/Windows", names[i]);
         got = (strcmp(cj, s_path_cjk) == 0) || try_load_cjk(cj, clear);
     }
-    fprintf(stderr, "dc_font: иероглифы -> %s\n", got ? s_path_cjk : "нет системного шрифта");
+    fprintf(stderr, "dc_font: CJK glyphs -> %s\n", got ? s_path_cjk : "no system font");
     return got;
 }
 

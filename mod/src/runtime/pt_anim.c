@@ -416,11 +416,11 @@ static void ap_v2_orig_from_v3(void) {
     const char *paths[] = { getenv("DC_AIM_PATCH_ORIG"), "assets/aim_patch_v3.bin", "../../assets/aim_patch_v3.bin", "../../../assets/aim_patch_v3.bin" };
     FILE *f = 0;
     for (int i = 0; i < 4 && !f; i++) if (paths[i] && *paths[i]) f = fopen(paths[i], "rb");
-    if (!f) { fprintf(stderr, "aimpatch: нет assets/aim_patch_v3.bin — кадры с диска для оригинального режима только из RAM\n"); return; }
+    if (!f) { fprintf(stderr, "aimpatch: no assets/aim_patch_v3.bin - disc frames for the original mode only from RAM\n"); return; }
     fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
     uint8_t *b = (uint8_t *)malloc((size_t)(n > 0 ? n : 1));
     if (!b || n < 12 || fread(b, 1, (size_t)n, f) != (size_t)n || memcmp(b, "DCAP", 4) != 0 || *(uint32_t *)(b + 4) < 3) {
-        fclose(f); free(b); fprintf(stderr, "aimpatch: aim_patch_v3.bin не v3 — пропуск\n"); return; }
+        fclose(f); free(b); fprintf(stderr, "aimpatch: aim_patch_v3.bin is not v3 - skipped\n"); return; }
     fclose(f);
     const uint8_t *p = b + 12, *end = b + n;
     const uint32_t nsets = *(uint32_t *)(b + 8);
@@ -452,7 +452,7 @@ static void ap_v2_orig_from_v3(void) {
         }
     }
     free(b);
-    fprintf(stderr, "aimpatch: кадры с диска из aim_patch_v3.bin — правленых %d, без правки %d, не сошлось %d\n", got, same, bad);
+    fprintf(stderr, "aimpatch: disc frames from aim_patch_v3.bin - edited %d, unedited %d, mismatched %d\n", got, same, bad);
 }
 static int ap_frames_ready(ApMotion *M, const uint8_t *ram) {
     if (M->frames) return 1;
@@ -493,14 +493,14 @@ static void ap_load(void) {
         fclose(f);
     }
     const uint8_t *p = s_ap_blob, *end = s_ap_blob + n;
-    if (n < 12 || memcmp(p, "DCAP", 4) != 0) { fprintf(stderr, "aimpatch: плохой заголовок\n"); return; }
+    if (n < 12 || memcmp(p, "DCAP", 4) != 0) { fprintf(stderr, "aimpatch: bad header\n"); return; }
     uint32_t ver = *(uint32_t *)(p + 4), nsets = *(uint32_t *)(p + 8); p += 12;
     /* v1 брала сигнатурой первые 64 байта блока — а они у ВСЕХ наборов одинаковы (общий M00
      * idle): с гранатомётом в RAM рантайм «узнавал» P20 и писал стойки пистолета в кадры P30 M10
      * (выстрел гранатомёта) — «меш ломается на пару кадров при входе в прицел» (игрок, 05.09).
      * v2: сигнатура со смещения sig_off (96 — там наборы различаются) + заголовок каждого
      * моушена (dptr,cnt) сверяется перед записью. v1-файл больше не принимаем. */
-    if (ver < 2) { fprintf(stderr, "aimpatch: файл версии %u устарел (сигнатура не различает наборы) — пересобери make_aim_patch.py, патч выключен\n", ver); return; }
+    if (ver < 2) { fprintf(stderr, "aimpatch: the file of version %u is outdated (the signature does not tell the sets apart) - rebuild it with make_aim_patch.py, the patch is off\n", ver); return; }
     if (ver >= 3) {
         /* v3 (17.09.2026; релиз, _source/tools/make_aim_patch_v3.py из v2 и диска): байтов игры нет.
          *   набор:  char name[4], u32 sig_off, u64 sig_hash (FNV-1a 64 байт блока с sig_off), u32 n_motions
@@ -542,8 +542,8 @@ static void ap_load(void) {
         }
         s_ap_n = (int)s + 1;
     }
-    fprintf(stderr, "aimpatch: загружено наборов %d (стойки правленые/оригинал + эталоны выстрелов), аддитивный выстрел %s\n",
-            s_ap_n, s_ap_shot ? "вкл" : "выкл");
+    fprintf(stderr, "aimpatch: %d sets loaded (edited/original stances + reference shots), additive shot %s\n",
+            s_ap_n, s_ap_shot ? "on" : "off");
     if (ver == 2 && s_ap_n > 0) ap_v2_orig_from_v3();
 }
 /* 12-бит углы кадра (80 байт) <-> 45 значений */
@@ -584,8 +584,8 @@ static void ap_tick(CPUState *cpu, uint32_t src) {
     { extern int dc_orig_pure(void);
       static int was_pure = 0;
       const int pure = dc_orig_pure();
-      if (pure && !was_pure) ap_restore_disk(ram, "оригинальный режим");
-      if (!pure && was_pure) fprintf(stderr, "aimpatch: наш режим — правленые стойки вернутся с первой распаковкой\n");
+      if (pure && !was_pure) ap_restore_disk(ram, "original mode");
+      if (!pure && was_pure) fprintf(stderr, "aimpatch: our mode - the edited stances come back with the first unpacking\n");
       was_pure = pure;
       if (pure) {
           /* и дальше держать диск: быстрая загрузка сейва, снятого в нашем режиме, приносит в RAM правленые кадры */
@@ -599,7 +599,7 @@ static void ap_tick(CPUState *cpu, uint32_t src) {
                   uint8_t *dst = ram + AP_BLOCK + M->off; const size_t len = (size_t)M->nframes * 80u;
                   if (memcmp(dst, disk, len) != 0) {
                       memcpy(dst, disk, len);
-                      if (++nk <= 20) fprintf(stderr, "aimpatch: оригинальный режим — %s M%02d снова с диска (правленые кадры пришли из сейва)\n", s_ap[s].name, M->motion);
+                      if (++nk <= 20) fprintf(stderr, "aimpatch: original mode - %s M%02d from the disc again (the edited frames came from a save)\n", s_ap[s].name, M->motion);
                   }
               }
           }
@@ -615,7 +615,7 @@ static void ap_tick(CPUState *cpu, uint32_t src) {
         cur = -1; chk = head; chk_valid = 1;
         for (int s = 0; s < s_ap_n; s++) if (ap_sig_match(&s_ap[s], ram)) { cur = s; break; }
         static int lastlog = -2;
-        if (cur != lastlog) { lastlog = cur; fprintf(stderr, "aimpatch: в RAM набор %s\n", cur >= 0 ? s_ap[cur].name : "(неизвестный)"); }
+        if (cur != lastlog) { lastlog = cur; fprintf(stderr, "aimpatch: set in RAM %s\n", cur >= 0 ? s_ap[cur].name : "(unknown)"); }
         s_ap_cur = cur;
     }
     { extern uint64_t s_frame_count; uint32_t sp0 = src & 0x1FFFFFu;
@@ -653,7 +653,7 @@ static void ap_tick(CPUState *cpu, uint32_t src) {
         if (memcmp(dst, M->frames, len) != 0) {
             if (!M->orig) { M->orig = (uint8_t *)malloc(len); if (M->orig) memcpy(M->orig, dst, len); }   /* первый раз: запомнить диск */
             memcpy(dst, M->frames, len);
-            static long np = 0; if (++np <= 12) fprintf(stderr, "aimpatch: %s M%02d — кадры стойки записаны в RAM\n", S->name, M->motion);
+            static long np = 0; if (++np <= 12) fprintf(stderr, "aimpatch: %s M%02d - stance frames written to RAM\n", S->name, M->motion);
         }
     }
     /* (2) аддитивный выстрел: на ПЕРВОМ кадре 0 нового проигрывания анимации выстрела
@@ -694,7 +694,7 @@ static void ap_tick(CPUState *cpu, uint32_t src) {
             memcpy(fr, M->frames + j * 80u, 12);        /* корень — эталонный */
             ap_pack45(fr, nw);
         }
-        static long ns = 0; if (++ns <= 20) fprintf(stderr, "aimpatch: выстрел %s M%02d — %u кадров переписаны аддитивно поверх текущей позы (base0=%u,%u,%u)\n",
+        static long ns = 0; if (++ns <= 20) fprintf(stderr, "aimpatch: shot %s M%02d - %u frames rewritten additively over the current pose (base0=%u,%u,%u)\n",
                                                    S->name, M->motion, M->nframes, base[0], base[1], base[2]);
         return;
     }
@@ -721,16 +721,16 @@ static void ap_restore_disk(uint8_t *ram, const char *why) {
             if (M->kind == 1) { if (M->frames) memcpy(ram + AP_BLOCK + M->off, M->frames, (size_t)M->nframes * 80u); }   /* эталон выстрела */
             else if (M->orig) memcpy(ram + AP_BLOCK + M->off, M->orig, (size_t)M->nframes * 80u);     /* стойка — как на диске */
         }
-        fprintf(stderr, "aimpatch: %s — кадры выстрелов и стоек %s возвращены к диску\n", why, s_ap[s].name);
+        fprintf(stderr, "aimpatch: %s - shot and stance frames of %s returned to the disc ones\n", why, s_ap[s].name);
     }
 }
 int pt_anim_aim_patch_toggle(int on) {
     if (s_ap_n < 0) ap_load();
     if (on < 0) return s_ap_on;
     uint8_t *ram = memory_get_ram_ptr();
-    if (!on && ram && s_ap_n > 0) ap_restore_disk(ram, "выключен");
+    if (!on && ram && s_ap_n > 0) ap_restore_disk(ram, "off");
     s_ap_on = on ? 1 : 0;
-    if (s_ap_on) fprintf(stderr, "aimpatch: включен\n");
+    if (s_ap_on) fprintf(stderr, "aimpatch: on\n");
     return s_ap_on;
 }
 
@@ -848,7 +848,7 @@ static int ao_extremes(uint8_t *ram) {
         pos = end; idx++;
     }
     s_ao_nmot = idx;
-    if (run < 3) { fprintf(stderr, "aimoff: стойки в наборе не найдены (перекарта выкл)\n"); return 0; }
+    if (run < 3) { fprintf(stderr, "aimoff: stances not found in the set (remap off)\n"); return 0; }
     int pistol = ((ram[0xB94CC] & 0xF0) == 0x20); float e[3]; s_ao_ext.pistol = pistol;   /* до ao_elev2: мера зависит от хвата */
     for (int j = 0; j < 3; j++) { int i = (j == 0) ? 1 : (j == 1 ? 0 : 2);            /* «прямо» первой: по ней калибруется ось */
                                   int ang[45]; float W[15][9], P[15][3]; ao_unpack45(ram + AP_BLOCK + f0s[i], ang); ao_fk(ang, W, P);
@@ -856,8 +856,8 @@ static int ao_extremes(uint8_t *ram) {
                                   e[i] = ao_elev2(W, P); memcpy(s_ao_ext.st_ang[i], ang, sizeof ang); }
     s_ao_ext.e_up = e[0]; s_ao_ext.e_level = e[1]; s_ao_ext.e_down = e[2]; s_ao_ext.pistol = pistol;
     memcpy(s_ao_ext.mot, mots, sizeof mots); s_ao_ext.valid = (e[0] > e[1] && e[1] > e[2]);
-    fprintf(stderr, "aimoff: набор в RAM: стойки M%02d/M%02d/M%02d, ось %s: вверх %+.0f прямо %+.0f вниз %+.0f град%s\n",
-            mots[0], mots[1], mots[2], s_ao_axis_hand ? "вперёд правой кисти (калибровка по стойке прямо)" : (pistol ? "плечо->кисть" : "кисть->кисть"), e[0], e[1], e[2], s_ao_ext.valid ? "" : " (порядок не вверх/прямо/вниз - перекарта выкл)");
+    fprintf(stderr, "aimoff: set in RAM: stances M%02d/M%02d/M%02d, axis %s: up %+.0f straight %+.0f down %+.0f deg%s\n",
+            mots[0], mots[1], mots[2], s_ao_axis_hand ? "forward of the right hand (calibrated by the straight stance)" : (pistol ? "shoulder->hand" : "hand->hand"), e[0], e[1], e[2], s_ao_ext.valid ? "" : " (the order is not up/straight/down - remap off)");
     return s_ao_ext.valid;
 }
 /* ось оружия при данном байте высоты: та же смесь стоек, что делает миксер игры (прямо -> крайняя,
@@ -1000,8 +1000,8 @@ static void ao_cfg(void) {
     e = getenv("DC_AIMOFF_BIAS_SG"); if (e && *e && !(s_ao_w_menu[1] & 2)) s_ao_w_fwd[1] = (float)atof(e);
     e = getenv("DC_AIMOFF_BIAS_GL"); if (e && *e && !(s_ao_w_menu[2] & 2)) s_ao_w_fwd[2] = (float)atof(e);
     s_ao_torso_g = s_ao_torso; s_ao_head_g = s_ao_head;
-    fprintf(stderr, "aimoff: %s (max %.0f град, torso %.2f, head %.2f, gain %.2f), перекарта байта высоты %s\n",
-            s_ao_on ? "вкл" : "выкл", s_ao_max, s_ao_torso, s_ao_head, s_ao_gain, s_ao_remap ? "вкл" : "выкл");
+    fprintf(stderr, "aimoff: %s (max %.0f deg, torso %.2f, head %.2f, gain %.2f), height byte remap %s\n",
+            s_ao_on ? "on" : "off", s_ao_max, s_ao_torso, s_ao_head, s_ao_gain, s_ao_remap ? "on" : "off");
 }
 /* (1) байт высоты прицела по высоте перекрестия. pitch_down_rad - наклон камеры (>0 вниз) минус
  * уровень; legacy_gain - старый множитель для отката. Возвращает 0..255. */
@@ -1609,7 +1609,7 @@ static void ao_enter_main(CPUState *cpu, int gate_actor) {
     s_ao.active = 1; s_ao.applied++;
     ao_note_out(ram);
     { extern uint64_t s_frame_count; s_ao.frame = (uint32_t)s_frame_count; }
-    { static long n = 0; if ((++n % 120) == 1) fprintf(stderr, "aimoff: ось %+.1f цель %+.1f доворот %+.1f град (%s)\n", elev, s_ao_target_deg, s_ao.cur, s_ao.two ? "обе руки" : "правая"); }
+    { static long n = 0; if ((++n % 120) == 1) fprintf(stderr, "aimoff: axis %+.1f target %+.1f extra turn %+.1f deg (%s)\n", elev, s_ao_target_deg, s_ao.cur, s_ao.two ? "both hands" : "right"); }
 }
 void pt_anim_aimoff_exit(CPUState *cpu) {
     (void)cpu;

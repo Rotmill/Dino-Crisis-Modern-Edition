@@ -52,10 +52,18 @@ int dcvk_raster_init(void);
 static const PtvkCore* C = nullptr;
 extern "C" int dc_diag_log(void);   /* dc_boot.c: DC_DIAG_LOG, off in a release */
 static FILE* s_log = nullptr;
+/* 23.10.2026 (GitHub #1, #2: crashes on players' machines with nothing to go by): a release has no dcvk_raster.txt, so
+ * what the game's log needs from here goes to stderr too - everything said while the raster comes up and the shaders
+ * are prepared (s_rlogMirror), the shared Direct3D 11 texture and every failure; the per-frame chatter stays here. */
+static std::atomic<int> s_rlogMirror{ 0 };
 static void rlog(const char* fmt, ...) {
-    if (!s_log) return;
-    va_list ap; va_start(ap, fmt); vfprintf(s_log, fmt, ap); va_end(ap);
-    fflush(s_log);
+    const bool mirror = s_rlogMirror.load(std::memory_order_relaxed) || strstr(fmt, "FAILED") || strstr(fmt, "hang") ||
+                        strstr(fmt, "shared:");
+    if (!s_log && !mirror) return;
+    char line[1024];
+    va_list ap; va_start(ap, fmt); vsnprintf(line, sizeof line, fmt, ap); va_end(ap);
+    if (s_log) { fputs(line, s_log); fflush(s_log); }
+    if (mirror) fputs(line, stderr);
 }
 
 // ---- 11.10.2026: pipeline cache --------------------------------------------------------------------------------
@@ -141,6 +149,9 @@ static void pc_tick(void) {
 }
 static std::mutex s_vkpMtx;
 static VkResult vkp_create(const VkGraphicsPipelineCreateInfo* gp, VkPipeline* out, const char* what) {
+    /* 23.10.2026: the name goes into the log BEFORE the driver compiles it - a crash inside the driver's shader compiler
+     * (GitHub #2: right after the shader preparation, Intel UHD 630) then has this pipeline among the last lines */
+    fprintf(stderr, "vkpipe: building %s%c", what, 10);
     LARGE_INTEGER fq, a, b; QueryPerformanceFrequency(&fq); QueryPerformanceCounter(&a);
     const VkResult r = vkCreateGraphicsPipelines(C->device, s_pcache, 1, gp, nullptr, out);
     QueryPerformanceCounter(&b);
@@ -653,13 +664,13 @@ static bool makeBufStream(VkDeviceSize size, VkBuffer* buf, VkDeviceMemory* mem,
     const VkMemoryPropertyFlags plain = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     if (vstream_cached_on()) {
         if (makeBuf(size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, plain | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, buf, mem, map) && *map) {
-            rlog("[VKR] %s: кэшируемая память хоста (HOST_CACHED)\n", what);
+            rlog("[VKR] %s: cached host memory (HOST_CACHED)\n", what);
             return true;
         }
         if (*buf) { vkDestroyBuffer(C->device, *buf, nullptr); *buf = VK_NULL_HANDLE; }
         if (*mem) { vkFreeMemory(C->device, *mem, nullptr); *mem = VK_NULL_HANDLE; }
         *map = nullptr;
-        rlog("[VKR] %s: кэшируемой памяти нет — как раньше\n", what);
+        rlog("[VKR] %s: no cached memory - as before\n", what);
     }
     return makeBuf(size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, plain, buf, mem, map);
 }
@@ -1160,11 +1171,11 @@ static void pp_init(void) {
         }
     }
     pp_clamp();
-    std::fprintf(stderr, "post: SSAO %s (радиус %.0f, сила %.2f, выборок %.0f), MSAA %dx%s%s%c",
-                 s_ppSsao ? "вкл" : "выкл", s_pp[PP_RADIUS], s_pp[PP_STRENGTH], s_pp[PP_SAMPLES], s_ppMsaa,
-                 s_ppSshade ? " по выборкам" : "", fromFile ? " — из dc_post_user.cfg" : "", 10);
-    std::fprintf(stderr, "post: вспышки как свет %s (выстрел сила %.2f радиус %.0f %.0f мс, взрыв сила %.2f радиус %.0f %.0f мс, обтекание %.2f)%c",
-                 s_pp[PP_FL_ON] > 0.5f ? "вкл" : "выкл", s_pp[PP_FL_SSTR], s_pp[PP_FL_SRAD], s_pp[PP_FL_SMS],
+    std::fprintf(stderr, "post: SSAO %s (radius %.0f, strength %.2f, samples %.0f), MSAA %dx%s%s%c",
+                 s_ppSsao ? "on" : "off", s_pp[PP_RADIUS], s_pp[PP_STRENGTH], s_pp[PP_SAMPLES], s_ppMsaa,
+                 s_ppSshade ? " per sample" : "", fromFile ? " - from dc_post_user.cfg" : "", 10);
+    std::fprintf(stderr, "post: flashes as light %s (shot strength %.2f radius %.0f %.0f ms, blast strength %.2f radius %.0f %.0f ms, wrap %.2f)%c",
+                 s_pp[PP_FL_ON] > 0.5f ? "on" : "off", s_pp[PP_FL_SSTR], s_pp[PP_FL_SRAD], s_pp[PP_FL_SMS],
                  s_pp[PP_FL_BSTR], s_pp[PP_FL_BRAD], s_pp[PP_FL_BMS], s_pp[PP_FL_WRAP], 10);
 }
 #ifdef DCME_RELEASE   /* ME V3 post settings: end */
@@ -1280,7 +1291,7 @@ static void pp_caps(void) {
         q.queryType = VK_QUERY_TYPE_TIMESTAMP; q.queryCount = 16;  /* 09.10: 3..12 - этапы кадра (DC_VK_STAGES) */
         if (vkCreateQueryPool(C->device, &q, nullptr, &s_tq) == VK_SUCCESS) s_tqOk = 1;
     }
-    rlog("[VKR] post: MSAA до %dx, sampleRateShading %d, метки времени %u бит (%.2f нс)\n",
+    rlog("[VKR] post: MSAA up to %dx, sampleRateShading %d, timestamps %u bits (%.2f ns)\n",
          s_ppMsaaMax, s_ppSSok, s_tsBits, (double)s_tsPeriod);
 }
 static void pp_ts_reset(void) { if (s_tqOk) vkCmdResetQueryPool(s_cmd, s_tq, 0, 13); }
@@ -1324,8 +1335,8 @@ static void pp_ts_read(void) {
     static int dbg = -1; static long n = 0;
     if (dbg < 0) { const char* e = getenv("DC_POST_DBG"); dbg = (e && *e == '1') ? 1 : 0; }
     if (dbg && (++n % 120) == 0)
-        std::fprintf(stderr, "post: GPU кадр %.3f мс, SSAO %.3f мс (сейчас %.3f / %.3f), MSAA %dx%s, SSAO %s%c",
-                     s_gpuMain, s_gpuPost, a, b, s_ppMsFrame, s_ppSshade ? " по выборкам" : "", s_ppAoFrame ? "в кадре" : "нет", 10);
+        std::fprintf(stderr, "post: GPU frame %.3f ms, SSAO %.3f ms (now %.3f / %.3f), MSAA %dx%s, SSAO %s%c",
+                     s_gpuMain, s_gpuPost, a, b, s_ppMsFrame, s_ppSshade ? " per sample" : "", s_ppAoFrame ? "in the frame" : "no", 10);
 }
 
 static bool pp_mkImage(VkFormat fmt, VkSampleCountFlagBits ns, VkImageUsageFlags use, VkImageAspectFlags asp,
@@ -1621,7 +1632,7 @@ static bool msaaBuild(int n, int ss) {
           }
       } }
     msaaFree();
-    if (n <= 1) { std::fprintf(stderr, "post: сглаживание краёв MSAA выкл%c", 10); return true; }
+    if (n <= 1) { std::fprintf(stderr, "post: MSAA edge smoothing off%c", 10); return true; }
     const VkSampleCountFlagBits ns = (VkSampleCountFlagBits)n;
     VkAttachmentDescription a[3]{};
     a[0].format = VK_FORMAT_R8G8B8A8_UNORM; a[0].samples = ns;                 /* цвет N выборок */
@@ -1665,22 +1676,22 @@ static bool msaaBuild(int n, int ss) {
     if (ok && !mkRasterPipes(s_rpMS, ns, ss, s_pipesMS, &s_bgPipeMS)) {
         if (ss == 2) {   /* 09.10: нет dc_raster_sl.frag.spv — прежний «по выборкам» (шейдер на каждую выборку) */
             ss = 1; s_ppSLfail = 1;
-            std::fprintf(stderr, "post: MSAA «по выборкам» со светом на пиксель не собралось — шейдер на каждую выборку%c", 10);
+            std::fprintf(stderr, "post: per-sample MSAA with lighting per pixel failed to build - the shader runs for every sample%c", 10);
             ok = mkRasterPipes(s_rpMS, ns, 1, s_pipesMS, &s_bgPipeMS);
         } else ok = false;
         if (!ok && ss) { ss = 0; ok = mkRasterPipes(s_rpMS, ns, 0, s_pipesMS, &s_bgPipeMS);   /* нет dc_raster_ss.frag.spv — без «по выборкам» */
-                         std::fprintf(stderr, "post: MSAA «по выборкам» не собралось — без него%c", 10); }
+                         std::fprintf(stderr, "post: per-sample MSAA failed to build - without it%c", 10); }
     }
     if (!ok) {
-        rlog("[VKR] MSAA %dx: сборка не удалась\n", n);
-        std::fprintf(stderr, "post: MSAA %dx не собралось — кадр без него%c", n, 10);
+        rlog("[VKR] MSAA %dx: build failed\n", n);
+        std::fprintf(stderr, "post: MSAA %dx failed to build - the frame goes without it%c", n, 10);
         msaaFree();
         return false;
     }
     s_msN = n; s_msSS = ss; s_msW = W; s_msH = H; s_msResolveOf = s_colView;
-    rlog("[VKR] MSAA %dx ready (%dx%d, по выборкам %d)\n", n, W, H, s_msSS);
-    std::fprintf(stderr, "post: сглаживание краёв MSAA %dx%s (цели %dx%d)%c", n,
-                 s_msSS == 2 ? ", по выборкам (свет на пиксель)" : s_msSS ? ", по выборкам" : "", W, H, 10);
+    rlog("[VKR] MSAA %dx ready (%dx%d, per sample %d)\n", n, W, H, s_msSS);
+    std::fprintf(stderr, "post: MSAA %dx edge smoothing%s (targets %dx%d)%c", n,
+                 s_msSS == 2 ? ", per sample (lighting per pixel)" : s_msSS ? ", per sample" : "", W, H, 10);
     return true;
 }
 /* 11.10.2026: the MSAA set is built in the background right after the start (msaaPrewarm, into the pipeline cache) - the
@@ -1876,14 +1887,14 @@ static int postObjects(void) {
                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, &s_rpComp))
             return 0;
         VkShaderModule pvs = loadSpv("dc_post.vert.spv");
-        if (!pvs) { std::fprintf(stderr, "post: нет shaders\\dc_post.vert.spv — SSAO не будет%c", 10); return 0; }
+        if (!pvs) { std::fprintf(stderr, "post: no shaders\\dc_post.vert.spv - no SSAO%c", 10); return 0; }
         const bool ok = pp_mkPipe(pvs, "shaders\\dc_ssao_z.frag.spv",     0, s_rpZ,    &s_zPipe[0])
                      && pp_mkPipe(pvs, "shaders\\dc_ssao_z_ms.frag.spv",  0, s_rpZ,    &s_zPipe[1])
                      && pp_mkPipe(pvs, "shaders\\dc_ssao.frag.spv",       0, s_rpAO,   &s_aoPipe)
                      && pp_mkPipe(pvs, "shaders\\dc_ssao_comp.frag.spv",  1, s_rpComp, &s_compPipe)
                      && pp_mkPipe(pvs, "shaders\\dc_ssao_comp.frag.spv",  0, s_rpComp, &s_compDbgPipe);
         vkDestroyShaderModule(C->device, pvs, nullptr);
-        if (!ok) { std::fprintf(stderr, "post: конвейеры SSAO не собраны — SSAO не будет%c", 10); return 0; }
+        if (!ok) { std::fprintf(stderr, "post: SSAO pipelines failed to build - no SSAO%c", 10); return 0; }
         s_ppOk = 1;
         rlog("[VKR] SSAO ready\n");
     }
@@ -1915,7 +1926,7 @@ static int postEnsure(void) {
                   ok = vkCreateFramebuffer(C->device, &fci, nullptr, &s_fbAO) == VK_SUCCESS; }
         if (ok) { fci.renderPass = s_rpComp; fci.pAttachments = &s_colView; fci.width = (uint32_t)s_fbW; fci.height = (uint32_t)s_fbH;
                   ok = vkCreateFramebuffer(C->device, &fci, nullptr, &s_fbComp) == VK_SUCCESS; }
-        if (!ok) { s_ppOk = -1; std::fprintf(stderr, "post: буферы SSAO не созданы — SSAO не будет%c", 10); return 0; }
+        if (!ok) { s_ppOk = -1; std::fprintf(stderr, "post: SSAO buffers not created - no SSAO%c", 10); return 0; }
         VkDescriptorImageInfo ii[3] = { { s_pSamp, s_colView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
                                         { s_pSamp, s_aoView,  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
                                         { s_pSamp, s_zView,   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL } };
@@ -2257,13 +2268,13 @@ static int fxObjects(void) {
             const bool ok = fvs && ffs && r2[0] && r2[1];
             if (fvs) vkDestroyShaderModule(C->device, fvs, nullptr);
             if (ffs) vkDestroyShaderModule(C->device, ffs, nullptr);
-            if (!ok) { std::fprintf(stderr, "fx: нет shaders\\dc_fx.vert.spv / dc_fx.frag.spv или конвейер не собран — свечения и отражений не будет%c", 10); return 0; } }
+            if (!ok) { std::fprintf(stderr, "fx: no shaders\\dc_fx.vert.spv / dc_fx.frag.spv or the pipeline failed to build - no glow and no reflections%c", 10); return 0; } }
         {   VkShaderModule pvs = loadSpv("dc_post.vert.spv");
             const bool ok = pvs && fx_mkPost(pvs, "shaders\\dc_glow_blur.frag.spv", 0, s_rpGB, &s_gBlurPipe)
                          && fx_mkPost(pvs, "shaders\\dc_glow_comp.frag.spv", 2, s_rpGC, &s_gCompPipe)
                          && fx_mkPost(pvs, "shaders\\dc_glow_comp.frag.spv", 0, s_rpGC, &s_gCompDbgPipe);
             if (pvs) vkDestroyShaderModule(C->device, pvs, nullptr);
-            if (!ok) { std::fprintf(stderr, "fx: конвейеры размытия/сложения свечения не собраны — эффектов не будет%c", 10); return 0; } }
+            if (!ok) { std::fprintf(stderr, "fx: glow blur/add pipelines failed to build - no effects%c", 10); return 0; } }
         s_fxOk = 1;
         rlog("[VKR] fx (glow + reflections) ready\n");
     }
@@ -2301,7 +2312,7 @@ static int fxEnsure(void) {
                 && mkfb(s_rpGB, s_fxView[FXI_Q], VK_NULL_HANDLE, qw, qh, &s_fbQ)
                 && mkfb(s_rpGB, s_fxView[FXI_G2], VK_NULL_HANDLE, qw, qh, &s_fbG2)
                 && mkfb(s_rpGC, s_colView, VK_NULL_HANDLE, s_fbW, s_fbH, &s_fbGC);
-        if (!ok) { fx_freeTargets(); s_fxOk = -1; std::fprintf(stderr, "fx: цели свечения/отражения не созданы — эффектов не будет%c", 10); return 0; }
+        if (!ok) { fx_freeTargets(); s_fxOk = -1; std::fprintf(stderr, "fx: glow/reflection targets not created - no effects%c", 10); return 0; }
         {   const int src[5][3] = { { FXI_E, -1, -1 }, { FXI_T, -1, -1 }, { FXI_E, -1, -1 }, { FXI_Q, -1, -1 }, { FXI_G1, FXI_G2, FXI_R } };
             VkDescriptorImageInfo ii[15]; VkWriteDescriptorSet wd[15]{}; int nw = 0;
             for (int s = 0; s < 5; s++)
@@ -2319,7 +2330,7 @@ static int fxEnsure(void) {
             vkUpdateDescriptorSets(C->device, (uint32_t)nw, wd, 0, nullptr); }
         s_fxFresh = 1;
         s_fxW = s_fbW; s_fxH = s_fbH; s_fxColOf = s_colView;
-        std::fprintf(stderr, "fx: цели свечения и отражения %dx%d / %dx%d%c", hw, hh, qw, qh, 10);
+        std::fprintf(stderr, "fx: glow and reflection targets %dx%d / %dx%d%c", hw, hh, qw, qh, 10);
     }
     return 1;
 }
@@ -2422,7 +2433,7 @@ static void fx_geom_pass(int mode, const std::vector<Draw>& draws, const std::ve
     vkCmdEndRenderPass(s_cmd);
     { static int dbg = -1; static long k = 0;
       if (dbg < 0) { const char* e = getenv("DC_FX_LOG"); dbg = (e && *e == '1') ? 1 : 0; }
-      if (dbg && (++k % 120) == 1) std::fprintf(stderr, "fx: проход %s — draw %ld%c", mode == 1 ? "свечения" : "отражения", nd, 10); }
+      if (dbg && (++k % 120) == 1) std::fprintf(stderr, "fx: %s pass - draw %ld%c", mode == 1 ? "glow" : "reflection", nd, 10); }
 }
 /* ===== ПЕЛЕНА ИГРЫ ПОВЕРХ ДЫМКИ И СВЕЧЕНИЯ (28.09.2026 (6)) ==============================================================
  * Игрок (слот 14, вход в комнату; слот 16, сцена): «дымка видна всегда и не сразу появляется/затухает… так же видна в сценах
@@ -2481,7 +2492,7 @@ static void veil_collect(const std::vector<Draw>& draws, const std::vector<size_
       if (dbg < 0) { const char* e = getenv("DC_POST_VEIL_LOG"); dbg = (e && *e == '1') ? 1 : 0; }
       if ((dbg && (++k % 30) == 1) || (s_veilN != lastN && (s_veilN == 0 || lastN <= 0))) {
           std::fprintf(stderr, "veil: %d band(s) over the world this frame%s", s_veilN, s_veilN ? ":" : "");
-          for (int q = 0; q < s_veilN; q++) std::fprintf(stderr, " [rows %.0f..%.0f of %d, x%.2f −%.2f]", s_veil[q].y0, s_veil[q].y1, h, s_veil[q].mul, s_veil[q].sub);
+          for (int q = 0; q < s_veilN; q++) std::fprintf(stderr, " [rows %.0f..%.0f of %d, x%.2f -%.2f]", s_veil[q].y0, s_veil[q].y1, h, s_veil[q].mul, s_veil[q].sub);
           if (dropped) std::fprintf(stderr, " (%d more not taken)", dropped);
           std::fprintf(stderr, " - haze and glow go under them%c", 10);
       }
@@ -2653,7 +2664,7 @@ static int volObjects(void) {
                      && v_mkPipe(dvs, dfs, 1, s_rpComp, &s_vDustPipe);
         VkShaderModule mods[5] = { pvs, vfs, cfs, dvs, dfs };
         for (int i = 0; i < 5; i++) if (mods[i]) vkDestroyShaderModule(C->device, mods[i], nullptr);
-        if (!ok) { std::fprintf(stderr, "vol: нет shaders\\dc_vol*.spv / dc_dust.*.spv или конвейер не собран — объёмного света не будет%c", 10); return 0; }
+        if (!ok) { std::fprintf(stderr, "vol: no shaders\\dc_vol*.spv / dc_dust.*.spv or the pipeline failed to build - no volumetric light%c", 10); return 0; }
         s_vOk = 1;
         rlog("[VKR] vol (volumetric lamps + dust) ready\n");
     }
@@ -2678,9 +2689,9 @@ static int volEnsure(void) {
             fci.width = (uint32_t)hw; fci.height = (uint32_t)hh; fci.layers = 1;
             ok = vkCreateFramebuffer(C->device, &fci, nullptr, &s_fbV) == VK_SUCCESS;
         }
-        if (!ok) { s_vOk = -1; std::fprintf(stderr, "vol: цель дымки не создана — объёмного света не будет%c", 10); return 0; }
+        if (!ok) { s_vOk = -1; std::fprintf(stderr, "vol: haze target not created - no volumetric light%c", 10); return 0; }
         s_vW = s_fbW; s_vH = s_fbH; s_vZOf = VK_NULL_HANDLE;
-        std::fprintf(stderr, "vol: цель дымки %dx%d%c", hw, hh, 10);
+        std::fprintf(stderr, "vol: haze target %dx%d%c", hw, hh, 10);
     }
     if (s_vZOf != s_zView) {                          /* глубина SSAO пересоздана (размер кадра) — набор заново */
         VkDescriptorImageInfo ii[3] = { { s_pSamp,  s_zView,  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
@@ -2752,8 +2763,8 @@ static void vol_run(int w, int h, const float* view, const float* wp, const floa
     { static int dbg = -1; static long k = 0;
       if (dbg < 0) { const char* e = getenv("DC_VOL_LOG"); dbg = (e && *e == '1') ? 1 : 0; }
       if (dbg && (++k % 120) == 1 && s_shUboMap)
-          std::fprintf(stderr, "vol: кадр %s, ламп игры %.0f (матрицы %s), текстур «светится» %.0f, пылинок %d, t %.1f с%c",
-                       warp16 ? "B" : "A", s_shUboMap[256], s_shUboMap[259] > 0.5f ? "да" : "нет", s_shUboMap[140], nd, tsec, 10); }
+          std::fprintf(stderr, "vol: frame %s, game lamps %.0f (matrices %s), 'glows' textures %.0f, dust motes %d, t %.1f s%c",
+                       warp16 ? "B" : "A", s_shUboMap[256], s_shUboMap[259] > 0.5f ? "yes" : "no", s_shUboMap[140], nd, tsec, 10); }
 }
 
 /* ===== СВЕТ ОТ СВЕТЯЩИХСЯ ТЕКСТУР (25.09.2026 поздно) ===============================================================
@@ -2982,11 +2993,11 @@ static int gl_steady_out(const GlClus* cl, int ncl) {
       if (lg >= 2) {
           char buf[2400]; int p = 0; float sum = 0.f;
           for (int j = 0; j < n; j++) sum += gl_max3(gl_slot_c(j));
-          p += snprintf(buf + p, sizeof buf - p, "glowlight2: t=%.3f ровно групп %d следов %d вывод %d сумма %.4f%s%s |", now, ncl, nt, n, sum,
-                        room ? "" : " (без матриц)", cut ? " СМЕНА РАКУРСА" : "");
+          p += snprintf(buf + p, sizeof buf - p, "glowlight2: t=%.3f steady groups %d traces %d out %d sum %.4f%s%s |", now, ncl, nt, n, sum,
+                        room ? "" : " (no matrices)", cut ? " SHOT CHANGE" : "");
           for (int j = 0; j < n && p < (int)sizeof buf - 90; j++) {
               const GlTrack& T = s_glt[tix[sel[j]]];
-              p += snprintf(buf + p, sizeof buf - p, " #%d %s %.3f к %.0f,%.0f,%.0f;", T.id, T.hit ? "видна" : "держится",
+              p += snprintf(buf + p, sizeof buf - p, " #%d %s %.3f at %.0f,%.0f,%.0f;", T.id, T.hit ? "visible" : "held",
                             gl_max3(gl_slot_c(j)), T.pos[0], T.pos[1], T.pos[2]);
           }
           std::fprintf(stderr, "%s%c", buf, 10);
@@ -3008,7 +3019,7 @@ static void gl_lights_build(void) {
      * (N = 2 — как плашка игры через кадр, N = 20 — медленное мигание); 0 — нет */
     static int tbN = -1; static long tbK = 0;
     if (tbN < 0) { const char* e = getenv("DC_GLOW_LIGHT_TESTBLINK"); tbN = e ? atoi(e) : 0; if (tbN < 2) tbN = 0;
-                   if (tbN) std::fprintf(stderr, "glowlight: ПРОВЕРКА — лампы «светится» гаснут на %d из каждых %d кадров (DC_GLOW_LIGHT_TESTBLINK)%c", tbN / 2, tbN, 10); }
+                   if (tbN) std::fprintf(stderr, "glowlight: TEST - 'glows' lamps go out for %d of every %d frames (DC_GLOW_LIGHT_TESTBLINK)%c", tbN / 2, tbN, 10); }
     const int tbOff = tbN ? (int)((tbK++ % tbN) >= tbN - tbN / 2) : 0;
     for (int i = 0; i + 2 < s_nverts; i += 3) {
         const float* v0 = s_vmap + (size_t)i * VERT_FLOATS;
@@ -3086,10 +3097,10 @@ static void gl_lights_build(void) {
         gl_set_count(n);
         s_glN = n;
         if (lg && (++k2 % 120) == 1) {
-            std::fprintf(stderr, "glowlight: источников %d (групп %d), ровный свет мигающих%c", n, ncl, 10);
+            std::fprintf(stderr, "glowlight: %d sources (%d groups), steady light for blinking ones%c", n, ncl, 10);
             for (int j = 0; j < n; j++) {
                 const float *gp = gl_slot_p(j), *gc = gl_slot_c(j);
-                std::fprintf(stderr, "   #%d у %.0f,%.0f,%.0f радиус %.0f цвет %.2f,%.2f,%.2f%c", j, gp[0], gp[1], gp[2], gp[3],
+                std::fprintf(stderr, "   #%d at %.0f,%.0f,%.0f radius %.0f color %.2f,%.2f,%.2f%c", j, gp[0], gp[1], gp[2], gp[3],
                              gc[0], gc[1], gc[2], 10);
             }
         }
@@ -3127,9 +3138,9 @@ static void gl_lights_build(void) {
     gl_set_count(n);
     s_glN = n;
     if (lg && (++k2 % 120) == 1) {
-        std::fprintf(stderr, "glowlight: источников %d (групп %d)%c", n, ncl, 10);
+        std::fprintf(stderr, "glowlight: %d sources (%d groups)%c", n, ncl, 10);
         for (int j = 0; j < n; j++)
-            std::fprintf(stderr, "   #%d у %.0f,%.0f,%.0f радиус %.0f цвет %.2f,%.2f,%.2f%c", j, s_shUboMap[144 + j * 4],
+            std::fprintf(stderr, "   #%d at %.0f,%.0f,%.0f radius %.0f color %.2f,%.2f,%.2f%c", j, s_shUboMap[144 + j * 4],
                          s_shUboMap[145 + j * 4], s_shUboMap[146 + j * 4], s_shUboMap[147 + j * 4],
                          s_shUboMap[176 + j * 4], s_shUboMap[177 + j * 4], s_shUboMap[178 + j * 4], 10);
     }
@@ -3137,11 +3148,11 @@ static void gl_lights_build(void) {
         LARGE_INTEGER qf, qc; QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&qc);
         char buf[1024]; int p = 0; float sum = 0.f;
         for (int j = 0; j < n; j++) { const float* g = s_shUboMap + 176 + j * 4; sum += g[0] > g[1] ? (g[0] > g[2] ? g[0] : g[2]) : (g[1] > g[2] ? g[1] : g[2]); }
-        p += snprintf(buf + p, sizeof buf - p, "glowlight2: t=%.3f как было групп %d вывод %d сумма %.4f |",
+        p += snprintf(buf + p, sizeof buf - p, "glowlight2: t=%.3f as before groups %d out %d sum %.4f |",
                       (double)qc.QuadPart / (double)qf.QuadPart, ncl, n, sum);
         for (int j = 0; j < n && p < (int)sizeof buf - 60; j++) {
             const float* g = s_shUboMap + 176 + j * 4;
-            p += snprintf(buf + p, sizeof buf - p, " %.3f у %.0f,%.0f,%.0f;", g[0] > g[1] ? (g[0] > g[2] ? g[0] : g[2]) : (g[1] > g[2] ? g[1] : g[2]),
+            p += snprintf(buf + p, sizeof buf - p, " %.3f at %.0f,%.0f,%.0f;", g[0] > g[1] ? (g[0] > g[2] ? g[0] : g[2]) : (g[1] > g[2] ? g[1] : g[2]),
                           s_shUboMap[144 + j * 4], s_shUboMap[145 + j * 4], s_shUboMap[146 + j * 4]);
         }
         std::fprintf(stderr, "%s%c", buf, 10);
@@ -3186,7 +3197,7 @@ static int mpfEnsure(void) {
     const VkImageUsageFlags cu = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     for (int i = 0; i < MPF_N; i++) {
         if (!pp_mkImage(HF, VK_SAMPLE_COUNT_1_BIT, cu, VK_IMAGE_ASPECT_COLOR_BIT, R, R, &s_mpfImg[i], &s_mpfMem[i], &s_mpfView[i]))
-            { std::fprintf(stderr, "moonpf: образы не созданы — лунная тень прежним путём%c", 10); return 0; }
+            { std::fprintf(stderr, "moonpf: images not created - the moon shadow takes the old path%c", 10); return 0; }
         VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
         fci.renderPass = s_rpGB; fci.attachmentCount = 1; fci.pAttachments = &s_mpfView[i];
         fci.width = (uint32_t)R; fci.height = (uint32_t)R; fci.layers = 1;
@@ -3196,7 +3207,7 @@ static int mpfEnsure(void) {
         const bool ok = pvs && fx_mkPost(pvs, "shaders\\dc_moon_pf.frag.spv", 0, s_rpGB, &s_mpfDownPipe)
                             && fx_mkPost(pvs, "shaders\\dc_moon_pack.frag.spv", 0, s_rpGB, &s_mpfPackPipe);
         if (pvs) vkDestroyShaderModule(C->device, pvs, nullptr);
-        if (!ok) { std::fprintf(stderr, "moonpf: нет shaders\\dc_moon_pf.frag.spv / dc_moon_pack.frag.spv — лунная тень прежним путём%c", 10); return 0; } }
+        if (!ok) { std::fprintf(stderr, "moonpf: no shaders\\dc_moon_pf.frag.spv / dc_moon_pack.frag.spv - the moon shadow takes the old path%c", 10); return 0; } }
     if (!pp_mkPass(HF, 2, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,   /* нет — проходы по всей карте */
                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, &s_rpGBclr))
         s_rpGBclr = VK_NULL_HANDLE;
@@ -3225,7 +3236,7 @@ static int mpfEnsure(void) {
         vkUpdateDescriptorSets(C->device, (uint32_t)nw, wd, 0, nullptr); }
     s_mpfFresh = 1;
     s_mpfOk = 1;
-    std::fprintf(stderr, "moonpf: гладкая лунная тень готова — карта %dx%d (ужатие %dx%d)%c", R, R, s_shSize / R, s_shSize / R, 10);
+    std::fprintf(stderr, "moonpf: smooth moon shadow ready - map %dx%d (reduced %dx%d)%c", R, R, s_shSize / R, s_shSize / R, 10);
     return 1;
 }
 /* новые образы — сразу в SHADER_READ_ONLY: биндинг 6 растр читает в любом кадре */
@@ -3333,7 +3344,7 @@ static int spfEnsure(void) {
     const VkFormat F = VK_FORMAT_R16G16_SFLOAT;
     if (!pp_mkPass(F, 0, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, &s_rpSPF))
-        { std::fprintf(stderr, "shpf: проход не создан — тени прежним путём%c", 10); return 0; }
+        { std::fprintf(stderr, "shpf: pass not created - shadows take the old path%c", 10); return 0; }
     if (!pp_mkPass(F, 2, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,   /* 09.10; нет — уровни целиком */
                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, &s_rpSPFclr))
         s_rpSPFclr = VK_NULL_HANDLE;
@@ -3346,13 +3357,13 @@ static int spfEnsure(void) {
         ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         if (vkCreateImage(C->device, &ici, nullptr, &s_spfImg) != VK_SUCCESS)
-            { std::fprintf(stderr, "shpf: образ не создан — тени прежним путём%c", 10); return 0; }
+            { std::fprintf(stderr, "shpf: image not created - shadows take the old path%c", 10); return 0; }
         VkMemoryRequirements mr; vkGetImageMemoryRequirements(C->device, s_spfImg, &mr);
         VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
         mai.allocationSize = mr.size;
         mai.memoryTypeIndex = memType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         if (mai.memoryTypeIndex == ~0u || vkAllocateMemory(C->device, &mai, nullptr, &s_spfMem) != VK_SUCCESS)
-            { std::fprintf(stderr, "shpf: нет памяти под пирамиду — тени прежним путём%c", 10); return 0; }
+            { std::fprintf(stderr, "shpf: no memory for the pyramid - shadows take the old path%c", 10); return 0; }
         vkBindImageMemory(C->device, s_spfImg, s_spfMem, 0);
         VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
         vci.image = s_spfImg; vci.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY; vci.format = F;
@@ -3381,7 +3392,7 @@ static int spfEnsure(void) {
         const bool ok = pvs && fx_mkPost(pvs, "shaders\\dc_shpf_down.frag.spv", 0, s_rpSPF, &s_spfDownPipe)
                             && fx_mkPost(pvs, "shaders\\dc_shpf_pyr.frag.spv", 0, s_rpSPF, &s_spfPyrPipe);
         if (pvs) vkDestroyShaderModule(C->device, pvs, nullptr);
-        if (!ok) { std::fprintf(stderr, "shpf: нет shaders\\dc_shpf_down.frag.spv / dc_shpf_pyr.frag.spv — тени прежним путём%c", 10); return 0; } }
+        if (!ok) { std::fprintf(stderr, "shpf: no shaders\\dc_shpf_down.frag.spv / dc_shpf_pyr.frag.spv - shadows take the old path%c", 10); return 0; } }
     {   enum { NSMAX = SH_MAX * SPF_LV };
         const int NS = SH_MAX * s_spfLevels;
         VkDescriptorPoolSize psz{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, (uint32_t)(3 * NS) };
@@ -3409,7 +3420,7 @@ static int spfEnsure(void) {
         vkUpdateDescriptorSets(C->device, (uint32_t)nw, wd, 0, nullptr); }
     s_spfFresh = 1;
     s_spfOk = 1;
-    std::fprintf(stderr, "shpf: тени без зерна готовы — пирамида %dx%d, уровней %d, слоёв %d%c", s_spfRes, s_spfRes, s_spfLevels, SH_MAX, 10);
+    std::fprintf(stderr, "shpf: grain-free shadows ready - pyramid %dx%d, %d levels, %d layers%c", s_spfRes, s_spfRes, s_spfLevels, SH_MAX, 10);
     return 1;
 }
 /* новый образ — сразу в SHADER_READ_ONLY: биндинг 7 растр держит в любом кадре */
@@ -3582,7 +3593,7 @@ static bool buildFixed() {
         dcvk_shadow_shape(nullptr, 0);                /* 27.09: мягкость теней — круг, пока лампы-текстуры не зададут форму */
         s_shUboMap[115] = -1.f;                 /* луны нет */
     } else {
-        rlog("[VKR] блок данных теней не создан\n");
+        rlog("[VKR] shadow data block not created\n");
     }
     {
         /* размер карты: 2048 даёт пятно на персонажа в полсотни текселей даже
@@ -3659,16 +3670,16 @@ static bool buildFixed() {
                 }
             }
         }
-        if (!s_shOk) rlog("[VKR] карта теней не создана\n");
+        if (!s_shOk) rlog("[VKR] shadow map not created\n");
     }
 
     // vertex stream + shaders + 10 pipeline variants
     /* 06.10.2026: оба потока — makeBufStream (кэшируемая память, см. vstream_cached_on) */
     if (!makeBufStream((VkDeviceSize)MAX_VERTS * VERT_FLOATS * sizeof(float),
-                       &s_vbuf, &s_vmem, (void**)&s_vmap, "поток вершин")) return false;
+                       &s_vbuf, &s_vmem, (void**)&s_vmap, "vertex stream")) return false;
     /* 05.10: второй поток вершин (текстура PNG из mods) — по 4 числа на вершину, номер картинки −1 = родная текстура */
     if (!makeBufStream((VkDeviceSize)MAX_VERTS * 4 * sizeof(float),
-                       &s_rvBuf, &s_rvMem, (void**)&s_rvMap, "второй поток вершин") || !s_rvMap) return false;
+                       &s_rvBuf, &s_rvMem, (void**)&s_rvMap, "second vertex stream") || !s_rvMap) return false;
     for (size_t i = 0; i < (size_t)MAX_VERTS; i++) { s_rvMap[i * 4] = -1.f; s_rvMap[i * 4 + 1] = s_rvMap[i * 4 + 2] = s_rvMap[i * 4 + 3] = 0.f; }
     if (!trep_gpu_init()) { rlog("[VKR] texture replacement init failed\n"); return false; }
 
@@ -3699,7 +3710,7 @@ static bool buildFixed() {
     /* конвейер карты теней: те же вершины, только ступень вершин (18.09) */
     if (s_shOk) {
         VkShaderModule svs = loadSpv("dc_shadow.vert.spv");
-        if (!svs) { s_shOk = 0; rlog("[VKR] dc_shadow.vert.spv нет — тени выключены\n"); }
+        if (!svs) { s_shOk = 0; rlog("[VKR] no dc_shadow.vert.spv - shadows off\n"); }
         else {
             VkPipelineShaderStageCreateInfo sst{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
             sst.stage = VK_SHADER_STAGE_VERTEX_BIT; sst.module = svs; sst.pName = "main";
@@ -3721,7 +3732,7 @@ static bool buildFixed() {
             sgp.pColorBlendState = &scb; sgp.pDynamicState = &dst;
             sgp.layout = s_plLay; sgp.renderPass = s_shRp; sgp.subpass = 0;
             if (vkp_create(&sgp, &s_shPipe, "shadow map") != VK_SUCCESS) {
-                rlog("[VKR] конвейер карты теней FAILED\n"); s_shOk = 0;
+                rlog("[VKR] shadow map pipeline FAILED\n"); s_shOk = 0;
             }
             vkDestroyShaderModule(C->device, svs, nullptr);
         }
@@ -4119,11 +4130,14 @@ static int raster_init_impl(void) {
     if (state) return state > 0;
     state = -1;
     s_log = dc_diag_log() ? fopen("dcvk_raster.txt", "w") : nullptr;
+    s_rlogMirror = 1;                /* 23.10.2026: the bring-up into the game's log too (rlog) */
     C = ptvk_core_acquire();
-    if (!C) { rlog("[VKR] core acquire FAILED\n"); return 0; }
+    if (!C) { rlog("[VKR] core acquire FAILED\n"); s_rlogMirror = 0; return 0; }
     pc_load();                       /* 11.10: кэш конвейеров - до первой сборки */
-    if (!buildFixed()) return 0;
+    if (!buildFixed()) { std::fprintf(stderr, "raster: bring-up FAILED%c", 10); s_rlogMirror = 0; return 0; }
     s_draws.reserve(512);
+    std::fprintf(stderr, "raster: ready%c", 10);
+    s_rlogMirror = 0;
     state = 1;
     return 1;
 }
@@ -4242,7 +4256,7 @@ static void trep_read_lines(const std::string& base, std::vector<TRep>& out) {
             n++;
         }
         fclose(f);
-        std::fprintf(stderr, "mods: screens from PNG — %d (index %s)%c", n, ip.c_str(), 10);
+        std::fprintf(stderr, "mods: screens from PNG - %d (index %s)%c", n, ip.c_str(), 10);
     }
     ip = base + "textures\\index.txt";
     f = fopen(ip.c_str(), "rb");
@@ -4259,7 +4273,7 @@ static void trep_read_lines(const std::string& base, std::vector<TRep>& out) {
         out.push_back(std::move(r));
     }
     fclose(f);
-    std::fprintf(stderr, "mods: textures from PNG — %d (index %s)%c", ntex, ip.c_str(), 10);
+    std::fprintf(stderr, "mods: textures from PNG - %d (index %s)%c", ntex, ip.c_str(), 10);
 }
 
 /* поиск по s_trep: текстуры игры — по странице и палитре, экраны — по размеру (06.10.2026: собирается заново при подхвате) */
@@ -4288,7 +4302,7 @@ static void trep_load_index(void) {
     if (e && *e == '0') return;
     const char* base = dc_mods_dir();
     if (!base) return;
-    if (!g_vk_nonuniform_tex) { std::fprintf(stderr, "mods: textures from PNG are off — the video card cannot index a texture array%c", 10); return; }
+    if (!g_vk_nonuniform_tex) { std::fprintf(stderr, "mods: textures from PNG are off - the video card cannot index a texture array%c", 10); return; }
     std::vector<TRep> lines;
     trep_read_lines(base, lines);
     for (TRep& r : lines) s_trep.push_back(std::move(r));
@@ -4354,7 +4368,7 @@ static void trep_worker(void) {
         if (r.gen != gen0 || r.state != 1) continue;   /* 06.10.2026: перечитана или снята, пока декодировалась — не эта картинка */
         r.stamp = stamp;
         if (ok) { r.rgba.swap(px); r.w = (int)w; r.h = (int)h; r.state = 2; }
-        else { r.state = -1; std::fprintf(stderr, "mods: texture %ls — cannot read the PNG%c", path.c_str(), 10); }
+        else { r.state = -1; std::fprintf(stderr, "mods: texture %ls - cannot read the PNG%c", path.c_str(), 10); }
     }
 }
 
@@ -4370,13 +4384,13 @@ static void trep_stat(int k, const float* v) {
     if (k >= 3 && said < 400 && (++n % 50) == 1) {
         said++;
         std::fprintf(stderr, "texrep: %s tp %03x clut %d,%d flags %x uv (%.0f,%.0f)(%.0f,%.0f)(%.0f,%.0f)%c",
-                     k == 3 ? "нет страницы+палитры" : k == 4 ? "окно UV вне" : k == 5 ? "ключ не тот" : "взята",
+                     k == 3 ? "no page+palette" : k == 4 ? "UV window outside" : k == 5 ? "wrong key" : "taken",
                      (int)v[8] & 0x19F, (int)v[9] & 0x3FF, (int)v[10] & 0x1FF, (int)v[11],
                      v[2], v[3], v[VERT_FLOATS + 2], v[VERT_FLOATS + 3], v[2 * VERT_FLOATS + 2], v[2 * VERT_FLOATS + 3], 10);
     }
     long tot = 0; for (int i = 0; i < 8; i++) tot += s_trepSt[i];
     if (tot % 20000 == 0)
-        std::fprintf(stderr, "texrep: итог флаги %ld окно %ld нет %ld uv %ld ключ %ld взята %ld%c",
+        std::fprintf(stderr, "texrep: totals flags %ld window %ld none %ld uv %ld key %ld taken %ld%c",
                      s_trepSt[1], s_trepSt[2], s_trepSt[3], s_trepSt[4], s_trepSt[5], s_trepSt[6], 10);
 }
 
@@ -4506,7 +4520,7 @@ extern "C" void dcvk_screen_begin(int x, int y, int w, int h) {
         s_scrNow = idx;
         s_scrRect[0] = (float)x; s_scrRect[1] = (float)y; s_scrRect[2] = (float)w; s_scrRect[3] = (float)h;
         static int said = 0;
-        if (said < 8) { said++; std::fprintf(stderr, "mods: screen %dx%d at %d,%d — picture from mods%c", w, h, x, y, 10); }
+        if (said < 8) { said++; std::fprintf(stderr, "mods: screen %dx%d at %d,%d - picture from mods%c", w, h, x, y, 10); }
         return;
     }
 }
@@ -4679,7 +4693,7 @@ static void trep_frame_prepare(void) {
                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &r.stage, &r.smem, &map) && map;
         if (!ok) {
             trep_release(r); trep_slot_free(r);
-            r.state = -1; std::fprintf(stderr, "mods: texture %ls — no video memory for it%c", r.path.c_str(), 10); continue;
+            r.state = -1; std::fprintf(stderr, "mods: texture %ls - no video memory for it%c", r.path.c_str(), 10); continue;
         }
         memcpy(map, r.rgba.data(), r.rgba.size());
         std::vector<uint8_t>().swap(r.rgba);
@@ -4756,7 +4770,7 @@ static void trep_frame_upload(VkCommandBuffer cmd) {
 // dc_mesh_fx.vert. DC_MESH_GPU=0 — прежний путь процессора (он же — если видеокарта чего-то не дала).
 // ===================================================================================================================
 struct MeshVtx { float p[3], n[3], uv[2]; uint8_t j[4], w[4], c[4]; float slot; };
-static_assert(sizeof(MeshVtx) == 48, "MeshVtx: 48 Б, как в dc_mesh_common.glsl");
+static_assert(sizeof(MeshVtx) == 48, "MeshVtx: 48 bytes, as in dc_mesh_common.glsl");
 struct MeshGpu { uint32_t vbase, ibase, icount; int blk; uint32_t nv; };
 static std::vector<MeshGpu> s_mesh;
 /* 06.10.2026 (подхват модов на лету): места снятых моделей в блоках пула — модель, которая влезает (та же модель, сохранённая
@@ -4969,7 +4983,7 @@ static int mesh_block_for(VkDeviceSize vb, VkDeviceSize ib) {
     }
     s_mblk.push_back(B);
     s_mTotal += vc + ic;
-    rlog("[VKR] mesh pools: block %d — %llu MB vertices, %llu MB indices (all blocks %llu MB)\n", (int)s_mblk.size() - 1,
+    rlog("[VKR] mesh pools: block %d - %llu MB vertices, %llu MB indices (all blocks %llu MB)\n", (int)s_mblk.size() - 1,
          (unsigned long long)(vc >> 20), (unsigned long long)(ic >> 20), (unsigned long long)(s_mTotal >> 20));
     return (int)s_mblk.size() - 1;
 }
@@ -5158,9 +5172,12 @@ extern "C" void dcvk_prepare_all(void) {
     LARGE_INTEGER fq, t0, t1, t2; QueryPerformanceFrequency(&fq); QueryPerformanceCounter(&t0);
     const int n0 = s_vkpN;
     s_prepPhase = 1;
+    s_rlogMirror = 1;                                           /* 23.10.2026: into the game's log too (rlog) */
     pp_init();
     const int want = s_ppMsaaFail ? 1 : (s_ppMsaa > s_ppMsaaMax ? s_ppMsaaMax : s_ppMsaa);   /* как msaaEnsure */
     const int ss = (s_ppSshade && s_ppSSok) ? ((s_ppSloop && !s_ppSLfail) ? 2 : 1) : 0;
+    std::fprintf(stderr, "shaders: preparing - MSAA %dx (by samples %d), pipeline cache %s%c", want, ss,
+                 s_pcache ? (s_pcCold.load() == 1 ? "empty" : "from the file") : "off", 10);
     std::thread mt;
     if (want > 1 && s_pcache && s_msPrewarm.load() == 0) {      /* первый кадр с MSAA возьмёт набор из кэша (msaaEnsure) */
         s_msPrewarm = 1;
@@ -5201,6 +5218,7 @@ extern "C" void dcvk_prepare_all(void) {
                  fxok ? "ok" : "FAILED", pok ? "ok" : "FAILED", vok ? "ok" : "FAILED", lok, s_vkpN - n0,
                  (double)(t2.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart,
                  (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart, 10);
+    s_rlogMirror = 0;
     s_prepPhase = 3;
 }
 
@@ -6536,8 +6554,8 @@ static WarpSnap s_wsnap;
 static int s_shRectOn = -1;
 static int sh_rect_on(void) {
     if (s_shRectOn < 0) { const char* e = getenv("DC_SHADOW_RECT"); s_shRectOn = (e && *e == '0') ? 0 : 1;
-                          std::fprintf(stderr, "shadow rect: проходы луны и пирамид только вокруг персонажей %s (DC_SHADOW_RECT)%c",
-                                       s_shRectOn ? "вкл" : "выкл", 10); }
+                          std::fprintf(stderr, "shadow rect: moon and pyramid passes only around the characters %s (DC_SHADOW_RECT)%c",
+                                       s_shRectOn ? "on" : "off", 10); }
     return s_shRectOn;
 }
 extern "C" int  dcvk_shadow_rect(void)         { return sh_rect_on(); }
@@ -6607,8 +6625,8 @@ static void sh_occ_rects(int nShx) {
       if (lg < 0) { const char* e = getenv("DC_SHADOW_RECT_LOG"); lg = (e && *e == '1') ? 1 : 0; }
       if (lg && (++n % 60) == 1)
           for (int li = 0; li < nL; li++)
-              std::fprintf(stderr, "shadow rect: слой %d %s %d,%d..%d,%d (карта %d)%c", li,
-                           s_shrSt[li] == SHR_RECT ? "рамка" : s_shrSt[li] == SHR_EMPTY ? "пусто" : "весь",
+              std::fprintf(stderr, "shadow rect: layer %d %s %d,%d..%d,%d (map %d)%c", li,
+                           s_shrSt[li] == SHR_RECT ? "frame" : s_shrSt[li] == SHR_EMPTY ? "empty" : "whole",
                            s_shrRc[li][0], s_shrRc[li][1], s_shrRc[li][2], s_shrRc[li][3], s_shSize, 10); }
 }
 /* 10.10.2026 (DC_HZ, кадры с частотой монитора): кадр A рисуется с камерой на момент своего показа - доля пути Dp -> D
@@ -6707,7 +6725,7 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
                          "vertdrop_%d_next.csv", dumped);
                 g_dcvk_primdump = 1;
             } else if (med > 600 && s_nverts * 100 < med * thr) {
-                rlog("[VKR] vertdrop: кадр %d вершин при медиане %d (%d%%), submits=%d\n",
+                rlog("[VKR] vertdrop: frame %d vertices at median %d (%d%%), submits=%d\n",
                      s_nverts, med, med ? s_nverts * 100 / med : 0, s_submits);
                 if (dumped < 6) {
                     dumped++;
@@ -6754,7 +6772,7 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
             voteLow  = s_vertsLow  - s_marks[mi].low;
             voteHigh = s_vertsHigh - s_marks[mi].high;
             rlog("[VKR] mixed stream: %d submissions, tail-only from draw %d "
-                 "(verts %d..%d, отметка %d из %d)\n", s_submits, drawFrom,
+                 "(verts %d..%d, mark %d of %d)\n", s_submits, drawFrom,
                  s_marks[mi].verts, s_nverts, mi, s_markCount);
         } else if (!tail && s_submitMarkVerts >= 600 && s_submitMarkVerts < s_nverts) {
             drawFrom = s_submitMarkDraws;
@@ -6779,7 +6797,7 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
               }
               if (d.room) { dr++; vr += d.count; cr += sum; } else { dg++; vg += d.count; cg += sum; }
           }
-          std::fprintf(stderr, "framedbg: submits=%d marks=%d drawFrom=%d draws=%d | игра draws=%d verts=%d цвет=%.1f | комната draws=%d verts=%d цвет=%.1f%c",
+          std::fprintf(stderr, "framedbg: submits=%d marks=%d drawFrom=%d draws=%d | game draws=%d verts=%d color=%.1f | room draws=%d verts=%d color=%.1f%c",
                        s_submits, s_markCount, drawFrom, (int)s_draws.size(),
                        dg, vg, vg ? cg / vg : -1.0, dr, vr, vr ? cr / vr : -1.0, 10);
       } }
@@ -7123,8 +7141,8 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
     s_rpResumeCur = (msN > 1) ? s_rpMSResume : s_rpResume;
     { static int lastSF = -1;
       if (scapFrame != lastSF) { lastSF = scapFrame;
-          std::fprintf(stderr, "raster: захват сцены посреди кадра %s (ячеек %d, треугольников %d)%c",
-                       scapFrame ? "ВКЛ" : "выкл", (int)s_scaps.size(), s_scapTris, 10); } }
+          std::fprintf(stderr, "raster: scene capture mid-frame %s (%d cells, %d triangles)%c",
+                       scapFrame ? "ON" : "off", (int)s_scaps.size(), s_scapTris, 10); } }
     /* ===== ПРОХОД КАРТЫ ТЕНЕЙ (18.09) ================================
      * Глубина сцены из точки лампы: рисуем те же вершины тем же буфером, но
      * матрицей лампы. В dc_shadow.vert всё, кроме персонажа, уходит за
@@ -7440,7 +7458,7 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
                         float ry0 = 1e9f, ry1 = -1e9f; const int nk = (int)(keepV.size() / VERT_FLOATS);
                         for (int k = 0; k < nk; k++) { const float y = keepV[(size_t)k * VERT_FLOATS + 1]; ry0 = std::min(ry0, y); ry1 = std::max(ry1, y); }
                         int nui = 0; for (size_t i = 0; i < s_draws.size(); i++) if (s_draws[i].ui) nui++;
-                        std::fprintf(stderr, "carrylog: render %llu КОМНАТА есть disp %d,%d, вершин комнаты %d y %.0f..%.0f, draws %d ui %d%c",
+                        std::fprintf(stderr, "carrylog: render %llu ROOM present disp %d,%d, room vertices %d y %.0f..%.0f, draws %d ui %d%c",
                                      (unsigned long long)renderNo, dispX, dispY, nk, ry0, ry1, (int)s_draws.size(), nui, 10);
                     }
                 }
@@ -7459,7 +7477,7 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
                             }
                             if (d.ui) nui++; else nw++;
                         }
-                        std::fprintf(stderr, "carrylog: render %llu owed %d carried %d keep %llu disp %d,%d keep %d,%d draws %d (ui %d y %.0f..%.0f, прочие %d y %.0f..%.0f) keepV %d%c",
+                        std::fprintf(stderr, "carrylog: render %llu owed %d carried %d keep %llu disp %d,%d keep %d,%d draws %d (ui %d y %.0f..%.0f, other %d y %.0f..%.0f) keepV %d%c",
                                      (unsigned long long)renderNo, owed, carriedFor, (unsigned long long)keepNo, dispX, dispY, keepDX, keepDY,
                                      nd, nui, uy0, uy1, nw, wy0, wy1, (int)(keepV.size() / VERT_FLOATS), 10);
                     }
@@ -7488,8 +7506,8 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
                     }
                     static long said = 0;
                     if (++said <= 40)
-                        std::fprintf(stderr, "raster: в таблице прохода %d комнату игры забрали мы, а наш обход в этот кадр не попал — "
-                                             "комната прошлого показа (%d вершин, сдвиг %+d,%+d) #%ld%c",
+                        std::fprintf(stderr, "raster: in pass table %d we took the game's room, but our walk did not make it into this frame - "
+                                             "the room of the previous present (%d vertices, shift %+d,%+d) #%ld%c",
                                      owed - 1, (int)(keepV.size() / VERT_FLOATS), dispX - keepDX, dispY - keepDY, said, 10);
                 }
             }
@@ -7746,7 +7764,7 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
                       roomFrom = (size_t)last;
                       static int said = 0;
                       if (said < 4) { said++;
-                          std::fprintf(stderr, "raster: комната лежит в отрезанной голове потока — рисуем её (drawFrom=%d, комната с %ld)%c",
+                          std::fprintf(stderr, "raster: the room lies in the cut-off head of the stream - drawing it (drawFrom=%d, room from %ld)%c",
                                        drawFrom, last, 10); }
                   }
               } }
@@ -7891,8 +7909,8 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
         memcpy(s_wsnap.pcp, pcp, sizeof pcp);   /* 17.09: снимок для кадра B */
         { static int lastUse = -1;
           if (use != lastUse) { lastUse = use;
-              std::fprintf(stderr, "raster: копия кадра из прошлого hi-res кадра %s (экран %d)%c",
-                           use ? "ВКЛ" : "выкл", scrc, 10); } }
+              std::fprintf(stderr, "raster: frame copy from the previous hi-res frame %s (screen %d)%c",
+                           use ? "ON" : "off", scrc, 10); } }
     }
     { const float wid[16] = { 0.f, 0.f, 0.f, 1.f,  0.f, 0.f, 0.f, 0.f,  0.f, 0.f, 0.f, 0.f,  0.f, 0.f, 0.f, 0.f };   /* 17.09: кадр A — без сдвига */
       vkCmdPushConstants(s_cmd, s_plLay, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 64, 64, warpA ? wpcA : wid); }   /* 10.10: DC_HZ */
@@ -7986,7 +8004,7 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
     { static int cd = -1; static long lastN = -1;
       if (cd < 0) { const char* e = getenv("DC_CLIP_DBG"); cd = (e && *e == '1') ? 1 : 0; }
       if (cd && (clippedDraws > 0) != (lastN > 0)) {
-          std::fprintf(stderr, "raster: draw с областью рисования игры: %ld%c", clippedDraws, 10);
+          std::fprintf(stderr, "raster: draws with the game's drawing area: %ld%c", clippedDraws, 10);
           lastN = clippedDraws; } }
     /* DC_WIREFRAME=1: the same triangles once more, as edges, over the top.
      * Bit 5 of the flags word tells the fragment stage to output a flat colour

@@ -190,12 +190,12 @@ static int f2_dir_changed(void) {
         HANDLE t = (h != INVALID_HANDLE_VALUE) ? CreateThread(NULL, 64 * 1024, f2_dir_thread, h, 0, NULL) : NULL;
         if (t) {
             CloseHandle(t); s_f2_dirh = h;
-            fprintf(stderr, "face2: папка лиц %s — новые файлы по уведомлению Windows (просмотра раз в 2 с нет)%c", s_f2_dir, 10);
+            fprintf(stderr, "face2: faces folder %s - new files come on a Windows notification (no rescan every 2 s)%c", s_f2_dir, 10);
             return 1;                                       /* что изменилось до уведомлений — один просмотр сразу */
         }
         if (h != INVALID_HANDLE_VALUE) FindCloseChangeNotification(h);
         s_f2_dwatch = -1;
-        fprintf(stderr, "face2: уведомления папки лиц %s не вышли — просмотр раз в 2 с, как было%c", s_f2_dir, 10);
+        fprintf(stderr, "face2: no notifications for the faces folder %s - rescan every 2 s, as before%c", s_f2_dir, 10);
     }
     if (s_f2_dirh) return s_f2_dirflag && InterlockedExchange(&s_f2_dirflag, 0);
     return s_f2_vb % 120 == 0;
@@ -402,17 +402,17 @@ static int f2_capture(F2Char* c, int k, int px, int py) {
     if (c->efmt == 3 && !v->have) {
         if (f2_rect_hash(vram, c, &v->r, px, py) == v->heye) {
             f2_rect_get(vram, c, &v->r, px, py, v->orig); v->have = 1;
-            fprintf(stderr, "face2: %s — вариант %u: исходные глаза взяты из VRAM (страница %d,%d)%c", c->id, v->var, px, py, 10);
+            fprintf(stderr, "face2: %s - variant %u: original eyes taken from VRAM (page %d,%d)%c", c->id, v->var, px, py, 10);
         }
     }
     const int i = f2_tv(c, k);
     if (c->tfmt == 3 && i >= 0 && !c->mhave[i] && f2_rect_hash(vram, c, &c->mr, px, py) == c->hmouth[i]) {
         f2_rect_get(vram, c, &c->mr, px, py, c->morig[i]); c->mhave[i] = 1;
-        fprintf(stderr, "talk2: %s — вариант %u: исходный рот взят из VRAM (страница %d,%d)%c", c->id, v->var, px, py, 10);
+        fprintf(stderr, "talk2: %s - variant %u: original mouth taken from VRAM (page %d,%d)%c", c->id, v->var, px, py, 10);
     }
     if (c->efmt == 3 && !v->have) {
         if (c->nocap++ < 8)
-            fprintf(stderr, "face2: %s — копия варианта %u на странице %d,%d: глаза не исходные, а исходных ещё нет — не трогаю%c", c->id,
+            fprintf(stderr, "face2: %s - copy of variant %u on page %d,%d: the eyes are not the original ones and there are no originals yet - left alone%c", c->id,
                     v->var, px, py, 10);
         return 0;
     }
@@ -451,12 +451,12 @@ static void f2_log_copies(const F2Char* c) {
     if (c->ncp) {
         char s[400]; size_t l = 0; s[0] = 0;
         for (int j = 0; j < c->ncp && l + 64 < sizeof(s); j++)
-            l += (size_t)snprintf(s + l, sizeof(s) - l, "%sвариант %u, страница %d,%d", j ? "; " : "", c->v[c->cpk[j]].var, c->cpx[j], c->cpy[j]);
-        if (c->ncp > 1) fprintf(stderr, "face2: %s в VRAM — копий %d: %s — глаза и рот пишутся во все (развёртка %llu)%c", c->id, c->ncp, s,
+            l += (size_t)snprintf(s + l, sizeof(s) - l, "%svariant %u, page %d,%d", j ? "; " : "", c->v[c->cpk[j]].var, c->cpx[j], c->cpy[j]);
+        if (c->ncp > 1) fprintf(stderr, "face2: %s in VRAM - %d copies: %s - eyes and mouth are written into all of them (vblank %llu)%c", c->id, c->ncp, s,
                                 (unsigned long long)s_f2_vb, 10);
-        else fprintf(stderr, "face2: %s в VRAM — %s (развёртка %llu)%c", c->id, s, (unsigned long long)s_f2_vb, 10);
+        else fprintf(stderr, "face2: %s in VRAM - %s (vblank %llu)%c", c->id, s, (unsigned long long)s_f2_vb, 10);
     }
-    else fprintf(stderr, "face2: %s пропал из VRAM (развёртка %llu)%c", c->id, (unsigned long long)s_f2_vb, 10);
+    else fprintf(stderr, "face2: %s gone from VRAM (vblank %llu)%c", c->id, (unsigned long long)s_f2_vb, 10);
 }
 /* 27.09 (2): копии лица на страницах pm (их изменила игра). Копии на прочих страницах остаются как есть (их никто не
  * трогал), на pm — сверка всего кропа и поиск новых (все варианты). 1 — на pm лежала копия (игра могла залить исходник
@@ -512,7 +512,7 @@ static void f2_page_check(uint32_t touched) {
         if (f2_page_hash(p) == s_f2_phash[p]) continue;
         if (touched & (1u << p)) { s_f2_pmarked++; continue; }
         if (s_f2_punmarked++ < 20)
-            fprintf(stderr, "face2: ПРОВЕРКА ОТМЕТОК — страница %d,%d изменилась без отметки (развёртка %llu)%c", (p & 15) * 64, (p >> 4) * 256,
+            fprintf(stderr, "face2: MARK CHECK - page %d,%d changed without a mark (vblank %llu)%c", (p & 15) * 64, (p >> 4) * 256,
                     (unsigned long long)s_f2_vb, 10);
     }
 }
@@ -635,10 +635,10 @@ static int f2_parse_eyes3(F2Char* c, const uint8_t* b, size_t n, uint8_t** dec) 
  * модели, u16 вес ×1000} | блок головы × 8 байт (x, y, z, кость — как в RAM) | u32 состояний (= состояний рта) | × u8
  * раскрытие челюсти ×100. ---- */
 static int f2_parse_talk(F2Char* c, uint8_t* b, size_t n, char* why, size_t whysz) {
-    snprintf(why, whysz, "формат/размер");
+    snprintf(why, whysz, "format/size");
     if (n < 72 || memcmp(b, "DCT2", 4) != 0 || f_u16(b + 4) != 1) return 0;
     char serial[17]; memcpy(serial, b + 32, 16); serial[16] = 0;
-    if (strcmp(serial, F2_SERIAL) != 0) { snprintf(why, whysz, "другая версия игры (%s, а у нас %s)", serial, F2_SERIAL); return 0; }
+    if (strcmp(serial, F2_SERIAL) != 0) { snprintf(why, whysz, "another version of the game (%s, ours is %s)", serial, F2_SERIAL); return 0; }
     const int ntv = f_u16(b + 6);
     const FaceRect mr = { f_u16(b + 48), f_u16(b + 50), f_u16(b + 52), f_u16(b + 54) };
     const unsigned fps = f_u16(b + 56), nclips = f_u16(b + 58), nemo = f_u16(b + 64), nxa = f_u16(b + 66);
@@ -658,7 +658,7 @@ static int f2_parse_talk(F2Char* c, uint8_t* b, size_t n, char* why, size_t whys
         for (size_t i = 0; i < sizeof(s_xa_files) / sizeof(s_xa_files[0]); i++)
             if (strcmp(s_xa_files[i].name, nm) == 0) {
                 if ((uint32_t)s_xa_files[i].lba == lba) xmap[j] = (int)i;
-                else fprintf(stderr, "talk2: %s — %s на другом месте диска (LBA %u, у нас %d) — реплики этого файла не подставляются%c",
+                else fprintf(stderr, "talk2: %s - %s is at another place on the disc (LBA %u, ours %d) - lines of this file are not used%c",
                              c->id, nm, lba, s_xa_files[i].lba, 10);
             }
         o += 24;
@@ -706,7 +706,7 @@ static int f2_parse_talk(F2Char* c, uint8_t* b, size_t n, char* why, size_t whys
             jst = b + p;
         }
         jok = good;
-        if (!good) fprintf(stderr, "talk2: %s — секция челюсти не годна (вершин %d, блок %u+%u из %u), челюсть не двигается%c", c->id, jn,
+        if (!good) fprintf(stderr, "talk2: %s - jaw section unusable (%d vertices, block %u+%u of %u), the jaw does not move%c", c->id, jn,
                            (unsigned)jfirst, (unsigned)jcount, (unsigned)jnv, 10);
     }
     free(c->clips);
@@ -731,10 +731,10 @@ static int f2_parse_talk(F2Char* c, uint8_t* b, size_t n, char* why, size_t whys
  * опускание | u16 кость блока, u16 0, u32 0 | u64 хеш вершин вне челюсти, u64 хеш вершин челюсти (по 6 байт x y z, по
  * порядку блока) | вершины × {u16 номер, u16 вес ×1000} | u32 состояний | × u8 раскрытие ×100. Кадры рта — в *dec. ---- */
 static int f2_parse_talk3(F2Char* c, uint8_t* b, size_t n, uint8_t** dec, char* why, size_t whysz) {
-    snprintf(why, whysz, "формат/размер");
+    snprintf(why, whysz, "format/size");
     if (n < 72 || memcmp(b, "DCT3", 4) != 0 || f_u16(b + 4) != 1) return 0;
     char serial[17]; memcpy(serial, b + 32, 16); serial[16] = 0;
-    if (strcmp(serial, F2_SERIAL) != 0) { snprintf(why, whysz, "другая версия игры (%s, а у нас %s)", serial, F2_SERIAL); return 0; }
+    if (strcmp(serial, F2_SERIAL) != 0) { snprintf(why, whysz, "another version of the game (%s, ours is %s)", serial, F2_SERIAL); return 0; }
     const int ntv = f_u16(b + 6);
     const FaceRect mr = { f_u16(b + 48), f_u16(b + 50), f_u16(b + 52), f_u16(b + 54) };
     const unsigned fps = f_u16(b + 56), nclips = f_u16(b + 58), nemo = f_u16(b + 64), nxa = f_u16(b + 66);
@@ -754,7 +754,7 @@ static int f2_parse_talk3(F2Char* c, uint8_t* b, size_t n, uint8_t** dec, char* 
         for (size_t i = 0; i < sizeof(s_xa_files) / sizeof(s_xa_files[0]); i++)
             if (strcmp(s_xa_files[i].name, nm) == 0) {
                 if ((uint32_t)s_xa_files[i].lba == lba) xmap[j] = (int)i;
-                else fprintf(stderr, "talk2: %s — %s на другом месте диска (LBA %u, у нас %d) — реплики этого файла не подставляются%c",
+                else fprintf(stderr, "talk2: %s - %s is at another place on the disc (LBA %u, ours %d) - lines of this file are not used%c",
                              c->id, nm, lba, s_xa_files[i].lba, 10);
             }
         o += 24;
@@ -805,7 +805,7 @@ static int f2_parse_talk3(F2Char* c, uint8_t* b, size_t n, uint8_t** dec, char* 
             jst = b + p;
         }
         jok = good;
-        if (!good) fprintf(stderr, "talk2: %s — секция челюсти не годна (вершин %d, блок %u+%u из %u), челюсть не двигается%c", c->id, jn,
+        if (!good) fprintf(stderr, "talk2: %s - jaw section unusable (%d vertices, block %u+%u of %u), the jaw does not move%c", c->id, jn,
                            (unsigned)jfirst, (unsigned)jcount, (unsigned)jnv, 10);
     }
     /* кадры рта: раскрыть все варианты; исходный рот — из VRAM */
@@ -816,7 +816,7 @@ static int f2_parse_talk3(F2Char* c, uint8_t* b, size_t n, uint8_t** dec, char* 
         mo[i] = (uint8_t*)malloc(fsz);
         if (!mo[i] || !f2_fs_decode(b + at[i], len[i], nst, (uint32_t)fsz, d + (size_t)i * nst * fsz)) {
             for (int j = 0; j <= i; j++) free(mo[j]);
-            free(d); free(cl); snprintf(why, whysz, "кадры рта не раскрылись"); return 0;
+            free(d); free(cl); snprintf(why, whysz, "mouth frames did not unpack"); return 0;
         }
     }
     free(c->clips);
@@ -864,7 +864,7 @@ static int f2_jaw_at(F2Char* c, const uint8_t* ram, uint32_t a, int cur) {
             if (hj != c->jhj) return 0;
             for (int k = 0; k < c->jn; k++) memcpy(c->jorig[k], ram + a + (uint32_t)(c->jvi[k] - c->jfirst) * 8u, 6);
             c->jhave = 1;
-            fprintf(stderr, "jaw: %s — исходные вершины челюсти взяты из RAM (0x%08X)%c", c->id, 0x80000000u | a, 10);
+            fprintf(stderr, "jaw: %s - original jaw vertices taken from RAM (0x%08X)%c", c->id, 0x80000000u | a, 10);
         }
         return 1;
     }
@@ -933,19 +933,19 @@ static void f2_jaw_tick(F2Char* c, uint32_t jst) {
     const int q = (int)lroundf(open * 100.f);
     if (q == 0 && !c->japplied) return;                          /* рот закрыт и мы ничего не писали — модель не трогаем */
     if (!c->jaddr || !f2_jaw_at(c, ram, c->jaddr, c->japplied)) {
-        if (c->jaddr && s_f2_jlog) fprintf(stderr, "jaw: %s — блок вершин головы в RAM сменился, ищу заново%c", c->id, 10);
+        if (c->jaddr && s_f2_jlog) fprintf(stderr, "jaw: %s - the head vertex block in RAM changed, searching again%c", c->id, 10);
         c->jaddr = 0; c->japplied = 0; c->jq = 0;
         if (q == 0 || (c->jseek_vb && s_f2_vb - c->jseek_vb < 60)) return;
         c->jseek_vb = s_f2_vb;
-        if (!f2_jaw_seek(c, ram)) { if (s_f2_jlog) fprintf(stderr, "jaw: %s — блока вершин головы в RAM нет%c", c->id, 10); return; }
-        fprintf(stderr, "jaw: %s — вершины головы в RAM 0x%08X (%u, челюсть %d вершин), шарнир y %.0f z %.0f, %.1f° при «Челюсть вниз» = 1%s%c",
+        if (!f2_jaw_seek(c, ram)) { if (s_f2_jlog) fprintf(stderr, "jaw: %s - no head vertex block in RAM%c", c->id, 10); return; }
+        fprintf(stderr, "jaw: %s - head vertices in RAM 0x%08X (%u, jaw %d vertices), hinge y %.0f z %.0f, %.1f deg at 'Jaw down' = 1%s%c",
                 c->id, 0x80000000u | c->jaddr, (unsigned)c->jcount, c->jn, c->jpy, c->jpz, c->jang,
                 s_f2_jforce >= 0.f ? " (DC_JAW_FORCE)" : "", 10);
     }
     if (q == c->jq && c->japplied == (q > 0)) return;
     f2_jaw_write(c, ram, q / 100.f);
     c->jq = q;
-    if (s_f2_jlog) fprintf(stderr, "jaw: %s раскрытие %.2f (состояние рта %u, развёртка %llu)%c", c->id, q / 100.f, (unsigned)jst,
+    if (s_f2_jlog) fprintf(stderr, "jaw: %s opening %.2f (mouth state %u, vblank %llu)%c", c->id, q / 100.f, (unsigned)jst,
                            (unsigned long long)s_f2_vb, 10);
 }
 /* сейв (savestate.c, до и после memory_savestate): в файл — исходные вершины челюсти, потом наши обратно */
@@ -990,7 +990,7 @@ static void f2_check_xmr(F2Char* c) {
     if (c->efmt != 3 || !c->talk_ok) return;
     if (c->xmr_on && c->xmr.rx == c->mr.rx && c->xmr.ry == c->mr.ry && c->xmr.rw == c->mr.rw && c->xmr.rh == c->mr.rh) return;
     c->talk_ok = 0;
-    fprintf(stderr, "talk2: %s — рот файла речи (%u,%u %ux%u) не тот, что исключён из подписи файла глаз — рот не говорит%c", c->id,
+    fprintf(stderr, "talk2: %s - the speech file's mouth (%u,%u %ux%u) is not the one left out of the eyes file's signature - the mouth does not talk%c", c->id,
             c->mr.rx, c->mr.ry, c->mr.rw, c->mr.rh, 10);
 }
 static void f2_load_eyes(F2Char* c, const char* path) {
@@ -1005,8 +1005,8 @@ static void f2_load_eyes(F2Char* c, const char* path) {
     else ok = f2_parse_eyes(c, b, got);
     if (!ok) {
         free(b);
-        fprintf(stderr, "face2: %s — файл не годен (%s), глаза %s не оживают%c", used,
-                (v3 && !s_f2_v3) ? "формат v3, а DC_FACE_V3=0" : "формат/размер", c->id, 10);
+        fprintf(stderr, "face2: %s - file unusable (%s), the eyes of %s stay still%c", used,
+                (v3 && !s_f2_v3) ? "format v3, but DC_FACE_V3=0" : "format/size", c->id, 10);
         c->emt = mt; c->esz = sz; snprintf(c->ep, sizeof(c->ep), "%s", used);
         return;
     }
@@ -1017,9 +1017,9 @@ static void f2_load_eyes(F2Char* c, const char* path) {
     c->cur = -1; c->ncp = 0; c->pend = 0xFFFFFFFFu; c->force = 1; c->last_e = -2; c->hold_e = -1;
     f2_samples(c);
     const F2Var* v0 = &c->v[0];
-    fprintf(stderr, "face2: %s — %s: вариантов %d, кадров глаз %u (эмоций %u), глаза %ux%u у (%u,%u) кропа %ux%u%s%c", used, c->id, c->nv,
+    fprintf(stderr, "face2: %s - %s: %d variants, %u eye frames (%u emotions), eyes %ux%u at (%u,%u) of a %ux%u crop%s%c", used, c->id, c->nv,
             (unsigned)c->nx * c->ny * c->nl + (unsigned)(c->nemo - 1) * c->nlev * c->enx * c->eny * c->enl, c->nemo, v0->r.rw, v0->r.rh,
-            v0->r.rx, v0->r.ry, c->W, c->H, c->efmt == 3 ? "; формат v3 (хеши, исходник — из VRAM)" : "", 10);
+            v0->r.rx, v0->r.ry, c->W, c->H, c->efmt == 3 ? "; format v3 (hashes, the original from VRAM)" : "", 10);
 }
 static void f2_load_talk(F2Char* c, const char* path) {
     char used[512], why[160]; long long mt = 0, sz = 0; size_t got = 0;
@@ -1030,11 +1030,11 @@ static void f2_load_talk(F2Char* c, const char* path) {
     snprintf(c->tp, sizeof(c->tp), "%s", used); c->tmt = mt; c->tsz = sz;
     const int v3 = got >= 4 && memcmp(b, "DCT3", 4) == 0;      /* 04.10: формат v3 — только наше */
     uint8_t* dec = NULL; int ok;
-    if (v3 && !s_f2_v3) { snprintf(why, sizeof(why), "формат v3, а DC_FACE_V3=0"); ok = 0; }
+    if (v3 && !s_f2_v3) { snprintf(why, sizeof(why), "format v3, but DC_FACE_V3=0"); ok = 0; }
     else ok = v3 ? f2_parse_talk3(c, b, got, &dec, why, sizeof(why)) : f2_parse_talk(c, b, got, why, sizeof(why));
     if (!ok) {
         free(b);
-        fprintf(stderr, "talk2: %s — не годен (%s), рот %s не говорит%c", used, why, c->id, 10);
+        fprintf(stderr, "talk2: %s - unusable (%s), the mouth of %s does not talk%c", used, why, c->id, 10);
         return;
     }
     free(c->tb); c->tb = b; free(c->tdec); c->tdec = dec;
@@ -1042,12 +1042,12 @@ static void f2_load_talk(F2Char* c, const char* path) {
     f2_map_emo(c);
     c->cur = -1; c->ncp = 0; c->pend = 0xFFFFFFFFu; c->force = 1; c->last_m = -2; c->hold_e = -1;
     f2_samples(c);
-    fprintf(stderr, "talk2: %s — %s: клипов %u, состояний рта %u (%ux%u у (%u,%u) кропа), вариантов %d, эмоций %d, %u шагов/с%s%c", used, c->id,
+    fprintf(stderr, "talk2: %s - %s: %u clips, %u mouth states (%ux%u at (%u,%u) of the crop), %d variants, %d emotions, %u steps/s%s%c", used, c->id,
             c->nclips, c->nst, c->mr.rw, c->mr.rh, c->mr.rx, c->mr.ry, c->ntv, c->tnemo, c->fps,
-            c->tfmt == 3 ? "; формат v3 (хеши, исходный рот и челюсть — из VRAM и RAM)" : "", 10);
-    if (c->jaw_ok) fprintf(stderr, "talk2: %s — челюсть: %d вершин (блок головы %u+%u), шарнир y %.0f z %.0f, %.1f° при «Челюсть вниз» = 1, "
-                           "опускание %.1f мм%s%c", c->id, c->jn, (unsigned)c->jfirst, (unsigned)c->jcount, c->jpy, c->jpz, c->jang, c->jdrop,
-                           s_f2_jaw ? "" : " — DC_JAW=0, не двигается", 10);
+            c->tfmt == 3 ? "; format v3 (hashes, the original mouth and jaw from VRAM and RAM)" : "", 10);
+    if (c->jaw_ok) fprintf(stderr, "talk2: %s - jaw: %d vertices (head block %u+%u), hinge y %.0f z %.0f, %.1f deg at 'Jaw down' = 1, "
+                           "drop %.1f mm%s%c", c->id, c->jn, (unsigned)c->jfirst, (unsigned)c->jcount, c->jpy, c->jpz, c->jang, c->jdrop,
+                           s_f2_jaw ? "" : " - DC_JAW=0, does not move", 10);
 }
 /* папка лиц: найти (один раз) и перечитать новые/изменённые файлы */
 static void f2_scan(void) {
@@ -1118,7 +1118,7 @@ static int f2_enabled(void) {
     int any = 0;
     for (int i = 0; i < s_f2_n; i++) if (s_f2[i].nv) any = 1;
     if (!any) {
-        if (s_f2_probe == 1) fprintf(stderr, "face2: папки assets/faces с лицами нет — работает прежнее лицо Регины (face_anim.bin)%c", 10);
+        if (s_f2_probe == 1) fprintf(stderr, "face2: no assets/faces folder - Regina's old face is used (face_anim.bin)%c", 10);
         return 0;
     }
     /* прежнее лицо Регины (если уже писалось) — вернуть исходное, дальше всё ведёт v2 */
@@ -1130,19 +1130,19 @@ static int f2_enabled(void) {
     }
     s_f2_on = 1;
     char fps_s[48];
-    if (s_f2_fps) snprintf(fps_s, sizeof(fps_s), "%d/с (DC_FACE_FPS)", s_f2_fps); else snprintf(fps_s, sizeof(fps_s), "каждую развёртку");
+    if (s_f2_fps) snprintf(fps_s, sizeof(fps_s), "%d/s (DC_FACE_FPS)", s_f2_fps); else snprintf(fps_s, sizeof(fps_s), "every vblank");
     char sh_s[160];
-    if (s_f2_sharp) snprintf(sh_s, sizeof(sh_s), "переходы через %d промежуточн. кадр(а) по 1/30 с", s_f2_tween);
-    else snprintf(sh_s, sizeof(sh_s), "плавно (DC_FACE_SHARP=0)");
-    fprintf(stderr, "face2: лица v2 — папка %s, персонажей %d%s%s%s; кадры лица %s, %s, моргание %s; рот и эмоции на %.3f с позже "
-            "выдачи звука (DC_FACE_DELAY %.2f, челюсть — на столько раньше рта, DC_JAW_LEAD); %s%s%c", s_f2_dir, s_f2_n,
-            s_f2_npc ? "" : " (DC_FACE_NPC=0 — только Регина)", s_f2_emo ? "" : ", DC_FACE_EMO=0 — без эмоций",
-            s_f2_talk ? "" : ", DC_TALK=0 — рты молчат", fps_s, sh_s,
-            !s_f2_bfast ? "прежнее (0.26 с, DC_FACE_BLINK_FAST=0)" : s_f2_sharp ? "ступенями" : "плавное быстрое (0.16 с)", s_f2_dline, s_f2_delay,
-            !s_f2_allcp ? "только первая копия лица в VRAM (DC_FACE_ALLCOPIES=0)" :
-            s_f2_ev ? "глаза и рот — во все копии лица в VRAM, поиск копий только на страницах, изменённых игрой" :
-                      "глаза и рот — во все копии лица в VRAM, поиск раз в 30 развёрток (DC_FACE_PAGE_EVENTS=0)",
-            s_f2_pchk ? "; ПРОВЕРКА ОТМЕТОК СТРАНИЦ (DC_FACE_PAGE_CHECK=1)" : "", 10);
+    if (s_f2_sharp) snprintf(sh_s, sizeof(sh_s), "transitions through %d in-between frame(s) of 1/30 s", s_f2_tween);
+    else snprintf(sh_s, sizeof(sh_s), "smooth (DC_FACE_SHARP=0)");
+    fprintf(stderr, "face2: faces v2 - folder %s, %d characters%s%s%s; face frames %s, %s, blinking %s; mouth and emotions %.3f s later "
+            "than the sound output (DC_FACE_DELAY %.2f, the jaw this much ahead of the mouth, DC_JAW_LEAD); %s%s%c", s_f2_dir, s_f2_n,
+            s_f2_npc ? "" : " (DC_FACE_NPC=0 - Regina only)", s_f2_emo ? "" : ", DC_FACE_EMO=0 - no emotions",
+            s_f2_talk ? "" : ", DC_TALK=0 - mouths stay silent", fps_s, sh_s,
+            !s_f2_bfast ? "the old one (0.26 s, DC_FACE_BLINK_FAST=0)" : s_f2_sharp ? "in steps" : "smooth and fast (0.16 s)", s_f2_dline, s_f2_delay,
+            !s_f2_allcp ? "only the first copy of the face in VRAM (DC_FACE_ALLCOPIES=0)" :
+            s_f2_ev ? "eyes and mouth into every copy of the face in VRAM, copies searched only on pages the game changed" :
+                      "eyes and mouth into every copy of the face in VRAM, searched every 30 vblanks (DC_FACE_PAGE_EVENTS=0)",
+            s_f2_pchk ? "; PAGE MARK CHECK (DC_FACE_PAGE_CHECK=1)" : "", 10);
     return 1;
 }
 /* cdrom.c: аудиосектор XA ушёл в очередь CD-звука SPU */
@@ -1158,7 +1158,7 @@ static void f2_xa_pushed(int lba, int channel, int frames) {
     s_f2log_xa = xa; s_f2log_ch = channel; s_f2log_rel = rel;
     if (cont) {
         if (s_f2_tlog && rel % 8 == 0) { extern uint64_t s_frame_count;
-            fprintf(stderr, "talk2: XA %s канал %d, сектор %d, кадр %llu%c", xa >= 0 ? s_xa_files[xa].name : "?", channel, rel, (unsigned long long)s_frame_count, 10); }
+            fprintf(stderr, "talk2: XA %s channel %d, sector %d, frame %llu%c", xa >= 0 ? s_xa_files[xa].name : "?", channel, rel, (unsigned long long)s_frame_count, 10); }
         return;
     }
     /* новый поток: кто в нём говорит (у кого рот двигается в ближайшие 8 с) */
@@ -1178,13 +1178,13 @@ static void f2_xa_pushed(int lba, int channel, int frames) {
                 if (q->steps[4 * j + 2]) emo = 1;
             }
             if ((talky || emo) && wl + 40 < sizeof(who))
-                wl += (size_t)snprintf(who + wl, sizeof(who) - wl, "%s%s%s", wl ? ", " : "", c->id, talky ? "" : " (только эмоция)");
+                wl += (size_t)snprintf(who + wl, sizeof(who) - wl, "%s%s%s", wl ? ", " : "", c->id, talky ? "" : " (emotion only)");
             break;
         }
     }
     extern uint64_t s_frame_count;
-    fprintf(stderr, "talk2: XA %s канал %d, сектор %d (LBA %d) — %s%s, кадр %llu%c", xa >= 0 ? s_xa_files[xa].name : "?", channel, rel, lba,
-            who[0] ? "говорят/играют лицом: " : "лица в покое (реплик в сценарии нет)", who, (unsigned long long)s_frame_count, 10);
+    fprintf(stderr, "talk2: XA %s channel %d, sector %d (LBA %d) - %s%s, frame %llu%c", xa >= 0 ? s_xa_files[xa].name : "?", channel, rel, lba,
+            who[0] ? "talking/acting with the face: " : "faces at rest (no lines in the script)", who, (unsigned long long)s_frame_count, 10);
 }
 /* что звучит сейчас: отрезок кольца и доля внутри него; NULL — CD-звук молчит (очередь пуста или стоит: игра ставит XA
  * на паузу посреди канала, очередь не пустеет — без этой проверки рот застывал открытым) */
@@ -1192,13 +1192,13 @@ static const F2Seg* f2_now(double* frac) {
     const uint64_t played = spu_cd_audio_played();
     if (played < s_f2_played) {                  /* счёт CD-звука пошёл назад (сейв, DC_TALK_RESET_OLD=1) — отрезки не годны */
         memset(s_f2seg, 0, sizeof(s_f2seg)); s_f2seg_n = 0;
-        if (s_f2_tlog) fprintf(stderr, "talk2: счёт CD-звука сброшен (развёртка %llu) — рты в покое%c", (unsigned long long)s_f2_vb, 10);
+        if (s_f2_tlog) fprintf(stderr, "talk2: CD audio count reset (vblank %llu) - mouths at rest%c", (unsigned long long)s_f2_vb, 10);
     }
     if (played != s_f2_played) { s_f2_played = played; s_f2_played_vb = s_f2_vb; }
     const int stalled = s_f2_vb - s_f2_played_vb > 6;
     if (stalled != s_f2_stalled) {
         s_f2_stalled = stalled;
-        if (s_f2_tlog) fprintf(stderr, "talk2: CD-звук %s (развёртка %llu)%c", stalled ? "стоит — рты в покое" : "пошёл", (unsigned long long)s_f2_vb, 10);
+        if (s_f2_tlog) fprintf(stderr, "talk2: CD audio %s (vblank %llu)%c", stalled ? "stopped - mouths at rest" : "started", (unsigned long long)s_f2_vb, 10);
     }
     if (stalled) return NULL;
     for (unsigned n = 0; n < 64 && n < s_f2seg_n; n++) {
@@ -1227,11 +1227,11 @@ static const F2Seg* f2_delayed(const F2Seg* sg, double* frac) {
     if (s_f2_tlog) {                             /* DC_TALK_LOG=1: когда звук реплики вышел из SPU и когда он дошёл до лица */
         if ((sg != NULL) != s_f2_dl_in) {
             s_f2_dl_in = sg != NULL;
-            fprintf(stderr, "talk2: звук реплики из SPU %s (развёртка %llu)%c", s_f2_dl_in ? "идёт" : "кончился", (unsigned long long)s_f2_vb, 10);
+            fprintf(stderr, "talk2: line sound from the SPU %s (vblank %llu)%c", s_f2_dl_in ? "playing" : "ended", (unsigned long long)s_f2_vb, 10);
         }
         if ((out != NULL) != s_f2_dl_out) {
             s_f2_dl_out = out != NULL;
-            fprintf(stderr, "talk2: на лице звук реплики %s (развёртка %llu, задержка %llu развёрток)%c", s_f2_dl_out ? "идёт" : "кончился",
+            fprintf(stderr, "talk2: the line sound on the face %s (vblank %llu, delay %llu vblanks)%c", s_f2_dl_out ? "playing" : "ended",
                     (unsigned long long)s_f2_vb, (unsigned long long)d, 10);
         }
     }
@@ -1396,9 +1396,9 @@ static int f2_dead_now(F2Char* c) {
     const int quiet = s_f2_vb - c->dtalk_vb > 180, still = s_f2_vb - c->dmove_vb > 60;
     const int dead = quiet && (head < s_f2_dead_lie || (head < s_f2_dead_low && still));
     if (dead != c->dead)
-        fprintf(stderr, "face2: %s — %s (актёр %d, голова на %d над полом, %s, %s)%c", c->id,
-                dead ? "мёртв по сюжету: глаза закрыты, моргание и взгляд стоят" : "снова живой: моргание и взгляд",
-                slot, head, still ? "неподвижен" : "двигается", quiet ? "молчит" : "говорит", 10);
+        fprintf(stderr, "face2: %s - %s (actor %d, head %d above the floor, %s, %s)%c", c->id,
+                dead ? "dead by the story: eyes closed, blinking and gaze stopped" : "alive again: blinking and gaze",
+                slot, head, still ? "still" : "moving", quiet ? "silent" : "talking", 10);
     return c->dead = dead;
 }
 static void f2_tick(void) {
@@ -1413,19 +1413,19 @@ static void f2_tick(void) {
             F2Char* c = &s_f2[i];
             if (!c->nv) continue;
             char where[32];
-            if (c->ncp > 1) snprintf(where, sizeof(where), "да, копий %d", c->ncp); else snprintf(where, sizeof(where), "%s", c->ncp ? "да" : "нет");
-            fprintf(stderr, "face2: %s за 10 с: глаза %ld, рот %ld, морганий %ld, в VRAM: %s%c", c->id, c->writes, c->mwrites, c->blinks, where, 10);
+            if (c->ncp > 1) snprintf(where, sizeof(where), "yes, %d copies", c->ncp); else snprintf(where, sizeof(where), "%s", c->ncp ? "yes" : "no");
+            fprintf(stderr, "face2: %s over 10 s: eyes %ld, mouth %ld, blinks %ld, in VRAM: %s%c", c->id, c->writes, c->mwrites, c->blinks, where, 10);
             c->writes = c->mwrites = c->blinks = 0;
         }
         LARGE_INTEGER qf; QueryPerformanceFrequency(&qf);
         const double us = 1e6 / (double)qf.QuadPart;
-        fprintf(stderr, "face2: время лиц за 10 с: всего %.0f мкс (%.4f%%), из них поиск/сверка копий %.0f мкс (%ld раз) — %s; плюс просмотр папки "
-                "лиц %.0f мкс (%s)%c", (double)s_f2_tall * us, (double)s_f2_tall * us / 1e5, (double)s_f2_tfind * us, s_f2_nfind,
-                (s_f2_ev && s_f2_allcp) ? "по страницам, изменённым игрой" : "по таймеру", (double)s_f2_tscan * us,
-                s_f2_dirh ? "по уведомлению" : "раз в 2 с", 10);
+        fprintf(stderr, "face2: face time over 10 s: %.0f us in all (%.4f%%), of it searching/checking copies %.0f us (%ld times) - %s; plus watching the folder "
+                "of faces %.0f us (%s)%c", (double)s_f2_tall * us, (double)s_f2_tall * us / 1e5, (double)s_f2_tfind * us, s_f2_nfind,
+                (s_f2_ev && s_f2_allcp) ? "by the pages the game changed" : "by a timer", (double)s_f2_tscan * us,
+                s_f2_dirh ? "on notification" : "every 2 s", 10);
         s_f2_tall = s_f2_tfind = s_f2_tscan = 0; s_f2_nfind = 0;
         if (s_f2_pchk) {
-            fprintf(stderr, "face2: проверка отметок за 10 с: страниц изменено с отметкой %ld, БЕЗ отметки %ld%c", s_f2_pmarked, s_f2_punmarked, 10);
+            fprintf(stderr, "face2: mark check over 10 s: pages changed with a mark %ld, WITHOUT a mark %ld%c", s_f2_pmarked, s_f2_punmarked, 10);
             s_f2_pmarked = s_f2_punmarked = 0;
         }
     }
@@ -1479,14 +1479,14 @@ static void f2_tick(void) {
                 if (c->onh) {
                     const int pk = sg_now ? spu_cd_audio_peak(1470, 0) : 0;   /* 2 развёртки уже ВЫДАННОГО (очередь при паузе игры выбрасывается — её не слышно) */
                     if (pk >= s_f2_vthr) {
-                        if (s_f2_tlog) fprintf(stderr, "talk2: %s — голос пошёл, лицо из покоя (развёртка %llu, ждали %llu разв., пик %d)%c", c->id,
+                        if (s_f2_tlog) fprintf(stderr, "talk2: %s - the voice started, the face leaves rest (vblank %llu, waited %llu vblanks, peak %d)%c", c->id,
                                                (unsigned long long)s_f2_vb, (unsigned long long)(s_f2_vb - c->onh_vb), pk, 10);
                         c->onh = 0;
                     } else {
                         if (!sg_now && c->onh == 1) {
                             c->onh = 2; c->onh_cut++;
-                            if (s_f2_tlog) fprintf(stderr, "talk2: %s — по разметке начало фразы, а голоса не было: игра поставила паузу, лицо осталось в покое "
-                                                           "(развёртка %llu; DC_FACE_ONSET_HOLD=0 — показывать)%c", c->id, (unsigned long long)s_f2_vb, 10);
+                            if (s_f2_tlog) fprintf(stderr, "talk2: %s - the markup says a line starts, but there was no voice: the game paused, the face stayed at rest "
+                                                           "(vblank %llu; DC_FACE_ONSET_HOLD=0 - show it)%c", c->id, (unsigned long long)s_f2_vb, 10);
                         }
                         c->onh_held++; st = 0; jst = 0; emo = 0; lev = 0.f;
                     }
@@ -1514,7 +1514,7 @@ static void f2_tick(void) {
             for (int j = 0; j < c->ncp; j++)
                 if (!f2_sig_quick(vram, c, &c->v[c->cpk[j]], c->cpx[j], c->cpy[j])) { c->pend |= f2_pagebit(c->cpx[j], c->cpy[j]); odd = 1; }
             if (odd) {
-                fprintf(stderr, "face2: %s — копия лица изменилась без отметки страницы, сверяю заново (развёртка %llu)%c", c->id,
+                fprintf(stderr, "face2: %s - a face copy changed without a page mark, checking again (vblank %llu)%c", c->id,
                         (unsigned long long)s_f2_vb, 10);
                 continue;
             }
@@ -1549,8 +1549,8 @@ static void f2_tick(void) {
         }
         f2_use(c, 0);
         if (wr && s_f2_log >= 2)
-            fprintf(stderr, "face2w: %s развёртка %llu кадр лица %ld глаза %d рот %u%s%s%c", c->id, (unsigned long long)s_f2_vb, s_f2_fr, fi, st,
-                    (wr & 1) ? " +глаза" : "", (wr & 2) ? " +рот" : "", 10);
+            fprintf(stderr, "face2w: %s vblank %llu face frame %ld eyes %d mouth %u%s%s%c", c->id, (unsigned long long)s_f2_vb, s_f2_fr, fi, st,
+                    (wr & 1) ? " +eyes" : "", (wr & 2) ? " +mouth" : "", 10);
         c->last_e = fi; c->last_m = (int)st; c->force = 0;
     }
     if (s_f2_pchk) f2_page_snap();                           /* после наших записей — точка отсчёта проверки отметок */
