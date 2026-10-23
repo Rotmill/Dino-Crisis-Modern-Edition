@@ -4,6 +4,20 @@ A fan mod of Dino Crisis (PS1, 1999): the game is rebuilt from your own disc int
 
 **Download:** `DinoCrisisME_Setup.exe` on the [Releases](../../releases) page.
 
+## Install
+
+1. Download `DinoCrisisME_Setup.exe` and run it.
+2. Choose your disc image (Track 1 `.bin` or `.cue`).
+3. Choose the folder where to install and press **Install**.
+
+Remove the game: `Uninstall.exe` in its folder.
+
+Without the setup window: download `DinoCrisisME_unpacked.zip` from Releases (the same files Setup carries), unpack it and run from that folder:
+
+```
+powershell -ExecutionPolicy Bypass -File installer\dcme-install.ps1 -DiscPath "D:\Dino Crisis (USA) (v1.1) (Track 1).bin" -InstallPath "C:\Games\DinoCrisisME"
+```
+
 ## Features
 
 - Over-the-shoulder camera
@@ -41,20 +55,6 @@ Your own Dino Crisis disc image (Track 1 `.bin` or `.cue`), one of:
 `.sbi` is the LibCrypt file of a PAL disc, next to the image (the same file DuckStation uses).
 
 Windows 10 or 11, 64-bit, a graphics card with Vulkan.
-
-## Install
-
-1. Download `DinoCrisisME_Setup.exe` and run it.
-2. Choose your disc image (Track 1 `.bin` or `.cue`).
-3. Choose the folder where to install and press **Install**.
-
-Remove the game: `Uninstall.exe` in its folder.
-
-Without the setup window: download `DinoCrisisME_unpacked.zip` from Releases (the same files Setup carries), unpack it and run from that folder:
-
-```
-powershell -ExecutionPolicy Bypass -File installer\dcme-install.ps1 -DiscPath "D:\Dino Crisis (USA) (v1.1) (Track 1).bin" -InstallPath "C:\Games\DinoCrisisME"
-```
 
 ## Known issues
 
