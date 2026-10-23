@@ -1,4 +1,4 @@
-DINO CRISIS - Modern Edition v1.01
+DINO CRISIS - Modern Edition v1.02
 
 Dino Crisis (PS1) for Windows: over-the-shoulder camera, widescreen,
 modern graphics.
@@ -9,9 +9,13 @@ DISC
 Your own Dino Crisis disc image (not included), one of:
 
   Dino Crisis (USA) v1.1               SLUS-00922
+  Dino Crisis (USA) v1.0               SLUS-00922
   Dino Crisis (Europe) PAL, English    SLES-02207   + .sbi
+  Dino Crisis (France) PAL             SLES-02208   + .sbi
+  Dino Crisis (Germany) PAL            SLES-02209   + .sbi
   Dino Crisis (Italy) PAL              SLES-02210   + .sbi
   Dino Crisis (Spain) PAL              SLES-02211   + .sbi
+  Dino Crisis (Japan)                  SLPS-02180
   Dino Crisis, Russian (VIT / Akella)  SLUS-00922   the USA disc translated
 
 .sbi: the LibCrypt file of a PAL disc, next to the image (the same file

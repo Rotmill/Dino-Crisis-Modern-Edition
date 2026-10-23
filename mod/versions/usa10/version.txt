@@ -1,0 +1,14 @@
+# Dino Crisis ME: a supported game version (tools/make_version.py; setup and its window read this)
+id = usa10
+order = 7
+name = Dino Crisis (USA) v1.0
+name_ru = Dino Crisis (USA) v1.0
+exe = SLUS_009.22
+exe_sha256 = 19365634499a73b39099acfd68b1e52666ce32b679540bcbfb9c2bea0c10dac7
+exe_size = 630784
+entry_pc = 0x8001A1C8
+load_address = 0x80018000
+text_size = 0x00099800
+runtime_patch = runtime.dcpatch
+hooks_patch = hooks.dcpatch
+faces = faces

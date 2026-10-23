@@ -1,0 +1,15 @@
+# Dino Crisis ME: a supported game version (tools/make_version.py; setup and its window read this)
+id = fr_pal
+order = 8
+name = Dino Crisis (France) PAL
+name_ru = Dino Crisis (Франция) PAL
+exe = SLES_022.08
+exe_sha256 = 7bc256619442cfc7d3f7ac7e82d0f4de4fed2201430d1178237dbd9877f3a14c
+exe_size = 632832
+entry_pc = 0x800121F8
+load_address = 0x80010000
+text_size = 0x0009A000
+subchannel = sbi
+runtime_patch = runtime.dcpatch
+hooks_patch = hooks.dcpatch
+faces = faces

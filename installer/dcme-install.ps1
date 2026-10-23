@@ -517,6 +517,20 @@ function Test-Prerequisites {
 # ─────────────────────────── вспомогательное ─────────────────────────────
 function New-Dir { param([string] $Path) if (-not (Test-Path $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null } }
 
+# 23.10.2026: Remove-Item в Windows PowerShell не берёт пути от 260 знаков (объектники сборки рекомпилятора при длинном
+# пути установки): молча оставляет их или падает «Could not find a part of the path». Так от прошлой установки оставалась
+# .build-src, и установка в ту же папку падала на шаге каркаса. rd берёт их с приставкой \\?\
+function Remove-Tree {
+    param([string] $Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $Path) {
+        $full = [IO.Path]::GetFullPath($Path)
+        $long = if ($full.StartsWith('\\')) { '\\?\UNC\' + $full.Substring(2) } else { '\\?\' + $full }
+        cmd /c "rd /s /q `"$long`"" 2>$null | Out-Null
+    }
+}
+
 function Get-File {
     param([string] $Url, [string] $Dest, [int] $ExpectedSize = 0)
     Write-Log ((L "downloading" "скачиваю") + " $Url")
@@ -666,7 +680,10 @@ function Step-Framework {
     # проверять «не наложен ли он уже» нечем: раньше это делал `git checkout`,
     # теперь чистое состояние даёт сам архив.
     $dir = Join-Path $SrcRoot 'psxrecomp'
-    if (Test-Path $dir) { Remove-Item $dir -Recurse -Force }
+    Remove-Tree $dir
+    if (Test-Path -LiteralPath $dir) {
+        throw (L "Could not remove the old build folder $dir - delete it and run setup again." "Не удалось убрать старую папку сборки $dir - удали её и запусти установку заново.")
+    }
     # 08.10.2026: распаковка - во временную папку с коротким путём. Самый длинный файл архива - 171 символ от его
     # корня, и под длинной папкой установки (от ~65 символов) Expand-Archive в Windows PowerShell упирался в предел
     # пути 260 («архив не распаковался»). В .build-src\psxrecomp те же файлы на 51 символ короче.
@@ -1219,7 +1236,7 @@ try {
         $before = 0
         try { $before = (Get-ChildItem $SrcRoot -Recurse -File -ErrorAction SilentlyContinue |
                          Measure-Object Length -Sum).Sum } catch { }
-        Remove-Item $SrcRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Tree $SrcRoot          # 23.10.2026: и пути от 260 знаков (раньше рядом с игрой оставалась .build-src)
         Write-Log ((L "freed" "освобождено") + (" {0:N0} " -f ($before / 1MB)) + (L "MB" "МБ")) 'ok'
     }
 

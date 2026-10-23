@@ -29,9 +29,13 @@ Your own Dino Crisis disc image (Track 1 `.bin` or `.cue`), one of:
 | Disc | Code | |
 |---|---|---|
 | Dino Crisis (USA) v1.1 | SLUS-00922 | |
+| Dino Crisis (USA) v1.0 | SLUS-00922 | |
 | Dino Crisis (Europe) PAL, English | SLES-02207 | + `.sbi` |
+| Dino Crisis (France) PAL | SLES-02208 | + `.sbi` |
+| Dino Crisis (Germany) PAL | SLES-02209 | + `.sbi` |
 | Dino Crisis (Italy) PAL | SLES-02210 | + `.sbi` |
 | Dino Crisis (Spain) PAL | SLES-02211 | + `.sbi` |
+| Dino Crisis (Japan) | SLPS-02180 | |
 | Dino Crisis, Russian (VIT / Akella) | SLUS-00922 | the USA disc translated |
 
 `.sbi` is the LibCrypt file of a PAL disc, next to the image (the same file DuckStation uses).
@@ -40,9 +44,9 @@ Windows 10 or 11, 64-bit, a graphics card with Vulkan.
 
 ## Install
 
-1. Run `DinoCrisisME_Setup.exe`, choose the disc image and a folder, Install.
-2. The game is compiled on your PC, a few minutes. Nothing else to install.
-3. Play: `DinoCrisisME.exe`.
+1. Download `DinoCrisisME_Setup.exe` and run it.
+2. Choose your disc image (Track 1 `.bin` or `.cue`).
+3. Choose the folder where to install and press **Install**.
 
 Remove the game: `Uninstall.exe` in its folder.
 
