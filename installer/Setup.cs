@@ -1032,7 +1032,22 @@ public class Setup : Form
 
     // 08.10.2026: the disc's subchannel file (.sbi / .lsd) next to the image, found as the game finds it (cdrom.c,
     // subq_load): "<image>.sbi", "<image without (Track N)>.sbi", the same with .lsd. want - the name to ask for.
-    static string FindSubchannel(string bin, out string want)
+    // 24.10.2026 (player: the German disc with "SLES_022.09.sbi" next to the image was not found; "by the name too, but
+    // also by what is inside"): first a .sbi of the folder whose CRC32 is the redump one of this disc (exe - its id),
+    // whatever its name; then by the name of the image; then the only .sbi/.lsd of the folder (the game checks it).
+    static readonly System.Collections.Generic.Dictionary<string, uint> SubqCrc = new System.Collections.Generic.Dictionary<string, uint> {
+        { "SLES_022.07", 0xC9C7AB72u }, { "SLES_022.08", 0xAAC2D94Du }, { "SLES_022.09", 0xC3F2CA64u },
+        { "SLES_022.10", 0x2BEBA179u }, { "SLES_022.11", 0x7BE522A7u } };
+    static uint Crc32File(string p)
+    {
+        uint c = 0xFFFFFFFFu;
+        foreach (byte x in File.ReadAllBytes(p)) {
+            c ^= x;
+            for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
+        }
+        return ~c;
+    }
+    static string FindSubchannel(string bin, string exe, out string want)
     {
         string dir = Path.GetDirectoryName(bin) ?? "", stem = Path.GetFileNameWithoutExtension(bin);
         var bases = new System.Collections.Generic.List<string>();
@@ -1041,11 +1056,27 @@ public class Setup : Form
         if (m.Success) bases.Add(m.Groups[1].Value);
         bases.Add(stem);
         want = Path.Combine(dir, bases[0] + ".sbi");
+        var all = new System.Collections.Generic.List<string>();
+        try {
+            if (Directory.Exists(dir))
+                foreach (string f in Directory.GetFiles(dir)) {
+                    string x = Path.GetExtension(f).ToLowerInvariant();
+                    if (x == ".sbi" || x == ".lsd") all.Add(f);
+                }
+        } catch (Exception) { }
+        uint crc;
+        if (exe != null && SubqCrc.TryGetValue(exe, out crc))
+            foreach (string f in all) {
+                try {
+                    if (Path.GetExtension(f).ToLowerInvariant() == ".sbi" && new FileInfo(f).Length <= 65536 && Crc32File(f) == crc) return f;
+                } catch (Exception) { }
+            }
         foreach (string b in bases)
             foreach (string ext in new[] { ".sbi", ".lsd" }) {
                 string p = Path.Combine(dir, b + ext);
                 if (File.Exists(p)) return p;
             }
+        if (all.Count == 1) return all[0];
         return null;
     }
 
@@ -1083,7 +1114,7 @@ public class Setup : Form
             verLbl.Text = string.Format(S("Recognised: {0}", "Опознан: {0}"), VName(detected));
             verLbl.ForeColor = OKC;
             if (detected.Subchannel == "sbi") {                 // 08.10.2026: LibCrypt (Europe)
-                string want, sbi = FindSubchannel(p, out want);
+                string want, sbi = FindSubchannel(p, detected.Exe, out want);
                 if (sbi != null) {
                     verLbl.Text += "\n" + string.Format(S("Subchannel file: {0}", "Файл служебного канала: {0}"),
                                                          Path.GetFileName(sbi));
@@ -1139,7 +1170,7 @@ public class Setup : Form
         if (detected != null && detected.Subchannel == "sbi") {
             // 08.10.2026: LibCrypt - without the subchannel file the game stops at its first screen
             string want;
-            if (FindSubchannel(discBox.Text.Trim().Trim('"'), out want) == null) {
+            if (FindSubchannel(discBox.Text.Trim().Trim('"'), detected.Exe, out want) == null) {
                 MessageBox.Show(string.Format(S("This disc is protected by LibCrypt: the game checks data kept in the disc's subchannel, and a .bin image does not hold it.\n\nPut the subchannel file of this disc next to the image:\n{0}\n\nIt is the .sbi file of the disc dump, the same one the DuckStation emulator uses.",
                                                 "Этот диск защищён LibCrypt: игра сверяет данные служебного канала диска (subchannel), а в образе .bin их нет.\n\nПоложи файл служебного канала этого диска рядом с образом:\n{0}\n\nЭто файл .sbi от дампа диска, тот же, что берёт эмулятор DuckStation."),
                                               want),

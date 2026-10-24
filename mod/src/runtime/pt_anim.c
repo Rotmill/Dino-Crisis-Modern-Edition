@@ -546,6 +546,8 @@ static void ap_load(void) {
             s_ap_n, s_ap_shot ? "on" : "off");
     if (ver == 2 && s_ap_n > 0) ap_v2_orig_from_v3();
 }
+/* 23.10.2026: файл стоек прицела - при запуске (main.cpp, DC_PRELOAD); кадры с диска сверяются потом, по RAM игры */
+void pt_anim_preload(void) { if (s_ap_n < 0) ap_load(); }
 /* 12-бит углы кадра (80 байт) <-> 45 значений */
 /* 18.10.2026 (разбор кода): 45 углов по 12 бит - ровно байты 12..79 кадра; угол со сдвигом 0 или 4 целиком в двух
  * байтах. Третий байт брался лишним, и у последнего угла (байт 66) он за концом кадра: чтение за последним кадром
@@ -831,8 +833,36 @@ static void ao_calib_u(const float W[15][9], const float P[15][3]) {   /* по �
     float n = sqrtf(f[0]*f[0] + f[2]*f[2]); if (n < 1e-6f) n = 1.f; f[0] /= n; f[2] /= n;
     float WT[9]; ao_tr(W[AO_HAND_R], WT); ao_mv(WT, f, s_ao_ext.u);
 }
+/* 24.10.2026 (игрок, слот 2 - Wipe Out, дробовик 0x11: «идёшь вперёд и зажимаешь прицел - Регина искажается; при смене типа
+ * патронов модель ломается и летает по комнате»). Смена патронов (дробь -> дротики) грузит по 0x80160000 другой набор движений
+ * оружия, а ключ набора был из двух слов (+96, +128) и байта оружия - у этих двух наборов они одинаковые: таблица движений
+ * оставалась от прежнего набора, «походка» M16/M17/M18 читалась из чужих кадров (корень +140 и +1504 вместо -1094) - ноги
+ * опускались на 1255..2619, руки брали позу из мусора. Теперь ключ - по всей цепочке заголовков набора (адрес и число ключей
+ * каждого движения) и корню кадра 0 каждого движения длиннее двух кадров; раз за кадр. DC_AO_SETKEY=0 - прежний ключ. */
+static uint32_t ao_set_key(const uint8_t *ram) {
+    extern uint64_t s_frame_count;
+    static int en = -1; if (en < 0) { const char *e = getenv("DC_AO_SETKEY"); en = (e && *e == '0') ? 0 : 1; }
+    if (!en) return *(const uint32_t *)(ram + AP_BLOCK + 96) ^ *(const uint32_t *)(ram + AP_BLOCK + 128) ^ ((uint32_t)ram[0xB94CC] << 24);
+    static uint64_t fr = ~0ull; static uint32_t key = 0;
+    if (fr == s_frame_count) return key;
+    fr = s_frame_count;
+    uint32_t h = 2166136261u ^ ((uint32_t)ram[0xB94CC] << 24), pos = 0;
+    for (int idx = 0; idx < 64 && pos + 8 <= 0x20000u; idx++) {
+        const uint32_t dptr = *(const uint32_t *)(ram + AP_BLOCK + pos), cnt = *(const uint32_t *)(ram + AP_BLOCK + pos + 4);
+        if (dptr < 0x80160000u || dptr >= 0x80180000u || cnt > 500) break;
+        const uint32_t nk = cnt + 1; if (dptr - 0x80160000u != pos + 8 + nk * 4) break;
+        int nf = 0; for (uint32_t k = 0; k < nk; k++) { const int fi = ram[AP_BLOCK + pos + 8 + k * 4 + 1]; if (fi + 1 > nf) nf = fi + 1; }
+        const uint32_t data = dptr - 0x80160000u, end = data + (uint32_t)nf * 80u; if (end > 0x20000u) break;
+        h = (h ^ dptr) * 16777619u; h = (h ^ cnt) * 16777619u;
+        if (nf > 2) h = (h ^ *(const uint32_t *)(ram + AP_BLOCK + data)) * 16777619u;   /* корень кадра 0; стойки (1-2 кадра) переписывает
+                                                                                    * aim_patch, у выстрелов он корень оставляет эталонным */
+        pos = end;
+    }
+    key = h;
+    return key;
+}
 static int ao_extremes(uint8_t *ram) {
-    uint32_t key = *(uint32_t *)(ram + AP_BLOCK + 96) ^ *(uint32_t *)(ram + AP_BLOCK + 128) ^ ((uint32_t)ram[0xB94CC] << 24);
+    uint32_t key = ao_set_key(ram);
     if (s_ao_ext.valid && s_ao_ext.key == key) return 1;
     if (!s_ao_ext.valid && s_ao_ext.key == key) return 0;      /* уже пробовали этот набор */
     s_ao_ext.key = key; s_ao_ext.valid = 0;

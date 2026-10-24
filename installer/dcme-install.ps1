@@ -594,15 +594,42 @@ function Set-VersionEntry {
 function Find-SubchannelFile {
     <# 08.10.2026: файл служебного канала диска (.sbi / .lsd) рядом с образом - там же и так же, как его ищет игра
        (cdrom.c, subq_load): "<образ>.sbi", "<образ без (Track N)>.sbi", то же с .lsd. Путь или $null. #>
-    param([string] $Disc)
+    param([string] $Disc, [string] $Exe = '')
+    # 24.10.2026 (игрок: немецкий диск, рядом «SLES_022.09.sbi» - не находился; «и по имени, и по внутренностям»): сначала .sbi
+    # этой папки с CRC32 файла redump этого диска (любое имя), потом по имени образа, потом единственный .sbi/.lsd папки
+    # (игра сверит его и скажет, если он от другого диска).
     $dir = Split-Path -Parent $Disc
+    $all = @(Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -eq '.sbi' -or $_.Extension -eq '.lsd' })
+    $crc = $null
+    if ($Exe -and $script:SubqCrc.ContainsKey($Exe)) { $crc = $script:SubqCrc[$Exe] }
+    if ($crc) {
+        foreach ($f in $all) {
+            if ($f.Extension -eq '.sbi' -and $f.Length -le 65536 -and (Get-Crc32Hex $f.FullName) -eq $crc) { return $f.FullName }
+        }
+    }
     foreach ($b in @(Get-SubchannelBases $Disc)) {
         foreach ($e in '.sbi', '.lsd') {
             $p = Join-Path $dir ($b + $e)
             if (Test-Path -LiteralPath $p -PathType Leaf) { return $p }
         }
     }
+    if ($all.Count -eq 1) { return $all[0].FullName }
     return $null
+}
+
+# CRC32 файлов .sbi redump пяти дисков с LibCrypt (как k_subq_known в cdrom.c)
+$script:SubqCrc = @{ 'SLES_022.07' = 'C9C7AB72'; 'SLES_022.08' = 'AAC2D94D'; 'SLES_022.09' = 'C3F2CA64'; 'SLES_022.10' = '2BEBA179'; 'SLES_022.11' = '7BE522A7' }
+
+function Get-Crc32Hex {
+    param([string] $Path)
+    $c = [uint64]4294967295
+    foreach ($x in [IO.File]::ReadAllBytes($Path)) {
+        $c = $c -bxor [uint64]$x
+        for ($k = 0; $k -lt 8; $k++) {
+            if (($c -band [uint64]1) -ne 0) { $c = ($c -shr 1) -bxor [uint64]3988292384 } else { $c = $c -shr 1 }
+        }
+    }
+    return ('{0:X8}' -f ($c -bxor [uint64]4294967295))
 }
 
 function Get-SubchannelBases {
@@ -635,7 +662,7 @@ function Find-GameVersion {
                     Write-Log ((L "disc image:" "образ:") + " " + (Get-VersionName $v)) 'ok'
                     if ($v['subchannel'] -eq 'sbi') {
                         # LibCrypt: без служебного канала игра встаёт на первом экране (ключ не сходится)
-                        $sbi = Find-SubchannelFile $DiscPath
+                        $sbi = Find-SubchannelFile $DiscPath -Exe $v['exe']
                         if (-not $sbi) {
                             $want = Join-Path (Split-Path -Parent $DiscPath) ((@(Get-SubchannelBases $DiscPath))[0] + '.sbi')
                             throw (L "This disc is protected by LibCrypt: the game checks data kept in the disc's subchannel, and a .bin image does not hold it. Put the subchannel file of this disc next to the image: $want (the .sbi file of the disc dump, the same one the DuckStation emulator uses)." "Этот диск защищён LibCrypt: игра сверяет данные служебного канала диска (subchannel), а в образе .bin их нет. Положи файл служебного канала этого диска рядом с образом: $want (файл .sbi от дампа диска, тот же, что берёт эмулятор DuckStation).")

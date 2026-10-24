@@ -35,6 +35,9 @@ static char s_vkErr[200] = "";
 static char s_vkDev[128] = "";
 extern "C" const char* ptvk_last_error(void) { return s_vkErr; }
 extern "C" const char* ptvk_device_name(void) { return s_vkDev; }
+/* 24.10.2026: выбранная видеокарта - встроенная (main.cpp gfx_autolow_tick: настройки ниже для слабой видеокарты) */
+static int s_vkIntegrated = 0;
+extern "C" int ptvk_device_integrated(void) { return s_vkIntegrated; }
 /* 10.10: LUID видеокарты Vulkan - main.cpp сверяет его с видеокартой Direct3D 11 перед общей текстурой кадра: на ноутбуке
  * с двумя видеокартами Vulkan берёт дискретную, а вывод мог встать на встроенную */
 static unsigned char s_vkLuid[8];
@@ -136,7 +139,7 @@ extern "C" int ptvk_init(void)
                     drv.driverName[0] ? drv.driverName : "?", drv.driverInfo, props.driverVersion, props.vendorID, props.deviceID,
                     gq ? "yes" : "no");
         }
-        if (score > bestScore) { bestScore = score; s_phys = pd;
+        if (score > bestScore) { bestScore = score; s_phys = pd; s_vkIntegrated = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
                                  snprintf(s_vkDev, sizeof s_vkDev, "%s", props.deviceName); }
         else if (!s_vkDev[0]) snprintf(s_vkDev, sizeof s_vkDev, "%s", props.deviceName);
     }

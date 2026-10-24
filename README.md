@@ -58,6 +58,7 @@ Windows 10 or 11, 64-bit, a graphics card with Vulkan.
 
 ## Known issues
 
+- Integrated graphics. At the first start the game turns its graphics down once (Anti-Aliasing, Materials, Shadows, Lamp Haze off). You can turn them back on in Modern Options > Graphics.
 - Windows 11 Smart App Control. If setup stops at "Recompiling the game to C", this Windows feature is probably on. It only lets through apps it already knows, and the game is built from your disc right on your PC, so to Windows it is a brand-new app. To install and play, set Smart App Control to Off (Windows Security > App & browser control > Smart App Control settings) and run setup again.
 
 ## Reporting a problem

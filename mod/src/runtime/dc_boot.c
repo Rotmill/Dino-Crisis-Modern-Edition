@@ -139,6 +139,9 @@ static const LogKeep s_keep[] = {
     /* the game and its data */
     { "disc: *", 2 }, { "hle: own kernel*", 2 }, { "room library: * rooms*", 1 }, { "mods: game files *", 1 },
     { "dc_settings: dc_user.cfg - *", 1 }, { "psxrecomp: *", 6 },
+    { "cdrom: subchannel*", 4 }, { "game: stopped for good*", 2 },   /* 23.10.2026: LibCrypt discs (cdrom.c, main.cpp) */
+    /* 23.10.2026: does the machine keep up - frames per second, frames skipped to stay in real time, the sound running dry */
+    { "perf: *", 30 }, { "audio: queue*", 12 }, { "preload: *", 1 },
     /* the gamepads */
     { "pad: SDL sees *", 2 }, { "pad:   [*", 8 }, { "pad: the chosen gamepad*", 4 }, { "pad: gamecontrollerdb*", 1 },
     /* where the run is */

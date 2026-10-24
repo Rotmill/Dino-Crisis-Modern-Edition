@@ -907,6 +907,21 @@ static bool dx_record(int w, int h) {
     s_kmPending = 1;
     return true;
 }
+/* 24.10.2026: время отправки и ожидания забора за развёртку - для строки ptrace: (main.cpp, DC_PACE_TRACE); main.cpp обнуляет */
+extern "C" { double g_vk_submit_ms = 0.0, g_vk_wait_ms = 0.0; }
+/* 23.10.2026 (dev only): DC_TEST_GPU_SLOW_MS=N - every picture of the game (frames A, B and the extra ones) waits N ms more,
+ * as if the graphics card were slower: the pacing catch-up (main.cpp pace_catchup_skip) is tested on a fast machine. */
+static void test_gpu_slow(void) {
+#ifndef PSX_NO_DEBUG_TOOLS
+    static double ms = -1.0;
+    if (ms < 0.0) { const char* e = getenv("DC_TEST_GPU_SLOW_MS"); ms = e ? atof(e) : 0.0; if (ms < 0.0) ms = 0.0;
+                    if (ms > 0.0) std::fprintf(stderr, "test: every picture waits %.1f ms more (DC_TEST_GPU_SLOW_MS)%c", ms, 10); }
+    if (ms <= 0.0) return;
+    LARGE_INTEGER f, t0, t; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&t0);
+    const LONGLONG n = (LONGLONG)(ms * (double)f.QuadPart / 1000.0);
+    do { QueryPerformanceCounter(&t); } while (t.QuadPart - t0.QuadPart < n);
+#endif
+}
 static bool cmdSubmitWait() {
     vkEndCommandBuffer(s_cmd);
     vkResetFences(C->device, 1, &s_fence);
@@ -921,10 +936,17 @@ static bool cmdSubmitWait() {
         si.pNext = &km;
     }
     s_kmPending = 0;
+    LARGE_INTEGER tq0, tq1, tq2; QueryPerformanceCounter(&tq0);
     const VkResult sr = vkQueueSubmit(C->queue, 1, &si, s_fence);
     if (sr != VK_SUCCESS) { if (sr == VK_ERROR_DEVICE_LOST) ptvk_mark_lost((int)sr); return false; }
+    QueryPerformanceCounter(&tq1);
     /* 18.10.2026: до конца, не 4 с - буфер команд незаконченной работы снова не пишется (ptvk_wait_fence, pt_vulkan.cpp) */
-    return ptvk_wait_fence(s_fence) != 0;
+    const int ok = ptvk_wait_fence(s_fence) != 0;
+    QueryPerformanceCounter(&tq2);
+    { static double qf = 0.0; if (qf == 0.0) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); qf = (double)f.QuadPart / 1000.0; }
+      g_vk_submit_ms += (double)(tq1.QuadPart - tq0.QuadPart) / qf;
+      g_vk_wait_ms += (double)(tq2.QuadPart - tq1.QuadPart) / qf; }
+    return ok;
 }
 
 // ===================================================================================================================
@@ -8094,6 +8116,7 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
     LARGE_INTEGER tsub, twait;                              /* 09.10: DC_VK_STAGES=1 - время этапов кадра */
     QueryPerformanceCounter(&tsub);
     if (!cmdSubmitWait()) { rlog("[VKR] submit/hang\n"); s_prevValid = 0; s_wsnap.valid = 0; return nullptr; }
+    test_gpu_slow();
     QueryPerformanceCounter(&twait);
     s_lastShared = shFrame ? 1 : 0;
     pp_ts_read();
@@ -8673,6 +8696,7 @@ static const unsigned int* warp_render_impl(float alpha_in, int extra) {
         vkCmdCopyImageToBuffer(s_cmd, s_colImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, s_rbBuf, 1, &out);
     }
     if (!cmdSubmitWait()) { rlog("[VKR] warp submit/hang\n"); return nullptr; }
+    test_gpu_slow();
     s_lastShared = shFrameB ? 1 : 0;
     pp_ts_read();
     QueryPerformanceCounter(&t1);

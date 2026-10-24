@@ -1836,11 +1836,13 @@ static int lib_parse_dcroom(const char*path, LibRoom*out){
              free(out->rgb);free(out->code); memset(out,0,sizeof *out); return 0; }
     out->textured=1; return (int)n;
 }
+static double rlp_ms(void);   /* 23.10.2026: below - how long the library takes */
 static void lib_load(const char*dir){
     /* ME (17.09.2026): the rooms setup exported from the player's disc image
      * are built into the program (dc_pak.c): room_*.dcroom under the library
      * folder's name, the same files in the same order - the pack is
      * sorted by name, as FindFirstFile listed the folder. */
+    const double t0 = rlp_ms();   /* 23.10.2026: how long the library takes (the log line) */
     int total=0;
     char pre[600];
     if(!dc_pak_norm(dir,pre,sizeof pre - 8)) pre[0]=0;
@@ -1864,7 +1866,14 @@ static void lib_load(const char*dir){
         lib_hput(lib_trihash(&s_lib[r].v[t*9]),r);
         lib_qput(lib_qhash(&s_lib[r].v[t*9]),r);
     }
-    fprintf(stderr,"room library: %d rooms, %d tris from %s\n",s_lib_count,total,dir);
+    fprintf(stderr,"room library: %d rooms, %d tris from %s, %.0f ms\n",s_lib_count,total,dir,rlp_ms()-t0);
+}
+/* 23.10.2026: the library before the game starts (main.cpp, DC_PRELOAD=0 - at first use, as before). It was read at
+ * the first frame of play, together with every other first-use load: after a quickload that frame took 65 ms on a fast
+ * PC and the sound queue ran dry; a player with an i7-7700K: "a little stutter and sound cuts at the beginning". */
+void pt_room_library_preload(void){
+    if(s_lib_mode<0){ const char*e=getenv("DC_ROOM_LIBRARY");
+        if(e&&*e){ lib_load(e); s_lib_mode=(s_lib_count>0)?1:0; } else s_lib_mode=0; }
 }
 /* ---- world geometry for CAMERA collision ------------------------------
  * The room library turned out to be the wrong source: room boxes overlap and
@@ -3735,7 +3744,7 @@ static int      s_rl_semi_n = 0;
 /* Pieces held back to be drawn after the room's body (see the walk). */
 #define RL_MAXOBJ 48
 typedef struct { float R[9], TR[3], Dm[9], Dt[3]; uint32_t tri, quad; int n_tri, n_quad; int plate; float dim;
-                 int ot_mode, ot_slot, ot_order; int glint; } RLObj;   /* glint: 12.10 - предмет (секция типа 2), блеск */   /* ot_*: порядок консоли для двойников (15.09 ночь) */
+                 int ot_mode, ot_slot, ot_order; int glint; int live_k; } RLObj;   /* glint: 12.10 - предмет (секция типа 2), блеск */   /* ot_*: порядок консоли для двойников (15.09 ночь) */
 static RLObj    s_rl_obj[RL_MAXOBJ];
 static int      s_rl_obj_n = 0;
 
@@ -5061,6 +5070,9 @@ static void zfs_load(void) {
     { int known = 0; for (int i = 0; i < s_zfs_n; i++) if (s_zfs[i].room >= 0) known++;
       fprintf(stderr, "zfight: %d picked polygons loaded (room known for %d)%c", s_zfs_n, known, 10); }
 }
+/* 23.10.2026 (игрок: «материалы, текстуры, комнаты - прогрузить при запуске игры, по очереди, не одновременно»): мелкие списки
+ * подгонки (z-fight, плашки, декали) - при запуске (main.cpp, DC_PRELOAD), а не в первом кадре игры */
+void pt_cfg_preload(void) { zfopt_read(); zfs_load(); plov_load(); dclov_load(); }
 /* 19.10.2026: выбор F8 (до 256 строк, у игрока 212) спрашивают на каждом полигоне комнаты - линейный поиск стоил 2.5 % главного
  * потока (сейв 7, турбо). Битовая карта ключей отвечает «нет в выборе» одной пробой; если бит стоит - тот же линейный поиск (ответ
  * тот же: первая строка с этим ключом). Карту пересобирает первый поиск после любой правки списка (s_zfs_gen) или смены длины.
@@ -5518,6 +5530,7 @@ static long s_rl_passno = 0;
  * изнанке. Во время обхода (rl_emit_walk) код игры не выполняется и ответы не меняются — считаем их один раз на обход, при
  * первом вопросе (после вступления обхода, как и прежде). Вне обхода — прежний вызов. DC_RL_SCENE_CACHE=0 — как было. */
 static int  s_rl_in_walk = 0;
+static int  s_rl_live_k = -1;            /* 23.10: живая запись таблицы, чьи грани сейчас рисует обход (-1 - не запись таблицы) */
 static long s_rl_walkseq = 0;
 static int rl_sor_cache_on(void) {
     static int v = -1; if (v < 0) { const char *e = getenv("DC_RL_SCENE_CACHE"); v = (e && *e == '0') ? 0 : 1; }
@@ -6474,7 +6487,7 @@ extern int dc_tex_dither_pub2(uint16_t tpage, uint16_t cl, const int *u, const i
 typedef struct { float n[3], d; float p[4][3]; float mn[3], mx[3]; int nv, ax; uint32_t rec; } MtGreen;   /* rec (28.09): чья запись */
 typedef struct { uint32_t rec; int nv; float R[9], TR[3], D[9], T[3]; float h, ofx, ofy, wsx;
                  int world_space, is_object, npoly; float dim; const char *src;
-                 int ot_mode, ot_slot, ot_order; const uint8_t *mem; } MtDef;   /* mem (17.09 вечер): чья память записи */
+                 int ot_mode, ot_slot, ot_order; const uint8_t *mem; int live_k; } MtDef;   /* mem (17.09 вечер): чья память записи */
 static MtGreen  s_mt_g[MT_GMAX];
 static int      s_mt_gn = 0;
 static MtDef    s_mt_d[MT_DMAX];
@@ -7884,6 +7897,8 @@ static int rl_room_onesided(void) {
 extern int dc_secvis_forced(int k);
 static int va_active(void);                                 /* 16.09 ночь: комната со сборкой — варианты ближнего слоя решены (блок va_*), правило ракурса vs_* выкл. */
 static int vz_skip_poly(uint32_t rec);                      /* 17.09: версия чужого ракурса на месте (блок vz_*) — не рисуется */
+static int vz_has(uint32_t rec);                            /* 23.10 (2): то же без счётчика */
+static int s_vz_n, s_vz_live;
 static void vz_frame_check(const uint8_t *ram);
 static void vz_walk_log(void);
 static int va_check(const uint8_t *ram, uint32_t rec, int nv);
@@ -8364,10 +8379,16 @@ static inline float rl_glint_at(float x, float y) {
 #define OP_GW 112
 #define OP_GH 30
 #define OP_NB 12
-typedef struct { float zfar; int nb; int32_t key[OP_NB]; float fz[OP_NB]; } OpCell;
+typedef struct { float zfar, zall; int nb; int32_t key[OP_NB]; float fz[OP_NB]; } OpCell;   /* zall (23.10) - дальнее из всего, что консоль рисует */
 static OpCell s_op[OP_GW * OP_GH];
 static int s_op_ready = 0;                                         /* сетка этого обхода собрана */
-static long s_op_tested = 0, s_op_pushed = 0;
+static long s_op_tested = 0, s_op_pushed = 0, s_op_hid_tested = 0, s_op_hid_pushed = 0;
+static uint64_t s_op_hid = 0;                                      /* 23.10: записи, которые подпрограмма ракурса прячет (бит вернули мы) */
+static uint64_t s_op_vis = 0; static int s_op_cam = 0;             /* 23.10 (2): записи, которые она показывает; камера игры в оригинальном типе */
+static long s_op_vzkept = 0;
+static int op_dbg_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DC_ORIG_PAINTER_DBG"); v = (e && *e == '1') ? 1 : 0; } return v; }
+static uint32_t s_op_frec[OP_GW * OP_GH][OP_NB + 1];                /* DC_ORIG_PAINTER_DBG: чья грань дала глубину ключа (последняя - корзина по глубине) */
+typedef struct { int32_t key; uint32_t rec; } OpAdd;
 static int op_env(void) { static int v = -1; if (v < 0) { const char *e = getenv("DC_ORIG_PAINTER"); v = (e && *e == '0') ? 0 : 1; } return v; }
 static int op_entry_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DC_ORIG_PAINTER_ENTRY"); v = (e && *e == '0') ? 0 : 1; } return v; }
 /* ключ очерёдности консоли для куска с постоянным слотом: меньше ключ - рисуется позже */
@@ -8404,11 +8425,14 @@ static void op_tri(const float *a, const float *b, const float *c, float h, OpCe
         }
 }
 static void op_cell_add(int ci, float z, void *u) {
-    const int32_t key = *(const int32_t *)u;                       /* -1 - слот по глубине */
+    const int32_t key = ((const OpAdd *)u)->key;                   /* -1 - слот по глубине */
+    const uint32_t rec = ((const OpAdd *)u)->rec;
     OpCell *c = &s_op[ci];
-    if (key < 0) { if (z > c->zfar) c->zfar = z; return; }
-    for (int q = 0; q < c->nb; q++) if (c->key[q] == key) { if (z > c->fz[q]) c->fz[q] = z; return; }
-    if (c->nb < OP_NB) { c->key[c->nb] = key; c->fz[c->nb] = z; c->nb++; return; }
+    if (z > c->zall) c->zall = z;
+    if (key == -2) return;                                         /* 23.10: только «консоль здесь что-то рисует» */
+    if (key < 0) { if (z > c->zfar) { c->zfar = z; s_op_frec[ci][OP_NB] = rec; } return; }
+    for (int q = 0; q < c->nb; q++) if (c->key[q] == key) { if (z > c->fz[q]) { c->fz[q] = z; s_op_frec[ci][q] = rec; } return; }
+    if (c->nb < OP_NB) { c->key[c->nb] = key; c->fz[c->nb] = z; s_op_frec[ci][c->nb] = rec; c->nb++; return; }
     /* 22.10: клетка полна - сливаем осторожно: глубина уходит к ближайшему БОЛЬШЕМУ ключу (для части граней она перестаёт
      * считаться «позже», лишнего не отодвинем), а если больших нет - наибольший ключ поднимается до нового */
     int qb = -1, ql = 0;
@@ -8416,8 +8440,8 @@ static void op_cell_add(int ci, float z, void *u) {
         if (c->key[q] > key && (qb < 0 || c->key[q] < c->key[qb])) qb = q;
         if (c->key[q] > c->key[ql]) ql = q;
     }
-    if (qb >= 0) { if (z > c->fz[qb]) c->fz[qb] = z; }
-    else { c->key[ql] = key; if (z > c->fz[ql]) c->fz[ql] = z; }
+    if (qb >= 0) { if (z > c->fz[qb]) { c->fz[qb] = z; s_op_frec[ci][qb] = rec; } }
+    else { c->key[ql] = key; if (z > c->fz[ql]) { c->fz[ql] = z; s_op_frec[ci][ql] = rec; } }
 }
 /* ⭐ 21.10.2026 поздно (игрок, слот 3 релиза - ST405, сцена, где Регину тащат и надо вырываться: «слева снизу здания мигает»;
  * «когда ты убрал правило, вся сцена стала стабильной и отображалась как надо»). В сцене камера игры едет, и решение по грани
@@ -8436,6 +8460,7 @@ static int op_scenes_env(void) { static int v = -1; if (v < 0) { const char *e =
  * DC_ORIG_PAINTER_SHOT=0 - как было. */
 static int op_shot_env(void) { static int v = -1; if (v < 0) { const char *e = getenv("DC_ORIG_PAINTER_SHOT"); v = (e && *e == '0') ? 0 : 1; } return v; }
 int dc_room_shot_hides(int k);                                     /* ниже, у версий мест (s_pv_vis) */
+int dc_room_shot_rec(void);                                        /* 23.10 (4): запись камеры, по которой судит dc_room_shot_hides */
 int dc_room_shot_ready(void);                                      /* разбор ракурсов этой комнаты готов (до него - правило ждёт) */
 /* перед обходом: живые видимые записи таблицы - матрицей записи (вид камеры игры), как их нарисует консоль.
  * ⭐ 22.10.2026 (игрок, дев слот 49, ST10B: «идёшь вперёд и назад - при смене ракурса мусорный кадр: прежний ракурс, но не
@@ -8445,6 +8470,40 @@ int dc_room_shot_ready(void);                                      /* разбо
  * 15), и на такт старого ракурса полоса у стола снова видна. Теперь точки записей переводятся в вид, которым проход рисует тело
  * комнаты: p' = Rp·Rcᵀ·(p - Tc) + Tp (Rc, Tc - запись эталонного куска тела сейчас, Rp, Tp - его история, пара прохода).
  * Камера стоит - перевод единичный. NULL - как было (запись как есть). DC_ORIG_PAINTER_PASS=0 - как было. */
+/* ⭐ 23.10.2026 вечер (4) (игрок, дев слот 11 - ST40A: «при смене ракурса радиатор справа пропадает» - решётка внизу стены, из
+ * которой выбегают враги). Подпрограмма ракурса записи 1 прячет стену с решёткой (запись 3; на чистом кадре консоли -
+ * DC_FULLROOM_FORCE=0, DC_ROOM_SHOWALL=0 - в этом ракурсе её и нет), но запись камеры 0xB796E и биты таблицы переходят на
+ * новый ракурс за два прохода до того, как сменится вид: эти проходы ещё рисуют коридор (матрицы таблицы и пара прохода -
+ * камера записи 6), а маски видимости брались по новой записи - решётка пряталась на 4 показа раньше склейки. Теперь при смене
+ * записи маски прежнего ракурса держатся, пока вид, которым рисует проход (passR/passT), не прыгнет (склейка: поворот больше
+ * 0.1 по сумме или сдвиг больше 1000), но не дольше 6 проходов. DC_ORIG_SHOT_HOLD=0 - как было (маски по текущей записи). */
+static uint64_t s_os_vis = 0, s_os_hid = 0;
+static int s_os_rec = -1, s_os_room = -1, s_os_ld = -1, s_os_pn = 0, s_os_have = 0;
+static float s_os_R[9], s_os_T[3];
+static void op_shot_hold(const float *Rd, const float *Td, uint64_t *vis, uint64_t *hid, int *rec) {
+    static int en = -1; if (en < 0) { const char *e = getenv("DC_ORIG_SHOT_HOLD"); en = (e && *e == '0') ? 0 : 1; }
+    if (!en) return;
+    extern int g_savestate_loads;
+    const int room = dc_room_current(), ld = g_savestate_loads;
+    int jump = 0;
+    if (Rd && Td) {
+        if (s_os_have) {
+            float dr = 0.f, dt = fabsf(Td[0] - s_os_T[0]) + fabsf(Td[1] - s_os_T[1]) + fabsf(Td[2] - s_os_T[2]);
+            for (int i = 0; i < 9; i++) dr += fabsf(Rd[i] - s_os_R[i]);
+            jump = (dr > 0.1f || dt > 1000.f);
+        }
+        memcpy(s_os_R, Rd, sizeof s_os_R); memcpy(s_os_T, Td, sizeof s_os_T); s_os_have = 1;
+    }
+    if (s_os_rec < 0 || room != s_os_room || ld != s_os_ld || *rec == s_os_rec || jump || !Rd || ++s_os_pn > 6) {
+        s_os_vis = *vis; s_os_hid = *hid; s_os_rec = *rec; s_os_room = room; s_os_ld = ld; s_os_pn = 0;   /* текущие маски */
+        return;
+    }
+    { static long nlog = 0;
+      if (s_os_pn == 1 && ++nlog <= 60)
+          fprintf(stderr, "orig shot: room %d - the camera record is already %d, the pass still draws the view of record %d: its shot "
+                          "masks until the view changes (DC_ORIG_SHOT_HOLD=0 off)%c", room, *rec, s_os_rec, 10); }
+    *vis = s_os_vis; *hid = s_os_hid; *rec = s_os_rec;
+}
 static void op_build(const uint8_t *ram, uint32_t S, float h, const float *Rp, const float *Rc, const float *Tp, const float *Tc) {
     s_op_ready = 0;
     float X[9]; int xf = (Rp && Rc && Tp && Tc);
@@ -8456,6 +8515,20 @@ static void op_build(const uint8_t *ram, uint32_t S, float h, const float *Rp, c
     if (xf) for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++)
         X[i * 3 + j] = Rp[i * 3] * Rc[j * 3] + Rp[i * 3 + 1] * Rc[j * 3 + 1] + Rp[i * 3 + 2] * Rc[j * 3 + 2];
     extern int g_dc_orig_mode;
+    s_op_cam = 0; s_op_vis = 0;
+    uint64_t shot_hid = 0; int shot_known = 0, shot_rec = ram[0xB796E];   /* 23.10 (4): маски ракурса, чей вид рисует проход */
+    {   /* 23.10 вечер (2): записи, которые показывает подпрограмма ракурса, - для правила версий мест (vz_*, op_live_shown) */
+        static int vl = -1; if (vl < 0) { const char *e = getenv("DC_ORIG_VZ_LIVE"); vl = (e && *e == '0') ? 0 : 1; }
+        extern int dc_scripted_now(void), dc_scene_flag_on(void), dc_cut_camera(void), dc_regina_dead(void);
+        if (g_dc_orig_mode && !dc_scripted_now() && !dc_scene_flag_on() && !dc_cut_camera() && !dc_regina_dead() && dc_room_shot_ready()) {
+            uint64_t vis = 0, hid = 0;
+            for (int k = 0; k < 36; k++) { const int r = dc_room_shot_hides(k); if (r == 0) vis |= 1ull << k; else if (r == 1) hid |= 1ull << k; }
+            shot_rec = dc_room_shot_rec();
+            op_shot_hold(Rp ? Rp : Rc, Tp ? Tp : Tc, &vis, &hid, &shot_rec);   /* вид, которым рисует проход */
+            shot_hid = hid; shot_known = 1;
+            if (vl) { s_op_vis = vis; s_op_cam = 1; }
+        }
+    }
     if (!op_env() || !(h > 0.f)) return;
     if (op_scenes_env()) { if (!(g_dc_orig_mode || rl_sor())) return; }
     else {
@@ -8464,6 +8537,7 @@ static void op_build(const uint8_t *ram, uint32_t S, float h, const float *Rp, c
     }
     if (op_shot_env() && !dc_room_shot_ready()) return;             /* 22.10 день: первый кадр комнаты/загрузки - без правила */
     memset(s_op, 0, sizeof s_op);
+    s_op_hid = 0;
     const int shift = ram[(S + 33u) & 0x1FFFFFu] & 15;
     const float zn = h * 0.5f;
     for (int k = 0; k < 36; k++) {
@@ -8472,12 +8546,13 @@ static void op_build(const uint8_t *ram, uint32_t S, float h, const float *Rp, c
         if ((rrm_u32(ram, e + 48u) & 3u) != 3u) continue;
         const uint32_t gp = rrm_u32(ram, e + 60u) & 0x1FFFFFu;
         if (gp < 0x100000u || gp + 12u >= 0x200000u) continue;
-        if (op_shot_env() && dc_room_shot_hides(k) == 1) {               /* 22.10 день: бит вернули мы, консоль это не рисует */
+        if (op_shot_env() && (shot_known ? (int)((shot_hid >> k) & 1ull) : (dc_room_shot_hides(k) == 1))) {   /* 22.10 день: бит вернули мы, консоль это не рисует */
             static int lroom = -1, lcam = -1; static uint64_t lmask = 0; static long nlog = 0;
-            if (lroom != dc_room_current() || lcam != ram[0xB796E]) { lroom = dc_room_current(); lcam = ram[0xB796E]; lmask = 0; }
+            if (lroom != dc_room_current() || lcam != shot_rec) { lroom = dc_room_current(); lcam = shot_rec; lmask = 0; }
+            s_op_hid |= 1ull << k;
             if (!((lmask >> k) & 1ull) && ++nlog <= 200) { lmask |= 1ull << k;
                 fprintf(stderr, "orig painter: room %d camera record %d - slot %d grp %06X is hidden by the shot routine (its bit is ours): "
-                                "not counted as painted later (DC_ORIG_PAINTER_SHOT=0 off)%c", dc_room_current(), ram[0xB796E], k, gp, 10); }
+                                "not counted as painted later (DC_ORIG_PAINTER_SHOT=0 off)%c", dc_room_current(), shot_rec, k, gp, 10); }
             continue;
         }
         const int mode = ram[e + 72u], fslot = rrm_u16(ram, e + 74u);
@@ -8520,23 +8595,100 @@ static void op_build(const uint8_t *ram, uint32_t S, float h, const float *Rp, c
                 else {
                     const float trz = xf ? X[6] * (TR[0] - Tc[0]) + X[7] * (TR[1] - Tc[1]) + X[8] * (TR[2] - Tc[2]) + Tp[2] : TR[2];
                     const float zs = (mode == 0) ? zmin : (mode == 1) ? zmax : trz;
-                    if (((int)zs >> shift) >= 900) continue;               /* так далеко, что консоль рисует это раньше тела */
+                    if (((int)zs >> shift) >= 900) key = -2;               /* так далеко, что консоль рисует это раньше тела */
                 }
-                op_tri(p[0], p[1], p[2], h, op_cell_add, &key);
-                if (nv == 4) op_tri(p[1], p[2], p[3], h, op_cell_add, &key);
+                OpAdd ad = { key, r };
+                op_tri(p[0], p[1], p[2], h, op_cell_add, &ad);
+                if (nv == 4) op_tri(p[1], p[2], p[3], h, op_cell_add, &ad);
             }
         }
     }
     s_op_ready = 1;
 }
-typedef struct { int32_t key; float margin; int cells, over; float zneed; int32_t kneed; float zown; } OpTest;
+typedef struct { int32_t key; float margin; int cells, over; float zneed; int32_t kneed; float zown; int nc; uint32_t crec[6]; int ccnt[6]; } OpTest;
 static void op_cell_test(int ci, float z, void *u) {
     OpTest *t = (OpTest *)u;
     const OpCell *c = &s_op[ci];
-    float later = c->zfar; int32_t kl = -1;
-    for (int q = 0; q < c->nb; q++) if (c->key[q] < t->key && c->fz[q] > later) { later = c->fz[q]; kl = c->key[q]; }
+    float later = c->zfar; int32_t kl = -1; uint32_t rl = s_op_frec[ci][OP_NB];
+    for (int q = 0; q < c->nb; q++) if (c->key[q] < t->key && c->fz[q] > later) { later = c->fz[q]; kl = c->key[q]; rl = s_op_frec[ci][q]; }
     t->cells++;
-    if (later > z * (1.f + t->margin)) { t->over++; if (later > t->zneed) { t->zneed = later; t->kneed = kl; t->zown = z; } }
+    if (later > z * (1.f + t->margin)) {
+        t->over++; if (later > t->zneed) { t->zneed = later; t->kneed = kl; t->zown = z; }
+        int q = 0; while (q < t->nc && t->crec[q] != rl) q++;
+        if (q < t->nc) t->ccnt[q]++; else if (t->nc < 6) { t->crec[t->nc] = rl; t->ccnt[t->nc] = 1; t->nc++; }
+    }
+}
+/* ⭐ 23.10.2026 вечер (игрок, дев слот 11 - ST40A в оригинальном типе: «ходишь вперёд-назад - угол стены справа то появляется, то
+ * исчезает; и так во многих локациях»). У ракурса коридора (запись камеры 6) подпрограмма прячет записи 1, 2 и 5 - консоль их не
+ * рисует, бит им вернуло наше объединение комнаты (для камеры Modern). Запись 2 - другой вариант той же стены (широкая ниша со
+ * стойкой) поверх варианта записи 0 (узкая ниша, стена с решёткой - его и рисует консоль; замер подкраской записей в RAM на кадре
+ * консоли). Правило порядка проверяло грани записи 2 как обычные: грань угла 108B5C лежала на пороге «закрашено позже больше
+ * половины клеток» (30 из 61), решение менялось от шага к шагу - угол мигал. Грань записи, которую подпрограмма ракурса прячет,
+ * правило порядка больше не проверяет, а:
+ *  - большей частью в кадре консоли 4:3 (доля её площади в 4:3 от видимой в широком кадре, rl_orig_share43; у грани с прошлым
+ *    решением - порог 0.4 / 0.6, чтобы на краю не переключалась) - за самым дальним, что консоль рисует в её клетках (консоль
+ *    здесь показывает только своё; где не рисует ничего - как была). Так и полоса через весь кадр в ST10B (дев слот 49, запись 18 -
+ *    её ракурс тоже прячет);
+ *  - большей частью за краем широкого кадра - только чуть назад (DC_ORIG_PAINTER_HIDDEN_K, 1.5 %): подпрограмма прячет и
+ *    куски, которых просто нет в её кадре (дев слот 33, ST50A: пульты 11B03C справа за краем 4:3 - в широком кадре их видно, как в
+ *    Modern), а совпадающая по месту грань чужого варианта уступает грани консоли.
+ * DC_ORIG_PAINTER_HIDDEN=0 - как было (правило порядка, как для остальных). */
+static int op_hidden_env(void) { static int v = -1; if (v < 0) { const char *e = getenv("DC_ORIG_PAINTER_HIDDEN"); v = (e && *e == '0') ? 0 : 1; } return v; }
+static float op_hidden_k(void) {
+    static float k = -1.f;
+    if (k < 0.f) { const char *e = getenv("DC_ORIG_PAINTER_HIDDEN_K"); k = e ? (float)atof(e) : 1.015f; if (k < 1.f) k = 1.f; }
+    return k;
+}
+typedef struct { int cells, over, out; float zneed; } OpHid;
+static void op_cell_hid(int ci, float z, void *u) {
+    OpHid *t = (OpHid *)u;
+    const float za = s_op[ci].zall;
+    const float px = -OP_XH + ((float)(ci % OP_GW) + 0.5f) * 8.f;  /* центр клетки в точках консоли от середины */
+    (void)z;
+    t->cells++;
+    if (px < -160.f || px > 160.f) t->out++;
+    if (za > 0.f) { t->over++; if (za > t->zneed) t->zneed = za; }
+}
+static float op_push_hidden(const RRVert *v, int nv, float h, float wsx, int entry, uint32_t rec) {
+    float p[4][3], zmin = 1e30f;
+    for (int k = 0; k < nv && k < 4; k++) {
+        p[k][0] = v[k].x; p[k][1] = v[k].y; p[k][2] = v[k].zo;
+        if (!(p[k][2] > 1.f)) return 1.f;
+        if (p[k][2] < zmin) zmin = p[k][2];
+    }
+    OpHid t = { 0, 0, 0, 0.f };
+    op_tri(p[0], p[1], p[2], h, op_cell_hid, &t);
+    if (nv == 4) op_tri(p[1], p[2], p[3], h, op_cell_hid, &t);
+    s_op_hid_tested++;
+    /* решение по грани - с памятью (запись и номер записи таблицы; новая комната или загрузка - с нуля) */
+    #define OH_N 8192u
+    static uint32_t s_oh_key[OH_N]; static uint8_t s_oh_st[OH_N]; static int s_oh_room = -1, s_oh_ld = -1;
+    { extern int g_savestate_loads;
+      if (s_oh_room != dc_room_current() || s_oh_ld != g_savestate_loads) {
+          memset(s_oh_key, 0, sizeof s_oh_key); s_oh_room = dc_room_current(); s_oh_ld = g_savestate_loads; } }
+    const uint32_t okey = ((rec & 0x1FFFFFu) | ((uint32_t)(entry + 1) << 22)) + 1u;
+    uint32_t oi = (okey * 2654435761u) >> 19;
+    int prev = -1;
+    for (uint32_t pr = 0; pr < 64u; pr++, oi = (oi + 1u) & (OH_N - 1u)) {
+        if (s_oh_key[oi] == okey) { prev = s_oh_st[oi]; break; }
+        if (!s_oh_key[oi]) break;
+    }
+    const float fin = (wsx < 0.999f) ? rl_orig_share43(v, nv, h, wsx) : 1.f;   /* доля её площади в 4:3 от видимой в кадре */
+    const float thr = prev == 1 ? 0.4f : (prev == 0 ? 0.6f : 0.5f);
+    const int inside = t.cells > 0 && fin >= thr;
+    if (t.cells > 0 && (s_oh_key[oi] == okey || !s_oh_key[oi])) { s_oh_key[oi] = okey; s_oh_st[oi] = (uint8_t)inside; }
+    #undef OH_N
+    const int full = (inside && t.over > 0 && t.zneed * 1.02f > zmin * op_hidden_k());
+    { static long lines = 0;
+      if (op_dbg_on() && t.cells > 0 && lines < 20000) {
+          extern uint64_t s_frame_count; lines++;
+          fprintf(stderr, "ophid: f=%llu rec %06X entry %d (hidden by the shot routine) cells %d share in 4:3 %.2f console-drawn %d zmin %.0f zfar %.0f -> %s%c",
+                  (unsigned long long)s_frame_count, rec & 0xFFFFFFu, entry, t.cells, fin, t.over, zmin, t.zneed,
+                  full ? "behind all the console draws" : "small push", 10);
+      } }
+    if (!full) return op_hidden_k();
+    s_op_hid_pushed++;
+    return t.zneed * 1.02f / zmin;
 }
 /* множитель глубины полигона куска с постоянным слотом (1 - как есть) */
 static float op_push_for(const RRVert *v, int nv, float h, int slot, int entry, uint32_t rec) {
@@ -8546,24 +8698,35 @@ static float op_push_for(const RRVert *v, int nv, float h, int slot, int entry, 
         if (!(p[k][2] > 1.f)) return 1.f;
         if (p[k][2] < zmin) zmin = p[k][2];
     }
-    OpTest t = { op_key(slot, entry), op_margin(), 0, 0, 0.f, -1, 0.f };
+    OpTest t = { op_key(slot, entry), op_margin(), 0, 0, 0.f, -1, 0.f, 0 };
     op_tri(p[0], p[1], p[2], h, op_cell_test, &t);
     if (nv == 4) op_tri(p[1], p[2], p[3], h, op_cell_test, &t);
     s_op_tested++;
-    {   /* DC_ORIG_PAINTER_DBG=1: решения правила по граням, где хоть что-то поверх (кадр, запись, слот, клетки) */
-        static int dbg = -1; static long lines = 0;
-        if (dbg < 0) { const char *e = getenv("DC_ORIG_PAINTER_DBG"); dbg = (e && *e == '1') ? 1 : 0; }
-        if (dbg && t.over > 0 && lines < 20000) {
+    {   /* DC_ORIG_PAINTER_DBG=1: решения правила по граням, где хоть что-то поверх (кадр, запись, слот, клетки, чьи грани поверх) */
+        static long lines = 0;
+        if (op_dbg_on() && t.over > 0 && lines < 20000) {
             extern uint64_t s_frame_count; lines++;
-            fprintf(stderr, "opdbg: f=%llu rec %06X slot %d entry %d cells %d over %d zmin %.0f zcell %.0f zover %.0f by %d/%d -> %s%c",
+            char cov[128]; int n = 0; cov[0] = 0;
+            for (int q = 0; q < t.nc && n < 110; q++) n += snprintf(cov + n, sizeof cov - (size_t)n, " %06X:%d", t.crec[q] & 0xFFFFFFu, t.ccnt[q]);
+            fprintf(stderr, "opdbg: f=%llu rec %06X slot %d entry %d cells %d over %d zmin %.0f zcell %.0f zover %.0f by %d/%d -> %s cov%s%c",
                     (unsigned long long)s_frame_count, rec & 0xFFFFFFu, slot, entry, t.cells, t.over, zmin, t.zown, t.zneed,
                     t.kneed < 0 ? -1 : (int)(t.kneed / 64), t.kneed < 0 ? -1 : (int)(t.kneed % 64),
-                    (t.cells && t.over * 2 >= t.cells) ? "push" : "keep", 10);
+                    (t.cells && t.over * 2 >= t.cells) ? "push" : "keep", cov, 10);
         }
     }
     if (t.cells == 0 || t.over * 2 < t.cells) return 1.f;
     s_op_pushed++;
     return t.zneed * 1.02f / zmin;
+}
+/* ⭐ 23.10.2026 вечер (2) (игрок, дев слот 11 - ST40A в оригинальном типе: «угол стены справа то появляется, то исчезает»). Правило
+ * версий мест по зонам ракурсов (vz_*, 17.09, для свободной камеры Modern) выбирает версию места по зоне, где лежит центр грани:
+ * в коридоре ракурса 6 четыре грани записи 3 (стена у ниши с решёткой, её консоль рисует поверх) лежат в зоне другого ракурса,
+ * и правило их выбрасывало - угол держался только на грани чужого варианта (запись 2, широкая ниша; её ракурс прячет), а её
+ * правило порядка консоли то уводило назад, то нет. Под камерой игры в оригинальном типе (вне сцен) консоль рисует ровно то,
+ * что показывает подпрограмма текущего ракурса: грани таких живых записей правило версий не выбрасывает (s_op_vis); спрятанные
+ * ракурсом записи и достройка - как было, и их грани уходят за то, что рисует консоль (op_push_hidden). DC_ORIG_VZ_LIVE=0 - как было. */
+static inline int op_live_shown(void) {
+    return s_op_cam && s_rl_in_walk && s_rl_live_k >= 0 && s_rl_live_k < 36 && ((s_op_vis >> s_rl_live_k) & 1ull);
 }
 static int emit_dbg_match(uint32_t gp) {
     static int g = -1;
@@ -8584,7 +8747,10 @@ static void rl_emit_poly(const uint8_t *ram, uint32_t rec, int nv,
     const char *edrop = NULL;
     if (uvn_wide(ram, rec)) edrop = "uvn_wide";              /* 20.09 вечер: широкая копия двойника с вложенным uv — рисуется узкая */
     int uvn_keep = uvn_narrow(rec);              /* узкая копия проходит мимо правил версий */
-    if (!edrop && !uvn_keep && vz_skip_poly(rec)) edrop = "vz_skip";  /* 17.09: версия места из набора чужого ракурса (блок vz_*) */
+    if (!edrop && !uvn_keep) {                                        /* 17.09: версия места из набора чужого ракурса (блок vz_*) */
+        if (op_live_shown()) { if (s_vz_n > 0 && s_vz_live && vz_has(rec) && (s_rl_target & 1)) s_op_vzkept++; }   /* 23.10 (2) */
+        else if (vz_skip_poly(rec)) edrop = "vz_skip";
+    }
     if (!edrop && !uvn_keep && vs_skip(ram, rec, nv, h)) edrop = "vs_skip";   /* 16.09 вечер: вариант грани под другой ракурс */
     if (!edrop && rv_skip(rec, s_rl_ot_order)) edrop = "rv_skip";     /* 20.09: закрашенная версия — консоль рисует поверх неё другую секцию (rv_*) */
     int va_state = (uvn_keep || edrop) ? 0 : va_check(ram, rec, nv);       /* 16.09 ночь: 2 — копия варианта ближнего слоя, который неподвижный ракурс показывает без неё (назад) */
@@ -8621,7 +8787,7 @@ static void rl_emit_poly(const uint8_t *ram, uint32_t rec, int nv,
             d->h = h; d->ofx = ofx; d->ofy = ofy; d->wsx = wsx;
             d->world_space = world_space; d->is_object = is_object;
             d->npoly = s_rl_piece_npoly; d->dim = s_rl_dim; d->src = s_rl_emit_src;
-            d->ot_mode = s_rl_ot_mode; d->ot_slot = s_rl_ot_slot; d->ot_order = s_rl_ot_order;
+            d->ot_mode = s_rl_ot_mode; d->ot_slot = s_rl_ot_slot; d->ot_order = s_rl_ot_order; d->live_k = s_rl_live_k;
             return;
         }
     }
@@ -8839,8 +9005,12 @@ static void rl_emit_poly(const uint8_t *ram, uint32_t rec, int nv,
       orig_rules_done:; }
     /* 21.10 (3): кусок с постоянным слотом под камерой игры - за то, что консоль нарисует поверх него позже (op_*) */
     float op_push = 1.f;
-    if (s_op_ready && s_rl_in_walk && (s_rl_target & 1) && s_rl_ot_mode == 2 && s_rl_ot_slot >= 900)
-        op_push = op_push_for(v, nv, h, s_rl_ot_slot, s_rl_ot_order, rec);   /* 22.10: и номер записи (s_rl_ot_order 0..35 - запись таблицы) */
+    if (s_op_ready && s_rl_in_walk && (s_rl_target & 1)) {
+        if (s_rl_live_k >= 0 && s_rl_live_k < 36 && ((s_op_hid >> s_rl_live_k) & 1ull) && op_hidden_env())
+            op_push = op_push_hidden(v, nv, h, wsx, s_rl_live_k, rec);          /* 23.10: запись, которую прячет подпрограмма ракурса */
+        else if (s_rl_ot_mode == 2 && s_rl_ot_slot >= 900)
+            op_push = op_push_for(v, nv, h, s_rl_ot_slot, s_rl_ot_order, rec);   /* 22.10: и номер записи (s_rl_ot_order 0..35 - запись таблицы) */
+    }
     /* TRANSPARENCY, AS THE GAME ENCODES IT. The top byte of the first colour
      * word is the GPU command code (0x34/0x3C opaque, 0x36/0x3E semi), so bit
      * 1 says whether the primitive is see-through; the blend mode itself is
@@ -9560,7 +9730,7 @@ static void mt_flush(const uint8_t *ram) {
     if (s_room_by_lba != s_mt_sk_room) { s_mt_sk_room = s_room_by_lba; s_mt_sk_n = 0; }   /* 28.09: новая комната — память листов с нуля */
     if (s_mt_dn > 0) {
         float dim0 = s_rl_dim, pull0 = s_cur_plate_pull_units; int np0 = s_rl_piece_npoly; const char *src0 = s_rl_emit_src;
-        int otm0 = s_rl_ot_mode, ots0 = s_rl_ot_slot, oto0 = s_rl_ot_order;
+        int otm0 = s_rl_ot_mode, ots0 = s_rl_ot_slot, oto0 = s_rl_ot_order; const int lk0 = s_rl_live_k;
         s_mt_flushing = 1;
         for (int i = 0; i < s_mt_dn; i++) {
             const MtDef *d = &s_mt_d[i];
@@ -9582,13 +9752,13 @@ static void mt_flush(const uint8_t *ram) {
             if (uniq) { const int si = mt_sticky_find(rkey);
                         if (si >= 0 && mt_green_in_frame(s_mt_sk_grn[si])) { hidden++; held++; continue; } }
             s_rl_dim = d->dim; s_rl_piece_npoly = d->npoly; s_rl_emit_src = d->src;
-            s_rl_ot_mode = d->ot_mode; s_rl_ot_slot = d->ot_slot; s_rl_ot_order = d->ot_order;
+            s_rl_ot_mode = d->ot_mode; s_rl_ot_slot = d->ot_slot; s_rl_ot_order = d->ot_order; s_rl_live_k = d->live_k;
             rl_emit_poly(dm, d->rec, d->nv, d->R, d->TR, d->D, d->T, d->h, d->ofx, d->ofy, d->wsx, d->world_space, d->is_object);
             kept++;
         }
         s_mt_flushing = 0;
         s_rl_dim = dim0; s_cur_plate_pull_units = pull0; s_rl_piece_npoly = np0; s_rl_emit_src = src0;
-        s_rl_ot_mode = otm0; s_rl_ot_slot = ots0; s_rl_ot_order = oto0;
+        s_rl_ot_mode = otm0; s_rl_ot_slot = ots0; s_rl_ot_order = oto0; s_rl_live_k = lk0;
     }
     { static int lh = -1, lk = -1, lhd = -1, n = 0;
       if ((hidden != lh || kept != lk || held != lhd) && n < 60 && s_rl_target == 1) { lh = hidden; lk = kept; lhd = held; n++;
@@ -9920,11 +10090,15 @@ static void rl_emit_walk_body(void) {
       if (s_rl_target == 1) { s_rl_orig_nearrej = 0; s_rl_orig_rej[0] = s_rl_orig_rej[1] = s_rl_orig_rej[2] = s_rl_orig_rej[3] = 0; s_rl_orig_out43 = 0;
                               s_rl_orig_keep = 0; } }
     { static long last_p = -1; static uint64_t last_pf = 0; static uint64_t pfr = 0; pfr++;   /* 21.10 (3): op_* */
-      if (s_rl_target == 1 && s_op_pushed != last_p && pfr - last_pf > 120) {
+      if (s_rl_target == 1 && s_op_pushed + s_op_hid_pushed * 100000 + s_op_vzkept * 7 != last_p && pfr - last_pf > 120) {
           fprintf(stderr, "orig painter: room %d - %ld of %ld polys of fixed ordering-table slots pushed behind what the console paints over "
-                          "them later (DC_ORIG_PAINTER=0 off)%c", dc_room_current(), s_op_pushed, s_op_tested, 10);
-          last_p = s_op_pushed; last_pf = pfr; }
-      if (s_rl_target == 1) { s_op_pushed = 0; s_op_tested = 0; } }
+                          "them later; %ld of %ld polys of entries the shot routine hides pushed behind all the console draws there "
+                          "(inside 4:3; the rest a little back); "
+                          "%ld polys of entries the shot shows kept from the zone-version rule (DC_ORIG_PAINTER=0 off, "
+                          "DC_ORIG_PAINTER_HIDDEN=0 - the hidden ones as before, DC_ORIG_VZ_LIVE=0 - versions as before)%c",
+                  dc_room_current(), s_op_pushed, s_op_tested, s_op_hid_pushed, s_op_hid_tested, s_op_vzkept, 10);
+          last_p = s_op_pushed + s_op_hid_pushed * 100000 + s_op_vzkept * 7; last_pf = pfr; }
+      if (s_rl_target == 1) { s_op_pushed = 0; s_op_tested = 0; s_op_hid_pushed = 0; s_op_hid_tested = 0; s_op_vzkept = 0; } }
     int pieces = 0;
     int hid_n = 0;               /* first-build pieces hidden this pass */
     /* MEASUREMENT ONLY - nothing here changes what is drawn. The flight
@@ -9973,7 +10147,7 @@ static void rl_emit_walk_body(void) {
         s_zfd_hdr[12] = h; s_zfd_hdr[13] = ofx; s_zfd_hdr[14] = ofy; s_zfd_hdr[15] = wsx;
     }
     s_rl_ot_shift = ram[S + 33u];           /* сдвиг SZ для слота (func_80073240: байт ctx+33) */
-    s_rl_ot_mode = 2; s_rl_ot_slot = 1000; s_rl_ot_order = 0;
+    s_rl_ot_mode = 2; s_rl_ot_slot = 1000; s_rl_ot_order = 0; s_rl_live_k = -1;
     zf_env(); zfs_load();                   /* 15.09: сохранённое в разделе Z-fight F8 действует с запуска */
     zfs_room_tick();                        /* 17.09 день: комната для списка F8 */
     /* 15.09: БАЗИС ПАРЫ ЭТОГО ПРОХОДА. Тело комнаты рисуется историей слота (запись таблицы
@@ -10152,6 +10326,7 @@ static void rl_emit_walk_body(void) {
      * pool, 60 entries of 124 bytes - walking it as 54 sections of 136 read
      * misaligned actor slots (see memory.c for the arithmetic). */
     for (int k = 0; k < 36; k++) {
+        s_rl_live_k = -1;
         uint32_t e = S + 0x7CDCu + 136u * (uint32_t)k;
         if (e + 136u > 0x200000u) break;
         /* DC_LAMP_DBG_ALL=1 (14.09 вечер): состояние ВСЕХ 36 слотов таблицы на каждом
@@ -10405,7 +10580,7 @@ static void rl_emit_walk_body(void) {
         if (rv_full(k)) continue;                              /* 20.09: закрашенная версия целиком — не рисуется */
         if (ss_gone_fwd(gp, k)) continue;                      /* 20.09 вечер: группу убрал сюжет, вернула её подпрограмма ракурса (ss_*); 30.09 — по секции */
         /* 15.09 ночь: режим и слот таблицы порядка этой записи (+72, +74), порядок вставки — номер записи */
-        s_rl_ot_mode = ram[e + 72u]; s_rl_ot_slot = rrm_u16(ram, e + 74u); s_rl_ot_order = k;
+        s_rl_ot_mode = ram[e + 72u]; s_rl_ot_slot = rrm_u16(ram, e + 74u); s_rl_ot_order = k; s_rl_live_k = k;
         /* the entry IS the matrix the walker loads for this piece */
         float R[9];
         for (int i = 0; i < 9; i++) R[i] = (float)rrm_s16(ram, e + (uint32_t)i * 2u) * (1.0f / 4096.0f);
@@ -10852,7 +11027,7 @@ static void rl_emit_walk_body(void) {
                 ob->tri = tri_ptr; ob->quad = quad_ptr;
                 ob->n_tri = n_tri; ob->n_quad = n_quad;
                 ob->plate = 0; ob->dim = piece_dim;
-                ob->ot_mode = s_rl_ot_mode; ob->ot_slot = s_rl_ot_slot; ob->ot_order = s_rl_ot_order;
+                ob->ot_mode = s_rl_ot_mode; ob->ot_slot = s_rl_ot_slot; ob->ot_order = s_rl_ot_order; ob->live_k = s_rl_live_k;
                 ob->glint = (ram[e + 46u] == 2) ? 1 : 0;   /* 12.10: предмет - блеск (rl_glint_*) */
             }
             pieces++;
@@ -10883,7 +11058,7 @@ static void rl_emit_walk_body(void) {
                 ob->tri = tri_ptr; ob->quad = quad_ptr;
                 ob->n_tri = n_tri; ob->n_quad = n_quad;
                 ob->plate = 1; ob->dim = piece_dim;
-                ob->ot_mode = s_rl_ot_mode; ob->ot_slot = s_rl_ot_slot; ob->ot_order = s_rl_ot_order;
+                ob->ot_mode = s_rl_ot_mode; ob->ot_slot = s_rl_ot_slot; ob->ot_order = s_rl_ot_order; ob->live_k = s_rl_live_k;
                 ob->glint = 0;
                 pieces++;
                 continue;
@@ -10898,6 +11073,7 @@ static void rl_emit_walk_body(void) {
         s_rl_dim = 1.f;
         pieces++;
     }
+    s_rl_live_k = -1;
 
     /* ===== THE REST OF THE ROOM, DRAWN BY US =====================
      * The game keeps only the current shot up: its script destroys slots 0..20
@@ -11101,7 +11277,7 @@ static void rl_emit_walk_body(void) {
                     ob->tri = tri_ptr; ob->quad = quad_ptr;
                     ob->n_tri = n_tri; ob->n_quad = n_quad;
                     ob->plate = 1; ob->dim = 1.f;
-                    ob->ot_mode = s_rl_ot_mode; ob->ot_slot = s_rl_ot_slot; ob->ot_order = s_rl_ot_order;
+                    ob->ot_mode = s_rl_ot_mode; ob->ot_slot = s_rl_ot_slot; ob->ot_order = s_rl_ot_order; ob->live_k = s_rl_live_k;
                     ob->glint = 0;
                     if (seen_n < 64) seen_gp[seen_n++] = gp;
                     drew++; pieces++;
@@ -11297,7 +11473,7 @@ static void rl_emit_walk_body(void) {
                                               ob->quad, ob->n_quad));
         s_rl_piece_npoly = ob->n_tri + ob->n_quad;
         s_rl_dim = (ob->dim > 0.f) ? ob->dim : 1.f;
-        s_rl_ot_mode = ob->ot_mode; s_rl_ot_slot = ob->ot_slot; s_rl_ot_order = ob->ot_order;
+        s_rl_ot_mode = ob->ot_mode; s_rl_ot_slot = ob->ot_slot; s_rl_ot_order = ob->ot_order; s_rl_live_k = ob->live_k;
         s_rl_glint = (ob->glint && rl_glint_frame_on())                          /* 12.10: блеск предмета (rl_glint_*) */
                      ? rl_glint_setup(ram, ob->tri, ob->n_tri, ob->quad, ob->n_quad, ob->R, ob->TR, ob->Dm, ob->Dt) : 0;
         for (int i = 0; i < ob->n_tri; i++)
@@ -11307,6 +11483,7 @@ static void rl_emit_walk_body(void) {
         s_rl_glint = 0;
         s_rl_dim = 1.f;
       } }
+    s_rl_live_k = -1;
     mt_flush(ram);                          /* 14.09 вечер: отложенные решётки */
     if (s_rl_target == 1) f8_lists_merge(); /* 15.09: снимок списков F8 без мигания */
     if (s_rl_target == 1) {                 /* 15.09 ночь: сколько двойников ушло за победителя консоли */
@@ -12270,9 +12447,74 @@ void dc_grenade_tick(void) {
     }
     s_gl.active = 0;
 }
+/* 24.10.2026 ДРОТИК - В ТОЧКУ ПРИЦЕЛА (игрок, слот 37: «наведись на доктора Кирка, стрельни из дробовика - дротик летит в
+ * сторону, а не в цель, хотя я прицелился прямо; чтобы снаряды летели в точку, куда я целюсь»). Дротик - запись таблицы
+ * объектов (func_8005FED0: GS+0x7B44.., 35 по 136 Б), её ставит оверлей дробовика (0x8017B914): +0x2E = 7, +0x7C оружие,
+ * +0x7D вид заряда (2..5), +0x27 1 - полёт; скорость +0x74/76/78 (800 за такт, по прямой) = поворот Регины · тангаж по байту
+ * высоты, старт = кисть + скорость; углы +0x80/+0x82 - тангаж/курс полёта, +0x2C/+0x2A - модели (+0xC00 / +0x400); +0x7E цель
+ * игры (255 - нет). Курс Регины не совпадает с лучом нашей камеры из-за плеча (у игрока 6.6°: на 17.5 тыс. - ~2000 вбок).
+ * Теперь в первом кадре дротика скорость и углы - на точку прицела, как у гранаты: существо под перекрестием, иначе комната
+ * по лучу камеры, иначе далёкая точка луча; модуль скорости - игры. Она ещё доворачивается (dc_aim_turning) и режим O - как
+ * пустила игра. DC_DART_AIM=0 - как было. */
+static void dc_dart_tick(void) {
+    static int en = -1; if (en < 0) { const char *e = getenv("DC_DART_AIM"); en = (e && *e == '0') ? 0 : 1; }
+    if (!en) return;
+    uint8_t *ram = memory_get_ram_ptr(); if (!ram) return;
+    extern int g_savestate_loads; extern uint64_t s_frame_count; static int ld = -1;
+    const int fresh_load = ld != g_savestate_loads; ld = g_savestate_loads;   /* дротики загруженной памяти - не наши */
+    static uint32_t done[8]; static int nd = 0;
+    uint32_t live[8]; int nl = 0;
+    const uint32_t LO = 0xB7850u + 0x8D54u - 34u * 0x88u;
+    for (int i = 0; i < 35; i++) {
+        const uint32_t r = LO + (uint32_t)i * 0x88u;
+        if (!(ram[r + 0x30] & 1) || ram[r + 0x2E] != 7 || (ram[r + 0x7C] & 0xF0) != 0x10 || ram[r + 0x7D] < 2 || ram[r + 0x7D] > 5 || ram[r + 0x27] > 1) continue;
+        if (nl < 8) live[nl++] = r;
+        int seen = fresh_load; for (int k = 0; k < nd && !seen; k++) seen = done[k] == r;
+        if (seen) continue;
+        const int16_t pos[3] = { gl_i16(ram, r + 0x20), gl_i16(ram, r + 0x22), gl_i16(ram, r + 0x24) };
+        const int16_t vel[3] = { gl_i16(ram, r + 0x74), gl_i16(ram, r + 0x76), gl_i16(ram, r + 0x78) };
+        const float sp = sqrtf((float)vel[0] * vel[0] + (float)vel[1] * vel[1] + (float)vel[2] * vel[2]);
+        extern int dc_orig_pure(void); extern int dc_aim_turning(float *err_deg);
+        if (sp < 100.f || dc_orig_pure() || dc_aim_turning(NULL)) continue;
+        extern int g_aim_has_target; extern float g_aim_hit_pt[3]; extern uint64_t g_aim_hit_vb; extern uint32_t g_aim_hit_actor;
+        extern void dc_nots_cam_get(float*, float*, float*); extern float g_dc_cam_eye[3];
+        extern int dc_impact_raycast(const float o[3], const float d[3], float maxd, float hit[3], float nrm[3]);
+        float cy, cp, cd; dc_nots_cam_get(&cy, &cp, &cd);
+        const float o[3] = { g_dc_cam_eye[0], g_dc_cam_eye[1], g_dc_cam_eye[2] };
+        const float d0[3] = { sinf(cy) * cosf(cp), sinf(cp), cosf(cy) * cosf(cp) };
+        float tgt[3], hit[3], nrm[3]; const char *how; int victim = 255;
+        if (g_aim_has_target && s_frame_count - g_aim_hit_vb < 8) {
+            for (int c = 0; c < 3; c++) tgt[c] = g_aim_hit_pt[c];
+            how = "creature";
+            const uint32_t ha = g_aim_hit_actor & 0x1FFFFFu;
+            if (ha >= 0xB7ACCu && ha < 0xB7ACCu + 10u * 608u && (ha - 0xB7ACCu) % 608u == 0u) victim = (int)((ha - 0xB7ACCu) / 608u);
+        } else if (dc_impact_raycast(o, d0, 30000.f, hit, nrm)) { for (int c = 0; c < 3; c++) tgt[c] = hit[c]; how = "room"; }
+        else { for (int c = 0; c < 3; c++) tgt[c] = o[c] + d0[c] * 30000.f; how = "far"; }
+        const float hand[3] = { (float)(pos[0] - vel[0]), (float)(pos[1] - vel[1]), (float)(pos[2] - vel[2]) };   /* старт игры до её шага */
+        float dir[3] = { tgt[0] - hand[0], tgt[1] - hand[1], tgt[2] - hand[2] };
+        float L = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]); if (L < 300.f) continue;   /* точка у самой кисти */
+        for (int c = 0; c < 3; c++) dir[c] /= L;
+        if ((dir[0] * vel[0] + dir[1] * vel[1] + dir[2] * vel[2]) / sp < 0.7f) continue;   /* дальше 45° от её выстрела - не трогаем */
+        for (int c = 0; c < 3; c++) {
+            gl_w16(ram, r + 0x74 + 2 * c, (int)lroundf(dir[c] * sp));
+            gl_w16(ram, r + 0x20 + 2 * c, (int)lroundf(hand[c] + dir[c] * sp));
+        }
+        const int pitch12 = (int)lroundf(atan2f(-dir[1], sqrtf(dir[0] * dir[0] + dir[2] * dir[2])) * 4096.f / 6.2831853f) & 0xFFF;
+        const int yaw12 = (int)lroundf(atan2f(dir[0], dir[2]) * 4096.f / 6.2831853f) & 0xFFF;
+        const int py = gl_i16(ram, r + 0x82) & 0xFFF, pp = gl_i16(ram, r + 0x80) & 0xFFF, pt = ram[r + 0x7E];
+        gl_w16(ram, r + 0x80, pitch12); gl_w16(ram, r + 0x82, yaw12);
+        gl_w16(ram, r + 0x2C, (pitch12 + 0xC00) & 0xFFF); gl_w16(ram, r + 0x2A, (yaw12 + 0x400) & 0xFFF);
+        ram[r + 0x7E] = (uint8_t)victim;
+        { static long n = 0; if (++n <= 40) fprintf(stderr, "dart: record 0x%05X kind %d from the hand %.0f,%.0f,%.0f - the game sent it yaw %d pitch %d target %d, "
+              "now to the %s %.0f,%.0f,%.0f (%.0f away): yaw %d pitch %d target %d%c", r, ram[r + 0x7D], hand[0], hand[1], hand[2], py, pp, pt,
+              how, tgt[0], tgt[1], tgt[2], L, yaw12, pitch12, victim, 10); }
+    }
+    memcpy(done, live, sizeof(uint32_t) * (size_t)nl); nd = nl;
+}
 /* Advance + draw the impacts, once per present (called from main.cpp). */
 void dc_impact_draw(void) {
     dc_grenade_tick();
+    dc_dart_tick();
     /* AMMO-COUNTER SHOT WATCH (2026-08-30): a real shot is one round
      * leaving the clip - presses that fire nothing change nothing. Also
      * opens the flash-capture window at the true shot moment, so the
@@ -17866,6 +18108,14 @@ static void shot_stamp(void) { extern int g_savestate_loads; s_shot_room = dc_ro
 int dc_room_shot_ready(void) {
     extern int g_savestate_loads;
     return (s_ss_ready && s_build_n > 0 && s_shot_room == dc_room_current() && s_shot_ld == g_savestate_loads) ? 1 : 0;
+}
+int dc_room_shot_rec(void) {                                       /* 23.10 (4): та же запись, что у dc_room_shot_hides */
+    const uint8_t *ram = memory_get_ram_ptr(); if (!ram) return -1;
+    int rec = ram[0xB796E];
+    { extern int g_savestate_loads;
+      if (pv_script_env() && s_pv_lastrec >= 0 && s_pv_lastrec < 64 && s_pv_lastcam == rec && s_pv_lastld == g_savestate_loads && s_pv_have[s_pv_lastrec])
+          rec = s_pv_lastrec; }
+    return rec;
 }
 int dc_room_shot_hides(int k) {
     if (k < 0 || k >= 64 || !dc_room_shot_ready() || !s_ss_gp[k]) return -1;

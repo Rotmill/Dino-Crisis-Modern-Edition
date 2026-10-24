@@ -1,4 +1,4 @@
-DINO CRISIS - Modern Edition v1.03
+DINO CRISIS - Modern Edition v1.04
 
 Dino Crisis (PS1) for Windows: over-the-shoulder camera, widescreen,
 modern graphics.
@@ -18,22 +18,31 @@ Your own Dino Crisis disc image (not included), one of:
   Dino Crisis (Japan)                  SLPS-02180
   Dino Crisis, Russian (VIT / Akella)  SLUS-00922   the USA disc translated
 
-.sbi: the LibCrypt file of a PAL disc, next to the image (the same file
-DuckStation uses). Setup checks the image and says if it is not supported.
+.sbi: the LibCrypt file of your PAL disc dump, next to the image (the same
+file DuckStation uses); the game says if it is the file of another disc.
+Setup checks the image and says if it is not supported.
 
 
 INSTALL
 
-  1. Run DinoCrisisME_Setup.exe, choose the disc image (Track 1 .bin or
-     .cue) and a folder, Install.
-  2. The game is compiled on your PC, a few minutes. Nothing else to
-     install: setup carries everything it needs.
-  3. Play: DinoCrisisME.exe.
+  1. Download DinoCrisisME_Setup.exe and run it.
+  2. Choose your disc image (Track 1 .bin or .cue).
+  3. Choose the folder where to install and press Install.
+
+  Without the setup window: download DinoCrisisME_unpacked.zip from
+  Releases (the same files Setup carries), unpack it and run from that
+  folder:
+
+  powershell -ExecutionPolicy Bypass -File installer\dcme-install.ps1 -DiscPath "D:\Dino Crisis (USA) (v1.1) (Track 1).bin" -InstallPath "C:\Games\DinoCrisisME"
 
   Windows 10 or 11, 64-bit, a graphics card with Vulkan.
 
 
 KNOWN ISSUES
+
+  Integrated graphics. At the first start the game turns its graphics
+  down once (Anti-Aliasing, Materials, Shadows, Lamp Haze off). You can
+  turn them back on in Modern Options > Graphics.
 
   Windows 11 Smart App Control. If setup stops at "Recompiling the game
   to C", this Windows feature is probably on. It only lets through apps
