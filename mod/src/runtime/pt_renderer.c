@@ -421,9 +421,9 @@ typedef struct { int pass; uint32_t mask; float rN[SKEL_BONES][9], trN[SKEL_BONE
                  int dhave; float dD[9], dT[3]; } SkelSnap;
 static SkelSnap s_skel[SKEL_RING];
 static long s_bone_node = 0, s_bone_pos = 0, s_bone_none = 0, s_bone_diff = 0;   /* DC_ARMWARP_DBG: как узнана кость */
-int pt_arm_warp_mode(void) {                 /* 0 - выкл., 1 - в прицеле (умолч.), 2 - всегда (опыт) */
+int pt_arm_warp_mode(void) {                 /* 0 - выкл., 1 - в прицеле, 2 - всегда (25.10: умолч., весь скелет - gpu_vk_raster.cpp arm_warp_make) */
     static int v = -1;
-    if (v < 0) { const char *e = getenv("DC_ARM_WARP"); v = e ? atoi(e) : 1; }
+    if (v < 0) { const char *e = getenv("DC_ARM_WARP"); v = e ? atoi(e) : 2; }
     return v;
 }
 static int pool_bone_by_pos(const float trN[3], float tol) {
@@ -2964,27 +2964,38 @@ void pt_dc_poolprim(CPUState *cpu, uint32_t prim, uint32_t poolBase,
 }
 
 /* 20.10: кость полигона кисти / оружия / волос (их строит свой сборщик игры): матрица GTE в этот момент - составная камера x
- * кость; без камеры (как у проектора) она совпадает с одной из её костей ЭТОГО прохода (снимок проектора пула) - по переносу и
- * повороту; оружие держится кистью - его кость ближайшая по переносу */
+ * кость; она совпадает с одной из её костей ЭТОГО прохода (снимок проектора пула) - по переносу и повороту; оружие держится
+ * кистью - его кость ближайшая по переносу.
+ * ⭐ 26.10.2026 (игрок, слот 37: «Регина сама не дрожит, дрожит именно рука с оружием... с каждым оружием и каждой его
+ * модификацией»): сравнивали «миром» - камеру снимали слотом камеры игры 0xBF9F4, а в части комнат он пустой (нули): у всех её
+ * костей и у матрицы GTE выходили одни нули, кисть с оружием получала кость 0 (корпус) - между тактами шла с корпусом и догоняла
+ * позу руки рывком на такте (копия слота 37: 110 из 110 замеров - кость 0; слот 42 - кость 3, его слот камеры заполнен). Теперь
+ * сравнение в виде GTE самого прохода (vr/vt снимка): камера та же, слот не нужен. DC_ARM_LIT_VIEW=0 - «миром», как было. */
 static int lit_bone_now(CPUState *cpu) {
     if (!pt_arm_warp_mode()) return -1;
     const uint8_t *cr = memory_get_ram_ptr(); if (!cr) return -1;
+    static int lview = -1;
+    if (lview < 0) { const char *e = getenv("DC_ARM_LIT_VIEW"); lview = (e && *e == '0') ? 0 : 1; }
     float r9[9], tr3[3], Rc[9], Tc[3], trN[3], rN[9];
     pt_gte_read_matrix(cpu, r9, tr3);
-    for (int i = 0; i < 9; i++) Rc[i] = (float)(int16_t)(cr[0xBF9F4+i*2]|(cr[0xBF9F4+i*2+1]<<8)) / 4096.0f;
-    for (int i = 0; i < 3; i++) Tc[i] = (float)(int32_t)(cr[0xBFA08+i*4]|(cr[0xBFA09+i*4]<<8)|(cr[0xBFA0A+i*4]<<16)|(cr[0xBFA0B+i*4]<<24));
-    const float d[3] = { tr3[0]-Tc[0], tr3[1]-Tc[1], tr3[2]-Tc[2] };
-    for (int i = 0; i < 3; i++) trN[i] = Rc[0*3+i]*d[0] + Rc[1*3+i]*d[1] + Rc[2*3+i]*d[2];
-    for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++)
-        rN[i*3+j] = Rc[0*3+i]*r9[0*3+j] + Rc[1*3+i]*r9[1*3+j] + Rc[2*3+i]*r9[2*3+j];
+    if (lview) { memcpy(rN, r9, sizeof rN); memcpy(trN, tr3, sizeof trN); }
+    else {
+        for (int i = 0; i < 9; i++) Rc[i] = (float)(int16_t)(cr[0xBF9F4+i*2]|(cr[0xBF9F4+i*2+1]<<8)) / 4096.0f;
+        for (int i = 0; i < 3; i++) Tc[i] = (float)(int32_t)(cr[0xBFA08+i*4]|(cr[0xBFA09+i*4]<<8)|(cr[0xBFA0A+i*4]<<16)|(cr[0xBFA0B+i*4]<<24));
+        const float d[3] = { tr3[0]-Tc[0], tr3[1]-Tc[1], tr3[2]-Tc[2] };
+        for (int i = 0; i < 3; i++) trN[i] = Rc[0*3+i]*d[0] + Rc[1*3+i]*d[1] + Rc[2*3+i]*d[2];
+        for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++)
+            rN[i*3+j] = Rc[0*3+i]*r9[0*3+j] + Rc[1*3+i]*r9[1*3+j] + Rc[2*3+i]*r9[2*3+j];
+    }
     extern int g_dc_pass_id;
     const SkelSnap *sk = &s_skel[g_dc_pass_id & (SKEL_RING - 1)];
     int f = -1; float bt = 1e30f, br = 1e30f;
     if (sk->pass == g_dc_pass_id)
         for (int k = 0; k < SKEL_BONES; k++) {
             if (!(sk->mask & (1u << k))) continue;
-            const float dt = fabsf(trN[0]-sk->trN[k][0]) + fabsf(trN[1]-sk->trN[k][1]) + fabsf(trN[2]-sk->trN[k][2]);
-            float dr = 0.f; for (int i = 0; i < 9; i++) dr += fabsf(rN[i] - sk->rN[k][i]);
+            const float *kt = lview ? sk->vt[k] : sk->trN[k], *kr = lview ? sk->vr[k] : sk->rN[k];
+            const float dt = fabsf(trN[0]-kt[0]) + fabsf(trN[1]-kt[1]) + fabsf(trN[2]-kt[2]);
+            float dr = 0.f; for (int i = 0; i < 9; i++) dr += fabsf(rN[i] - kr[i]);
             if (dt + 300.f * dr < bt + 300.f * br) { bt = dt; br = dr; f = k; }
         }
     if (f >= 0 && bt > 400.f) f = -1;                     /* далеко от всех её костей - не её кость */
@@ -2993,7 +3004,14 @@ static int lit_bone_now(CPUState *cpu) {
       if (dbg) { if (f >= 0) hit++; else miss++;
           if (((hit + miss) % 97) == 1) { long a, b, c, dd; pt_bone_stat(&a, &b, &c, &dd);
               fprintf(stderr, "armwarp: lit prim bone %d (move %.0f, turn %.3f; pass %d snap %d mask %X) hits %ld misses %ld | projector bones by node %ld, by position %ld, none %ld%c",
-                      f, bt, br, g_dc_pass_id, sk->pass, sk->mask, hit, miss, a, b, c, 10); } } }
+                      f, bt, br, g_dc_pass_id, sk->pass, sk->mask, hit, miss, a, b, c, 10);
+              char ln[512]; int o = snprintf(ln, sizeof ln, "armwarp: lit prim to each bone (%s):", lview ? "view" : "world");
+              for (int k = 0; k < SKEL_BONES && o < (int)sizeof ln - 40; k++) if (sk->pass == g_dc_pass_id && (sk->mask & (1u << k))) {
+                  const float *kt = lview ? sk->vt[k] : sk->trN[k], *kr = lview ? sk->vr[k] : sk->rN[k];
+                  float dr = 0.f; for (int i = 0; i < 9; i++) dr += fabsf(rN[i] - kr[i]);
+                  o += snprintf(ln + o, sizeof ln - (size_t)o, " %d:%.0f/%.2f", k,
+                                fabsf(trN[0]-kt[0]) + fabsf(trN[1]-kt[1]) + fabsf(trN[2]-kt[2]), dr); }
+              fprintf(stderr, "%s%c", ln, 10); } } }
     return f;
 }
 void pt_dc_prim(CPUState *cpu, uint32_t prim, uint32_t pkt, int nv) {
@@ -16132,6 +16150,26 @@ void dc_flash_frame(int frameA) {
     dcvk_flash_set(s_fl_view, rad, col, fl_par("fl_wrap", &s_fi_wrap));
     if (fl_dbg()) fprintf(stderr, "flash: t=%.0f ms level %.2f I %.2f rad %.0f view %.0f,%.0f,%.0f %s%c",
                           t, lv, I, rad, s_fl_view[0], s_fl_view[1], s_fl_view[2], frameA ? "A" : "B", 10);
+}
+/* 25.10.2026: кадры между тактами в потоке показа (main.cpp DC_PRESENT_THREAD) - вспышка снимком. Главный поток после показа
+ * кадра такта снимает её (dc_flash_take), поток показа ставит яркость на свой миг (dc_flash_put): s_fl и память игры он не
+ * трогает, их в это время пишет эмуляция следующего такта. Точка - в виде кадра A, как у кадра B. */
+void dc_flash_take(double o[9]) {
+    o[0] = s_fl.on; o[1] = s_fl.kind; o[2] = s_fl.t0; o[3] = s_fl.mul; o[4] = s_fl.radk; o[5] = s_fl_view_ok;
+    o[6] = s_fl_view[0]; o[7] = s_fl_view[1]; o[8] = s_fl_view[2];
+}
+void dc_flash_put(const double o[9]) {
+    extern void dcvk_flash_set(const float *pos, float rad, const float *col, float wrap);
+    static const float SHOT_COL[3] = { 1.00f, 0.80f, 0.52f }, BOOM_COL[3] = { 1.00f, 0.62f, 0.30f };
+    const int k = (int)o[1];
+    const float lv = (o[0] != 0.0 && o[5] != 0.0) ? fl_level(k, fl_now_ms() - o[2]) : 0.f;
+    if (lv <= 0.002f || !dc_flash_on()) { dcvk_flash_set(0, 0.f, 0, 0.f); return; }
+    const float view[3] = { (float)o[6], (float)o[7], (float)o[8] };
+    const float I = lv * (float)o[3] * (k ? fl_par("fl_boom_str", &s_fi_bstr) : fl_par("fl_shot_str", &s_fi_sstr));
+    const float rad = (float)o[4] * (k ? fl_par("fl_boom_rad", &s_fi_brad) : fl_par("fl_shot_rad", &s_fi_srad));
+    const float *base = k ? BOOM_COL : SHOT_COL;
+    const float col[3] = { base[0] * I, base[1] * I, base[2] * I };
+    dcvk_flash_set(view, rad, col, fl_par("fl_wrap", &s_fi_wrap));
 }
 
 /* ===== ЛАМПЫ ИГРЫ ДЛЯ БЛИКОВ МАТЕРИАЛОВ (25.09 ночь) =====================================================================

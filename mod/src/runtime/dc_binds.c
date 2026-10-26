@@ -72,6 +72,20 @@ static int shoulder_dup(void) {
 static int tpl_get(int mode, int tpl, int dev, int act, int *o) {
     int n = 0;
 #define ADD(c) do { if (n < DCB_MAX) o[n++] = (c); } while (0)
+    if (DCB_IS_PROG(act)) {
+        /* ⭐ 25.10.2026 вечер: быстрые сохранения - одни во всех шаблонах клавиатуры: F10, PgUp / PgDn, как было, загрузка -
+         * Del и F9 (отзыв Lemenus: «there's no way to load it»); у геймпада своих кнопок нет - назначает игрок.
+         * 25.10 ночь: смена типа игры - O, как было */
+        if (dev == DCB_KB) switch (act) {
+            case DCB_QSAVE: ADD(K(F10)); break;
+            case DCB_QLOAD: ADD(K(F9)); ADD(K(DELETE)); break;
+            case DCB_QSLOT_NEXT: ADD(K(PAGEUP)); break;
+            case DCB_QSLOT_PREV: ADD(K(PAGEDOWN)); break;
+            case DCB_GAMETYPE: ADD(K(O)); break;
+            default: break;
+        }
+        return n;
+    }
     if (dev == DCB_KB && kb_1015()) {
         /* ⭐ 15.10.2026: клавиатура - два шаблона на оба типа игры (см. выше). Смена цели (L1 игры) - только в оригинальном
          * типе: в нашем цель - под перекрестием, а колесо там двигает камеру (dc_nots_zoom) */
@@ -330,6 +344,10 @@ static const CodeLbl k_lbl[] = {
     { DCB_SHIFT, "Shift" }, { DCB_CTRL, "Ctrl" }, { DCB_ALT, "Alt" }, { K(CAPSLOCK), "Caps Lock" },
     { K(UP), "\xE2\x86\x91" }, { K(DOWN), "\xE2\x86\x93" }, { K(LEFT), "\xE2\x86\x90" }, { K(RIGHT), "\xE2\x86\x92" },
     { K(HOME), "Home" }, { K(END), "End" },
+    /* 25.10.2026 вечер: клавиши быстрых сохранений и F-ряд (кроме F11 - полный экран) */
+    { K(DELETE), "Delete" }, { K(PAGEUP), "Page Up" }, { K(PAGEDOWN), "Page Down" },
+    { K(F1), "F1" }, { K(F2), "F2" }, { K(F3), "F3" }, { K(F4), "F4" }, { K(F5), "F5" }, { K(F6), "F6" },
+    { K(F7), "F7" }, { K(F8), "F8" }, { K(F9), "F9" }, { K(F10), "F10" }, { K(F12), "F12" },
     { K(KP_0), "Num 0" }, { K(KP_1), "Num 1" }, { K(KP_2), "Num 2" }, { K(KP_3), "Num 3" }, { K(KP_4), "Num 4" },
     { K(KP_5), "Num 5" }, { K(KP_6), "Num 6" }, { K(KP_7), "Num 7" }, { K(KP_8), "Num 8" }, { K(KP_9), "Num 9" },
     { K(KP_PLUS), "Num +" }, { K(KP_MINUS), "Num -" }, { K(KP_MULTIPLY), "Num *" }, { K(KP_DIVIDE), "Num /" },
@@ -377,10 +395,14 @@ static const char *const k_act_title[DCB_COUNT] = {
     "Run (Hold)", "Run (Toggle)", "Quick Turn",
     "Aim", "Fire", "Switch Target",
     "Action / Confirm", "Inventory", "Cancel", "Pause", "OPTION Menu",   /* = подписи строк подстраниц (атлас меню) */
+    "Quick Save", "Quick Load", "Next Slot", "Previous Slot",            /* 25.10 */
+    "Switch Game Type",                                                  /* 25.10 ночь */
 };
 static const char *const k_act_key[DCB_COUNT] = {
     "fwd", "back", "left", "right", "run", "runtoggle", "quickturn",
     "aim", "fire", "target", "action", "inventory", "cancel", "pause", "options",
+    "qsave", "qload", "qslotnext", "qslotprev",
+    "gametype",
 };
 const char *dcb_act_title(int act) { return (act >= 0 && act < DCB_COUNT) ? k_act_title[act] : ""; }
 const char *dcb_act_key(int act)   { return (act >= 0 && act < DCB_COUNT) ? k_act_key[act] : "?"; }
@@ -400,7 +422,16 @@ int dcb_cfg_read(const char *key, const char *val) {
     int act = -1;
     for (int a = 0; a < DCB_COUNT; a++) if (strcmp(p, k_act_key[a]) == 0) act = a;
     if (act < 0) return 1;
-    if (!s_have[m][dev]) { memset(s_cust[m][dev], 0, sizeof s_cust[m][dev]); s_have[m][dev] = 1; }   /* своя раскладка — из файла целиком */
+    /* своя раскладка — из файла; 25.10.2026 вечер: действия, которых в файле нет (быстрые сохранения у раскладок до 25.10), -
+     * из шаблона по умолчанию (раньше - пустые: F10 и Del у своей раскладки молчали бы) */
+    if (!s_have[m][dev]) {
+        for (int a = 0; a < DCB_COUNT; a++) {
+            int c0[DCB_MAX] = { 0 };
+            tpl_get(m ? DCB_ORIG : DCB_MODERN, dcb_default_tpl(m ? DCB_ORIG : DCB_MODERN, dev), dev, a, c0);
+            memcpy(s_cust[m][dev][a], c0, sizeof c0);
+        }
+        s_have[m][dev] = 1;
+    }
     int *c = s_cust[m][dev][act], n = 0;
     memset(c, 0, sizeof(int) * DCB_MAX);
     const char *q = val;

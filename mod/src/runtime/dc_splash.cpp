@@ -849,6 +849,41 @@ extern "C" void dc_splash_shader_present(SDL_Renderer *r, int lw, int lh, int la
     }
     frame_end(r, &of);
 }
+/* ⭐ 24.10.2026 - СЧЁТЧИК КАДРОВ (игроки: «добавь счётчик кадров на экран - скажу, на сколько падает FPS»; SCREEN ->
+ * FPS Counter, main.cpp scr.fpsctr): число картинок в секунду в левом верхнем углу ОКНА (не кадра: при 4:3 - на поле),
+ * цифрами экрана подготовки (ui_shader_digits.png: в клетке 14x40 цифра - строки 13..27) в бирюзе дизайна на тёмной
+ * подложке, в пиксели окна: на 1080p цифра 20 пикселей. Считает main.cpp (dbg_present: показы за полсекунды). */
+static const int FPS_DIG_Y = 11, FPS_DIG_H = 19;         /* строки клетки с цифрой и по пикселю сверху и снизу */
+extern "C" void dc_splash_fps_present(SDL_Renderer *r, int fps)
+{
+    if (!r || fps < 0) return;
+    SDL_Texture *td = tex_get(r, "ui_shader_digits.png");
+    if (!td) return;
+    OutFrame f; float sc, ox, oy;
+    frame_begin(r, &f, 1920, 1080, &sc, &ox, &oy);
+    float oh = 1080.0f;
+    if (f.lw >= 0) { int iw = 0, ih = 0; SDL_GetRendererOutputSize(r, &iw, &ih); if (ih > 0) oh = (float)ih; }
+    const float k = oh / 1080.0f * 1.35f;
+    char num[8];
+    std::snprintf(num, sizeof num, "%d", fps > 999 ? 999 : fps);
+    const int n = (int)std::strlen(num);
+    const float dw = std::floor((float)SH_DIG_W * k + 0.5f), dh = std::floor((float)FPS_DIG_H * k + 0.5f);
+    const float m = std::floor(12.0f * oh / 1080.0f + 0.5f), px = std::floor(6.0f * oh / 1080.0f + 0.5f);
+    const SDL_FRect bg = { m, m, dw * (float)n + px * 2.0f, dh + px };
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(r, 0, 0, 0, 150);
+    SDL_RenderFillRectF(r, &bg);
+    SDL_SetTextureColorMod(td, 127, 227, 214);                /* #7fe3d6 - бирюза дизайна (полоса экрана подготовки) */
+    SDL_SetTextureAlphaMod(td, 255);
+    for (int i = 0; i < n; i++) {
+        const SDL_Rect src = { (num[i] - '0') * SH_DIG_W, FPS_DIG_Y, SH_DIG_W, FPS_DIG_H };
+        const SDL_FRect d = { m + px + dw * (float)i, m + std::floor(px * 0.5f), dw, dh };
+        SDL_RenderCopyF(r, td, &src, &d);
+    }
+    SDL_SetTextureColorMod(td, 255, 255, 255);
+    frame_end(r, &f);
+}
+
 /* экран подготовки закрыт - его картинки больше не нужны (экраны запуска грузят свои) */
 extern "C" void dc_splash_shader_done(void)
 {

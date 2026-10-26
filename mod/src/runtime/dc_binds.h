@@ -30,8 +30,16 @@ enum {
     DCB_AIM, DCB_FIRE, DCB_TARGET,                    /* прицел, выстрел, смена цели */
     DCB_ACTION, DCB_INVENTORY, DCB_CANCEL,            /* действие / подтвердить, инвентарь, отмена */
     DCB_PAUSE, DCB_OPTIONS,                           /* пауза (Start), меню OPTION игры (Select) */
+    /* 25.10.2026 вечер (игрок: «добавь для переназначения эти клавиши. То есть эти действия»): быстрое сохранение,
+     * загрузка, слот вперёд / назад - не кнопки игры, их делает main.cpp (dc_qs_do) */
+    DCB_QSAVE, DCB_QLOAD, DCB_QSLOT_NEXT, DCB_QSLOT_PREV,
+    /* 25.10.2026 ночь (игрок: «нету кнопки O, которую можно переназначить... переключение между режимами оригинальным и
+     * modern»): смена типа игры - тоже не кнопка игры, была клавишей O мимо раскладки; делает main.cpp (dc_game_type_toggle) */
+    DCB_GAMETYPE,
     DCB_COUNT
 };
+#define DCB_IS_QS(a) ((a) >= DCB_QSAVE && (a) <= DCB_QSLOT_PREV)
+#define DCB_IS_PROG(a) ((a) >= DCB_QSAVE && (a) <= DCB_GAMETYPE)   /* действия программы: быстрые сохранения и тип игры */
 enum { DCB_KB = 0, DCB_PAD = 1 };                     /* устройство: клавиатура + мышь / геймпад */
 enum { DCB_MODERN = 0, DCB_ORIG = 1 };                /* тип игры: g_dc_orig_mode */
 enum { DCB_TPL_ORIG = 0, DCB_TPL_MODERN = 1, DCB_TPL_CUSTOM = 2 };

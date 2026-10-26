@@ -38,6 +38,27 @@ extern "C" const char* ptvk_device_name(void) { return s_vkDev; }
 /* 24.10.2026: выбранная видеокарта - встроенная (main.cpp gfx_autolow_tick: настройки ниже для слабой видеокарты) */
 static int s_vkIntegrated = 0;
 extern "C" int ptvk_device_integrated(void) { return s_vkIntegrated; }
+/* 24.10.2026: производитель выбранной видеокарты (PCI: 0x8086 Intel, 0x10DE NVIDIA, 0x1002 AMD) - main.cpp dsh_prepare */
+static uint32_t s_vkVendor = 0;
+extern "C" unsigned ptvk_device_vendor(void) { return s_vkVendor; }
+/* 24.10.2026: видеопамять (VK_EXT_memory_budget, если есть): сколько занято игрой и сколько ей даёт система в кучах своей памяти
+ * видеокарты (DEVICE_LOCAL), и их размер. У встроенной своей памяти бывает 512 МБ: сверх неё система гоняет образы туда-обратно,
+ * и всё встаёт (игрок: со сглаживанием на встроенной Radeon игра на 20 % скорости). 1 - занято и бюджет известны, 0 - только размер. */
+static int s_vkBudget = 0;
+extern "C" int ptvk_vram_usage(double* used_mb, double* budget_mb, double* heap_mb) {
+    *used_mb = *budget_mb = *heap_mb = 0.0;
+    if (!s_phys) return 0;
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT b{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT };
+    VkPhysicalDeviceMemoryProperties2 mp{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2 };
+    if (s_vkBudget) mp.pNext = &b;
+    vkGetPhysicalDeviceMemoryProperties2(s_phys, &mp);
+    for (uint32_t i = 0; i < mp.memoryProperties.memoryHeapCount && i < VK_MAX_MEMORY_HEAPS; i++) {
+        if (!(mp.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)) continue;
+        *heap_mb += (double)mp.memoryProperties.memoryHeaps[i].size / 1048576.0;
+        if (s_vkBudget) { *used_mb += (double)b.heapUsage[i] / 1048576.0; *budget_mb += (double)b.heapBudget[i] / 1048576.0; }
+    }
+    return s_vkBudget;
+}
 /* 10.10: LUID видеокарты Vulkan - main.cpp сверяет его с видеокартой Direct3D 11 перед общей текстурой кадра: на ноутбуке
  * с двумя видеокартами Vulkan берёт дискретную, а вывод мог встать на встроенную */
 static unsigned char s_vkLuid[8];
@@ -140,6 +161,7 @@ extern "C" int ptvk_init(void)
                     gq ? "yes" : "no");
         }
         if (score > bestScore) { bestScore = score; s_phys = pd; s_vkIntegrated = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+                                 s_vkVendor = props.vendorID;
                                  snprintf(s_vkDev, sizeof s_vkDev, "%s", props.deviceName); }
         else if (!s_vkDev[0]) snprintf(s_vkDev, sizeof s_vkDev, "%s", props.deviceName);
     }
@@ -207,6 +229,14 @@ extern "C" int ptvk_init(void)
         }
         vlog("[VK] D3D11 shared texture (external memory win32 %d, keyed mutex %d): %s%c", hm ? 1 : 0, hk ? 1 : 0,
              g_vk_d3d11_share ? "available" : "no", 10);
+        /* 24.10.2026: сколько видеопамяти занято и сколько её даёт система (ptvk_vram_usage, строки vram: журнала) */
+        s_vkBudget = 0;
+        for (uint32_t i = 0; i < nx; i++)
+            if (!strcmp(xprops[i].extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) {
+                devExts.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+                s_vkBudget = 1;
+                break;
+            }
     }
 
     uint32_t qCount = 0;
@@ -382,7 +412,7 @@ static bool ensureVramImage() {
     if (ensureCmd() && !s_vkLost) {
         beginCmd();
         imgBarrier(s_vramImg, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                   0, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR);
+                   0, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);   /* 24.10.2026: RT stage without RT on the device was invalid */
         endSubmitWait();
     }
     VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };

@@ -75,6 +75,45 @@ extern uint8_t* memory_get_ram_ptr(void);           /* memory.c — челюст
 #define F2_MAXJB 512                                /* вершин в блоке головы */
 #define F2_MAXCP 4                                  /* копий лица в VRAM */
 static const char F2_SERIAL[] = "SLUS_009.22";
+/* ⭐ 24.10.2026 - ЧЬЯ ОЗВУЧКА НА ДИСКЕ (игрок: «это все русские версии, сделай совместимыми»). Рот размечен по записи речи:
+ * английской (USA v1.0/v1.1, Европа, Италия, Испания, Франция, Германия, Япония - одна запись) или Акеллы (ru_vit). Переводы со
+ * своей озвучкой кладут файлы речи на те же сектора (SRU - японский диск с русской речью и японским exe), и рот шёл бы по чужой
+ * разметке. Запись узнаём по отпечатку файла: CRC32 первых 8 секторов канала 1 (lba + 1 + 32*k, по 2048 байт данных) - у одной
+ * записи он один на всех дисках (скретчпад b23bb00b ru9\voiceprint.py). Не совпал - реплики файла не берутся: лица моргают и
+ * смотрят, рот стоит. Профиль версии со своими лицами меняет таблицу (ru_vit). DC_TALK_VOICE=0 - без проверки. */
+static const struct { const char* name; uint32_t crc; } k_f2_voice[] = {
+    { "STAGE01.XAS", 0x0FE71A47u }, { "STAGE02.XAS", 0xC1B4CE25u }, { "STAGE03.XAS", 0xD3490795u },
+    { "STAGE04.XAS", 0x9EFDA8E6u }, { "STAGE05.XAS", 0x231AD587u }, { "STAGE06.XAS", 0xC070B4F7u } };   /* английская запись */
+extern int cdrom_image_read_sector(uint32_t lba, uint8_t *buf);
+static int f2_voice_ok(size_t xi) {
+    static signed char seen[64];                    /* по номеру в s_xa_files: 1 - наша запись, -1 - чужая, 0 - не смотрели */
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DC_TALK_VOICE"); on = !(e && *e == '0'); }
+    if (!on || xi >= sizeof(seen)) return 1;
+    if (seen[xi]) return seen[xi] > 0;
+    for (size_t k = 0; k < sizeof(k_f2_voice) / sizeof(k_f2_voice[0]); k++) {
+        if (strcmp(k_f2_voice[k].name, s_xa_files[xi].name) != 0) continue;
+        uint8_t buf[2048]; uint32_t crc = 0xFFFFFFFFu;
+        for (int i = 0; i < 8; i++) {
+            if (!cdrom_image_read_sector((uint32_t)(s_xa_files[xi].lba + 1 + 32 * i), buf)) {   /* образа нет - не судим */
+                fprintf(stderr, "talk2: speech %s - the disc is not readable yet, the recording is not checked%c", s_xa_files[xi].name, 10);
+                return 1;
+            }
+            for (int b = 0; b < 2048; b++) {
+                crc ^= buf[b];
+                for (int t = 0; t < 8; t++) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+            }
+        }
+        crc ^= 0xFFFFFFFFu;
+        seen[xi] = crc == k_f2_voice[k].crc ? 1 : -1;
+        if (seen[xi] < 0)
+            fprintf(stderr, "talk2: speech %s - another voice recording on this disc (print %08X, the faces are for %08X): its lines "
+                            "are not used, the mouths do not move%c", s_xa_files[xi].name, crc, k_f2_voice[k].crc, 10);
+        else fprintf(stderr, "talk2: speech %s - the voice recording of the faces (print %08X)%c", s_xa_files[xi].name, crc, 10);
+        return seen[xi] > 0;
+    }
+    return 1;
+}
 
 typedef struct {
     uint16_t var; FaceRect r; const uint8_t* sig; const uint8_t* fr; uint8_t* orig;
@@ -657,7 +696,7 @@ static int f2_parse_talk(F2Char* c, uint8_t* b, size_t n, char* why, size_t whys
         xmap[j] = -1;
         for (size_t i = 0; i < sizeof(s_xa_files) / sizeof(s_xa_files[0]); i++)
             if (strcmp(s_xa_files[i].name, nm) == 0) {
-                if ((uint32_t)s_xa_files[i].lba == lba) xmap[j] = (int)i;
+                if ((uint32_t)s_xa_files[i].lba == lba) xmap[j] = f2_voice_ok(i) ? (int)i : -1;   /* 24.10: и запись речи та же */
                 else fprintf(stderr, "talk2: %s - %s is at another place on the disc (LBA %u, ours %d) - lines of this file are not used%c",
                              c->id, nm, lba, s_xa_files[i].lba, 10);
             }
@@ -753,7 +792,7 @@ static int f2_parse_talk3(F2Char* c, uint8_t* b, size_t n, uint8_t** dec, char* 
         xmap[j] = -1;
         for (size_t i = 0; i < sizeof(s_xa_files) / sizeof(s_xa_files[0]); i++)
             if (strcmp(s_xa_files[i].name, nm) == 0) {
-                if ((uint32_t)s_xa_files[i].lba == lba) xmap[j] = (int)i;
+                if ((uint32_t)s_xa_files[i].lba == lba) xmap[j] = f2_voice_ok(i) ? (int)i : -1;   /* 24.10: и запись речи та же */
                 else fprintf(stderr, "talk2: %s - %s is at another place on the disc (LBA %u, ours %d) - lines of this file are not used%c",
                              c->id, nm, lba, s_xa_files[i].lba, 10);
             }

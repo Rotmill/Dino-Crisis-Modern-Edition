@@ -1,0 +1,13 @@
+# Dino Crisis ME: a supported game version (tools/make_version.py; setup and its window read this)
+id = ru_vector
+order = 13
+name = Dino Crisis (Russian, Vector)
+name_ru = Dino Crisis (русская, Vector)
+exe = SLUS_009.22
+exe_sha256 = b62e61f0b336760606992768b7e0dfe64356db74d9827e64266a6e74cd4d9ace
+exe_size = 630784
+entry_pc = 0x8001A1C8
+load_address = 0x80018000
+text_size = 0x00099800
+runtime_patch = runtime.dcpatch
+hooks_patch = hooks.dcpatch

@@ -1,4 +1,4 @@
-DINO CRISIS - Modern Edition v1.04
+DINO CRISIS - Modern Edition v1.05
 
 Dino Crisis (PS1) for Windows: over-the-shoulder camera, widescreen,
 modern graphics.
@@ -16,7 +16,9 @@ Your own Dino Crisis disc image (not included), one of:
   Dino Crisis (Italy) PAL              SLES-02210   + .sbi
   Dino Crisis (Spain) PAL              SLES-02211   + .sbi
   Dino Crisis (Japan)                  SLPS-02180
-  Dino Crisis, Russian (VIT / Akella)  SLUS-00922   the USA disc translated
+  Dino Crisis, Russian translations    SLUS-00922   the USA disc translated:
+    VIT / Akella (also v2 and ViT v3), Vector, Golden Leon, Enterity,
+    RGR Studio, Paradox
 
 .sbi: the LibCrypt file of your PAL disc dump, next to the image (the same
 file DuckStation uses); the game says if it is the file of another disc.
@@ -60,7 +62,8 @@ PROBLEMS
   the install folder if setup stopped.
 
 
-Quicksave: F10 save, Del load, PageUp / PageDown slot (50 slots, data\quicksaves).
+Quicksave: F10 save, F9 or Del load, PageUp / PageDown slot (50 slots,
+data\quicksaves). To change the keys: MODERN OPTIONS > CONTROLS.
 Remove the game: Uninstall.exe in its folder (the saves and mods there go too).
 Mods: the mods folder next to DinoCrisisME.exe, made with Dino Crisis ME
 Studio (separate download). A downloaded mod: its folder into mods.

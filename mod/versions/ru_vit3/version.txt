@@ -1,0 +1,14 @@
+# Dino Crisis ME: a supported game version (tools/make_version.py; setup and its window read this)
+id = ru_vit3
+order = 12
+name = Dino Crisis (Russian, ViT v3 / Akella)
+name_ru = Dino Crisis (русская, ViT v3 / Акелла)
+exe = SLUS_009.22
+exe_sha256 = 6d381239e017b291e7c2a32d6f199657ea7086f9a23d5ad49e57b7d266bd94ee
+exe_size = 630784
+entry_pc = 0x8001A1C8
+load_address = 0x80018000
+text_size = 0x00099800
+runtime_patch = runtime.dcpatch
+hooks_patch = hooks.dcpatch
+faces = faces

@@ -54,9 +54,10 @@ layout(binding = 4, std140) uniform ShadowUBO {
     vec4 pad144_[96];
     vec4 hq;          // кватернион её поворота в видовом пространстве кадра A (доля пути)
     vec4 hc;          // xyz - точка на её вертикальной оси (вид кадра A), w > 0.5 - доворот есть
-    // 20.10.2026: её руки, кисти с оружием и голова между тактами (gpu_vk_raster.cpp arm_warp_make, ячейки 536..599)
-    vec4 bq[8];       // кватернион вершин кости в виде кадра A
-    vec4 bt[8];       // xyz - перенос, w > 0.5 - есть
+    // 20.10.2026: её руки, кисти с оружием и голова между тактами (gpu_vk_raster.cpp arm_warp_make; 25.10: все 15 костей,
+    // ячейки 536..663)
+    vec4 bq[16];      // кватернион вершин кости в виде кадра A
+    vec4 bt[16];      // xyz - перенос, w > 0.5 - есть
 } sh;
 
 vec3 qrot(vec4 q, vec3 v) { return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v); }
@@ -94,6 +95,11 @@ void main() {
         if (actor && pc.wd.w > 0.5) {
             // 20.09.2026: AIMING - she turns with the camera, so her picture of frame A stays where it is
             // (rotating her with the world made the arm and the gun zigzag every other presented frame)
+            // 25.10.2026: her bones still go their share of the way to the next pose, relative to her body
+            if (in_rep.w < -0.5) {
+                const int bi = int(-in_rep.w + 0.5) - 1;
+                if (bi >= 0 && bi < 16 && sh.bt[bi].w > 0.5) p = qrot(sh.bq[bi], p) + sh.bt[bi].xyz;
+            }
         } else {
             // 19.10.2026: HER OWN TURN between the game's ticks - about her vertical axis by her share of the turn from
             // this tick to the next (walking after the camera she turned back with the world here, then jumped ahead
@@ -103,7 +109,7 @@ void main() {
             // aiming up and down: the camera moved every frame, the pose only every tick)
             if (actor && in_rep.w < -0.5) {
                 const int bi = int(-in_rep.w + 0.5) - 1;
-                if (bi >= 0 && bi < 8 && sh.bt[bi].w > 0.5) p = qrot(sh.bq[bi], p) + sh.bt[bi].xyz;
+                if (bi >= 0 && bi < 16 && sh.bt[bi].w > 0.5) p = qrot(sh.bq[bi], p) + sh.bt[bi].xyz;   // 25.10: all 15 bones
             }
             if (hturn) p = sh.hc.xyz + qrot(sh.hq, p - sh.hc.xyz);
             if (actor) p += pc.wd.xyz;                              // Regina rides with the camera pivot

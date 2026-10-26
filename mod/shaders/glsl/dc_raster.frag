@@ -1,5 +1,7 @@
 #version 460
+#ifndef DC_SAFE
 #extension GL_EXT_nonuniform_qualifier : require
+#endif
 // DC GPU raster backend — fragment stage.
 // PS1 texel pipeline transplanted from the CPU fast spans (gpu_sw_renderer.c)
 // and dc.rchit: CLUT decode from the VRAM snapshot, texture window, color
@@ -46,12 +48,28 @@ layout(location = 4)      in vec3  v_view;   // положение в видов
 // 25.09.2026 вечер: СВЕЧЕНИЕ ИСТОЧНИКОВ И ОТРАЖЕНИЯ (gpu_vk_raster.cpp fx_geom_pass). Этот же текст, собранный с
 // DC_FX_PASS (dc_fx.frag.spv, вершины — dc_fx.vert), рисует проходы свечения (1) и отражения (2) — цвет текселя как обычно,
 // а вывод — свой (см. конец разбора текселя). Основной проход берёт готовое отражение с биндинга 5 на полу «блестит».
+// 24.10.2026: число мест в массиве repTex задаёт программа (gpu_vk_raster.cpp s_trepCap, константа специализации): у Intel
+// в фрагментном шейдере не больше 64 сэмплеров, 512 мест ломали драйвер на первом кадре. Без константы - 512, как было.
+layout(constant_id = 0) const int DC_REP_N = 512;
+// 25.10.2026: ЛЁГКИЕ КОНВЕЙЕРЫ ПО ОПЦИЯМ (gpu_vk_raster.cpp RasterSpec): программа собирает конвейеры растра с опциями меню -
+// что опция выключила, того в шейдере нет вовсе (меньше регистров: основной проход слабой карты быстрее). Картинка та же:
+// без опции эти ветки и так не шли (их выключатели ниже остались). Без констант - всё, как было.
+layout(constant_id = 1) const bool DC_F_SHADOW = true;   // GRAPHICS -> Shadows: тени ламп и луна (без опции sh.cfg.x = 0)
+layout(constant_id = 2) const bool DC_F_MATER  = true;   // GRAPHICS -> Materials: отражение пола, блики, свет светящихся текстур
+                                                         // (без опции rfc.w, spare.y, spare.x/w = 0), рельеф металла
+// 25.10.2026: DC_SAFE - the safe shaders (gpu_vk_raster.cpp s_rasterSafe: the driver did not build the pipelines, or it cannot
+// index a texture array per pixel): no non-uniform indexing, the array has one place, textures from mods are off
+#ifdef DC_SAFE
+#define DC_REPI(i) 0
+#else
+#define DC_REPI(i) nonuniformEXT(i)
+#endif
 #ifdef DC_FX_PASS
 layout(location = 5) in float v_rfd;             // высота над полом (проход отражения)
 // 06.10.2026: меш из mods отражается и заслоняет свечение своей картинкой (dc_mesh_fx.vert; у потока dc_fx.vert даёт −1)
 layout(location = 6) flat in int v_rep;
 layout(location = 7) in vec2 v_repuv;
-layout(binding = 8) uniform sampler2D repTex[512];
+layout(binding = 8) uniform sampler2D repTex[DC_REP_N];
 #else
 // 05.10.2026: ТЕКСТУРЫ PNG ИЗ MODS (gpu_vk_raster.cpp TEXREP): номер картинки в массиве и место в ней; цвет — из картинки,
 // прозрачность — её альфа, полупрозрачность текселя (бит 15) — как у текселя игры под ней
@@ -62,7 +80,7 @@ layout(location = 6) sample in vec2 v_repuv;
 layout(location = 6) in vec2 v_repuv;
 #endif
 layout(location = 7) in float v_glint;           // 12.10.2026: блеск предметов — место вдоль диагонали предмета 1..2, 0 — не предмет
-layout(binding = 8) uniform sampler2D repTex[512];
+layout(binding = 8) uniform sampler2D repTex[DC_REP_N];
 layout(binding = 5) uniform sampler2D reflTex;   // отражение пола — цель прохода отражения (половинное разрешение)
 layout(binding = 6) uniform sampler2D moonPF;    // 25.09 ночь: лунная тень, сглаженная заранее: rg — размытая (доля, доля·глубина), ba — резкая
 layout(binding = 7) uniform sampler2DArray shadowPF;   // 27.09 (2): пирамида карт теней ламп — r доля заслонённого, g доля × расстояние / 4096
@@ -603,7 +621,7 @@ bool texelPath(const int flags, const int pass_blend, out vec3 rgb8, out vec3 al
 #ifndef DC_FX_PASS
         if (v_rep >= 0) {
             // 05.10: залит экран из mods — его картинка PNG (любого размера) вместо залитых пикселей
-            rgb8 = TEX_D(repTex[nonuniformEXT(v_rep)], g_ruv, g_dRx, g_dRy).rgb * 255.0;
+            rgb8 = TEX_D(repTex[DC_REPI(v_rep)], g_ruv, g_dRx, g_dRy).rgb * 255.0;
         } else
 #endif
         {
@@ -619,7 +637,7 @@ bool texelPath(const int flags, const int pass_blend, out vec3 rgb8, out vec3 al
         vec3 t8;
         bool hifont_done = false;
         if (v_rep >= 0) {                     // 06.10.2026: и в проходах свечения/отражения (меш из mods)
-            vec4 rc = TEX_D(repTex[nonuniformEXT(v_rep)], g_ruv, g_dRx, g_dRy);
+            vec4 rc = TEX_D(repTex[DC_REPI(v_rep)], g_ruv, g_dRx, g_dRy);
             if (rc.a < 0.5) return false;
             vec2 ruv = texelUV();
             uint rtx = sampleWin(int(ruv.x), int(ruv.y), iy, iz, v_info.x);
@@ -770,6 +788,44 @@ bool texelPath(const int flags, const int pass_blend, out vec3 rgb8, out vec3 al
     if (pass_blend != 2 && (pass_blend == 0 ? blend_this : !blend_this)) return false;
     return true;
 }
+
+#ifndef DC_FX_PASS
+// 27.09 вечер: ШЕРОХОВАТЫЙ МЕТАЛЛ - рельеф из текстуры, блеск и шероховатость текселя (см. main). 25.10.2026: текст блока main
+// без изменений, main зовёт его там, где рельеф нужен.
+void metalRelief(const vec3 alb8, const vec3 v_vpt, const vec3 v_nrm, const vec3 dVx, const vec3 dVy, const vec2 dUx,
+                 const vec2 dUy, inout vec3 mN, inout float mShine, inout float mRough) {
+        const vec2 tuv = texelUV();
+        const int tu = int(floor(tuv.x)), tv = int(floor(tuv.y));
+        const int iy = v_info.y, iz = v_info.z;
+        const vec3 LW = vec3(0.299, 0.587, 0.114) / 255.0;
+        if (sh.mrg.y > 0.0) {
+            const float hC = dot(alb8, LW);
+            const uint n0 = sampleWin(tu - 1, tv, iy, iz, v_info.x), n1 = sampleWin(tu + 1, tv, iy, iz, v_info.x);
+            const uint n2 = sampleWin(tu, tv - 1, iy, iz, v_info.x), n3 = sampleWin(tu, tv + 1, iy, iz, v_info.x);
+            const float hL = (n0 != 0u) ? dot(t5to8(n0), LW) : hC, hR = (n1 != 0u) ? dot(t5to8(n1), LW) : hC;
+            const float hU = (n2 != 0u) ? dot(t5to8(n2), LW) : hC, hD = (n3 != 0u) ? dot(t5to8(n3), LW) : hC;
+            // базис текстуры без касательных вершин (производные точки и UV): T — куда растёт u, B — куда растёт v
+            const vec3 c2 = cross(dVy, v_nrm), c1 = cross(v_nrm, dVx);
+            vec3 T = c2 * dUx.x + c1 * dUy.x, B = c2 * dUx.y + c1 * dUy.y;
+            const float tb = max(dot(T, T), dot(B, B));
+            if (tb > 1e-24) {
+                const float im = inversesqrt(tb);
+                const float s = 1.5 * sh.mrg.y;                    // перепад яркости 0.2 между соседями — наклон ~17°
+                vec3 n = normalize(v_nrm - (T * ((hR - hL) * s) + B * ((hD - hU) * s)) * im);
+                if (dot(n, normalize(-v_vpt)) > 0.05) mN = n;       // рельеф не разворачивает грань от камеры
+            }
+        }
+        const vec3 a = alb8 / 255.0;
+        const float amx = max(max(a.r, a.g), a.b), amn = min(min(a.r, a.g), a.b);
+        const float sat = (amx - amn) / max(amx, 1e-3);
+        const float rust = clamp((a.r - max(a.g, a.b)) * 5.0, 0.0, 1.0) * smoothstep(0.12, 0.35, sat);   // рыжее — ржавчина
+        const float grime = 1.0 - smoothstep(0.05, 0.28, dot(a, vec3(0.299, 0.587, 0.114)));             // тёмное — грязь
+        const uint hh = (uint(tu & 255) * 73856093u) ^ (uint(tv & 255) * 19349663u) ^ (uint(v_info.x & 0x1FF) * 83492791u);
+        const float grain = float((hh >> 7) & 1023u) / 1023.0;
+        mShine = max((1.0 - clamp(sh.mrg.z, 0.0, 1.0) * max(rust, 0.7 * grime)) * (1.0 + sh.mrg.w * (grain - 0.5)), 0.0);
+        mRough = clamp(sh.mrg.x, 0.0, 1.0);
+}
+#endif
 
 void main() {
     int flags = v_info.w;
@@ -969,41 +1025,14 @@ void main() {
     vec3 mN = v_nrm;          // нормаль с рельефом (у металла; прочим — нормаль грани)
     float mShine = 1.0;       // блеск текселя: 1 — чистый металл, меньше — ржавчина, грязь
     float mRough = 0.0;       // шероховатость (0 — как было)
+#ifndef DC_LEAN   // 25.10.2026: the last safe level (s_rasterSafe 2) - only the texel, item glint and glass
 #ifndef DC_FX_PASS
-    if (!blend_this && v_vpt.z > 1.0 && (flags & (F_ACTOR | F_CHAR)) == 0 && (flags & F_TEXTURED) != 0 &&
+    // 25.10.2026: рельеф считается там, где он нужен: с материалами - здесь, как было; без них (DC_F_MATER = false) его читает
+    // только вспышка выстрела (mN) - там, когда вспышка есть
+    const bool metalHere = !blend_this && v_vpt.z > 1.0 && (flags & (F_ACTOR | F_CHAR)) == 0 && (flags & F_TEXTURED) != 0 &&
         (flags & (F_SUBST | F_DITHER | F_TWIN)) == 0 && texMat(flags, v_info.x) == 2 &&
-        (sh.mrg.x > 0.0 || sh.mrg.y > 0.0 || sh.mrg.z > 0.0 || sh.mrg.w > 0.0)) {
-        const vec2 tuv = texelUV();
-        const int tu = int(floor(tuv.x)), tv = int(floor(tuv.y));
-        const int iy = v_info.y, iz = v_info.z;
-        const vec3 LW = vec3(0.299, 0.587, 0.114) / 255.0;
-        if (sh.mrg.y > 0.0) {
-            const float hC = dot(alb8, LW);
-            const uint n0 = sampleWin(tu - 1, tv, iy, iz, v_info.x), n1 = sampleWin(tu + 1, tv, iy, iz, v_info.x);
-            const uint n2 = sampleWin(tu, tv - 1, iy, iz, v_info.x), n3 = sampleWin(tu, tv + 1, iy, iz, v_info.x);
-            const float hL = (n0 != 0u) ? dot(t5to8(n0), LW) : hC, hR = (n1 != 0u) ? dot(t5to8(n1), LW) : hC;
-            const float hU = (n2 != 0u) ? dot(t5to8(n2), LW) : hC, hD = (n3 != 0u) ? dot(t5to8(n3), LW) : hC;
-            // базис текстуры без касательных вершин (производные точки и UV): T — куда растёт u, B — куда растёт v
-            const vec3 c2 = cross(dVy, v_nrm), c1 = cross(v_nrm, dVx);
-            vec3 T = c2 * dUx.x + c1 * dUy.x, B = c2 * dUx.y + c1 * dUy.y;
-            const float tb = max(dot(T, T), dot(B, B));
-            if (tb > 1e-24) {
-                const float im = inversesqrt(tb);
-                const float s = 1.5 * sh.mrg.y;                    // перепад яркости 0.2 между соседями — наклон ~17°
-                vec3 n = normalize(v_nrm - (T * ((hR - hL) * s) + B * ((hD - hU) * s)) * im);
-                if (dot(n, normalize(-v_vpt)) > 0.05) mN = n;       // рельеф не разворачивает грань от камеры
-            }
-        }
-        const vec3 a = alb8 / 255.0;
-        const float amx = max(max(a.r, a.g), a.b), amn = min(min(a.r, a.g), a.b);
-        const float sat = (amx - amn) / max(amx, 1e-3);
-        const float rust = clamp((a.r - max(a.g, a.b)) * 5.0, 0.0, 1.0) * smoothstep(0.12, 0.35, sat);   // рыжее — ржавчина
-        const float grime = 1.0 - smoothstep(0.05, 0.28, dot(a, vec3(0.299, 0.587, 0.114)));             // тёмное — грязь
-        const uint hh = (uint(tu & 255) * 73856093u) ^ (uint(tv & 255) * 19349663u) ^ (uint(v_info.x & 0x1FF) * 83492791u);
-        const float grain = float((hh >> 7) & 1023u) / 1023.0;
-        mShine = max((1.0 - clamp(sh.mrg.z, 0.0, 1.0) * max(rust, 0.7 * grime)) * (1.0 + sh.mrg.w * (grain - 0.5)), 0.0);
-        mRough = clamp(sh.mrg.x, 0.0, 1.0);
-    }
+        (sh.mrg.x > 0.0 || sh.mrg.y > 0.0 || sh.mrg.z > 0.0 || sh.mrg.w > 0.0);
+    if (DC_F_MATER && metalHere) metalRelief(alb8, v_vpt, v_nrm, dVx, dVy, dUx, dUy, mN, mShine, mRough);
 #endif
 
     // ===== ТЕНЬ ОТ ЛАМПЫ ИГРЫ (18.09.2026) =============================
@@ -1014,7 +1043,7 @@ void main() {
     // пересекаются, темнее, чем под одной. 27.09 (2): новый путь (spf.x) —
     // тени без зерна, лампы складываются по доле света (см. «ДОЛЯ СВЕТА»).
     float litMoon = 1.0;                  // 25.09 вечер: видна ли отсюда луна (её слой карты) — для лунного света ниже
-    if (sh.cfg.x > 0.5) {
+    if (DC_F_SHADOW && sh.cfg.x > 0.5) {
         int nL = min(int(sh.cfg.x + 0.5), 4);
         int dbg = int(sh.cfg.w + 0.5);
         vec3 vpt = v_vpt;
@@ -1123,7 +1152,7 @@ void main() {
     // Направленный источник на бесконечности (pt_renderer.c, луна в комнатах с небом): поверхность, обращённая к луне,
     // получает свой цвет × слабый голубоватый свет по нормали из производных; где луну заслонил персонаж (её слой карты
     // теней), света нет — отсюда и лёгкая тень. Только то, у чего есть глубина, и не смешиваемые тексели.
-    if (sh.mdir.w > -0.5 && sh.cfg.x > 0.5 && v_vpt.z > 1.0 && !blend_this && int(sh.cfg.w + 0.5) == 0) {
+    if (DC_F_SHADOW && sh.mdir.w > -0.5 && sh.cfg.x > 0.5 && v_vpt.z > 1.0 && !blend_this && int(sh.cfg.w + 0.5) == 0) {
         // 27.09 вечер (игрок: «грани четкие видны вблизи - из-за включенных теней наших»): нормаль из производных — плоская
         // нормаль полигона, и на персонаже луна ложилась на каждый полигон своей ровной долей — лицо и руки гранились. Теперь
         // (mcol.w ≥ 0 — DC_MOON_CHR_SMOOTH=1) персонаж берёт среднюю нормаль видимой стороны (половина луча к камере): свет луны
@@ -1146,6 +1175,9 @@ void main() {
         vec3 toF = sh.flp.xyz - v_vpt;
         float fd = length(toF);
         if (fd < sh.flp.w) {
+#ifndef DC_FX_PASS
+            if (!DC_F_MATER && metalHere) metalRelief(alb8, v_vpt, v_nrm, dVx, dVy, dUx, dUy, mN, mShine, mRough);
+#endif
             float fa = 1.0 - fd / sh.flp.w;
             fa *= fa;
             // 28.09: персонаж (flc.w ≥ 0) — средняя нормаль видимой стороны, как у луны: без граней полигонов
@@ -1166,7 +1198,7 @@ void main() {
     {
         const int ngl = int(sh.spare.x + 0.5) + int(sh.spare.w + 0.5);   /* 19.10: и источники 9..16 (glp2/glc2) */
         const bool glowSelf = (flags & F_TEXTURED) != 0 && (flags & F_SUBST) == 0 && ((v_info.x >> 23) & 1) != 0;
-        if (ngl > 0 && v_vpt.z > 1.0 && !blend_this && !glowSelf) {
+        if (DC_F_MATER && ngl > 0 && v_vpt.z > 1.0 && !blend_this && !glowSelf) {
             const bool chr = (flags & (F_ACTOR | F_CHAR)) != 0;
             for (int i = 0; i < 16; i++) {
                 if (i >= ngl) break;
@@ -1190,8 +1222,10 @@ void main() {
             }
         }
     }
+#endif   // DC_LEAN
 
 #ifndef DC_FX_PASS
+#ifndef DC_LEAN
     // ===== ОТРАЖЕНИЕ НА ПОЛУ (25.09 вечер, игрок: «на кафеле и металле отражались бы лазеры, лампы и Регина») =====
     // Пол из списка «блестит» (бит 21 страницы, выбор в приложении; rfc.w = 2 — любой пол, проверка) берёт картинку
     // прохода отражения в своей точке экрана: персонажи там со своим цветом и альфой 1 (подмешиваются), светящееся —
@@ -1200,7 +1234,7 @@ void main() {
     // 25.09 ночь (игрок: «сделай настройку понятнее и чтобы указывать мог что есть что») — МАТЕРИАЛ пола, биты 21..22
     // страницы (выбор в приложении): 1 кафель — неярко и чётко, 2 металл — мутно и в цвет самого металла, 3 глянец (мокрый
     // пол) — сильно и почти зеркально. Сила и размытие у каждого свои (rfm0/rfm1). rfc.w = 2 — любой пол как кафель.
-    if (sh.rfc.w > 0.5 && v_vpt.z > 1.0 && !blend_this && (flags & (F_ACTOR | F_CHAR)) == 0) {
+    if (DC_F_MATER && sh.rfc.w > 0.5 && v_vpt.z > 1.0 && !blend_this && (flags & (F_ACTOR | F_CHAR)) == 0) {
         // 29.09 поздно: жидкость (кровь) отражает как глянец; бумага, бетон и экран пол не зеркалят
         int mat = texMat(flags, v_info.x);
         mat = (mat == 7) ? 0 : texMatShade(mat);
@@ -1243,7 +1277,7 @@ void main() {
     // dc_spec_frame) и от света светящихся текстур (glp/glc): металл — широкий блик в свой цвет, кафель — узкий и слабый,
     // глянец — узкий и сильный. Блик идёт вместе с камерой — по нему металл и читается металлом. Только то, у чего есть
     // глубина, не смешиваемые тексели, не персонажи.
-    if (sh.spare.y > 0.5 && v_vpt.z > 1.0 && !blend_this && (flags & (F_ACTOR | F_CHAR)) == 0) {
+    if (DC_F_MATER && sh.spare.y > 0.5 && v_vpt.z > 1.0 && !blend_this && (flags & (F_ACTOR | F_CHAR)) == 0) {
         const int smat = texMatShade(texMat(flags, v_info.x));   // 29.09 поздно: жидкость — глянец, экран — стекло (кафель)
         if (smat != 0) {
             float shin = (smat == 1) ? sh.msp.x : (smat == 2) ? sh.msp.z : sh.msp2.x;
@@ -1339,6 +1373,7 @@ void main() {
         }
     }
 
+#endif   // DC_LEAN
     // ===== БЛЕСК ПРЕДМЕТОВ (12.10.2026, игрок: «оверлей поверх предметов, который раз в 5 секунд волной их выделяет, добавляет
     // немножко свечения, поблескивание, как в Resident Evil, чтобы предмет было легче найти»; GAME -> Item Highlight) =====
     // Предметы (секции таблицы типа 2), которые рисует наш обход комнаты, несут в v_glint место точки вдоль диагонали предмета
@@ -1356,11 +1391,13 @@ void main() {
     // (gpu.c dc_tex_class, список dc_highlight_user.cfg — его пишет приложение, инструмент «Найти в игре»): мягкое мигание
     // тёплым цветом 1.2 Гц. rfc.x — время (с), rfc.y — сила (DC_HL_TEX, 0 — выкл). У 15-битных страниц биты 9..20 — глиф
     // шрифта, у рабицы (F_SUBST) — окно: им нет.
+#ifndef DC_LEAN
     if (sh.rfc.y > 0.0 && (flags & F_TEXTURED) != 0 && (flags & F_SUBST) == 0 && ((v_info.x >> 19) & 1) != 0 &&
         ((v_info.x >> 7) & 3) != 2) {
         const float pulse = 0.5 + 0.5 * sin(sh.rfc.x * 7.5398);
         rgb8 = mix(rgb8, vec3(255.0, 222.0, 110.0), clamp(sh.rfc.y, 0.0, 1.0) * pulse);
     }
+#endif
 
     // ===== СТЕКЛО (01.10 вечер, игрок, слот 26, ST507: «сделай нормальное стекло. Сейчас эти два элемента будто просто поверх
     // рисуются») ===== Капсула и пробирка в отсеках у игры — непрозрачный синий цилиндр и плоская «средняя» полупрозрачность

@@ -134,8 +134,15 @@ typedef struct { const char *pat; int budget; } LogKeep;
 static const LogKeep s_keep[] = {
     /* the graphics card, the renderer, the output */
     { "render: *", 24 }, { "raster: ready*", 2 }, { "raster: bring-up*", 4 }, { "[VKR] shared:*", 6 },
+    { "renderer: *", 2 },              /* 25.10.2026: the modern graphics did not start - the reason shown to the player */
+    { "present thread: *", 4 },        /* 26.10.2026: frames between ticks on their own thread, or why not (main.cpp) */
+    { "dpi: *", 2 },                   /* 26.10.2026: the Windows scale, the window in points and in pixels (main.cpp) */
+    { "raster: options in the shader*", 4 }, { "raster: pipelines for*", 4 },   /* 25.10.2026: lean pipelines by the options */
     { "[VKR] post: MSAA up to*", 1 }, { "canvas: *", 4 }, { "hz: *", 4 },
     { "shaders: *", 12 }, { "pipecache: *", 4 }, { "post: SSAO *", 2 }, { "post: MSAA *", 4 },
+    { "graphics: *", 4 },              /* 24.10.2026: the first start check - lowered for a weak graphics card or not (main.cpp) */
+    { "vram: *", 12 },                 /* 24.10.2026: video memory in use and what the system gives (gpu_vk_raster.cpp, main.cpp) */
+    { "mods: textures - all*", 1 },    /* 24.10.2026: the places for mod textures are fewer on Intel (gpu_vk_raster.cpp) */
     /* the game and its data */
     { "disc: *", 2 }, { "hle: own kernel*", 2 }, { "room library: * rooms*", 1 }, { "mods: game files *", 1 },
     { "dc_settings: dc_user.cfg - *", 1 }, { "psxrecomp: *", 6 },
@@ -147,6 +154,8 @@ static const LogKeep s_keep[] = {
     /* where the run is */
     { "splash: language selection*", 2 }, { "splash: about the mod*", 2 }, { "splash: controls layout*", 2 },
     { "splash: closed*", 4 }, { "quit: leaving the game*", 1 },
+    { "titlequit: *", 4 },             /* 24.10.2026: the exit item of the main menu - which line of which version, or why none */
+    { "talk2: speech *", 6 },          /* 24.10.2026: is the speech on the disc the recording the faces were made for */
     /* failures, wherever they come from */
     { "*FAILED*", 16 }, { "*failed*", 16 }, { "*VK_ERROR*", 8 }, { "*device lost*", 4 }, { "*not found*", 8 },
     { "*cannot *", 8 }, { "* error*", 8 }, { "*ERROR*", 8 },

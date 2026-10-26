@@ -86,6 +86,10 @@ void dc_splash_shader_done(void);
 void dc_splash_feedback_present(struct SDL_Renderer *r, int logical_w, int logical_h, int show, int hover, float kx, float ky);
 int  dc_splash_feedback_hit(float lx, float ly);
 
+/* 24.10.2026: счётчик кадров (SCREEN -> FPS Counter): число картинок в секунду в левом верхнем углу окна; fps < 0 - ещё не
+ * сосчитано, ничего не рисуется */
+void dc_splash_fps_present(struct SDL_Renderer *r, int fps);
+
 /* Поля JSON для отладочного порта ({"cmd":"splash_state"}). */
 int  dc_splash_state(char *buf, int n);
 
