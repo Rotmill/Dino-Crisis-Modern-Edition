@@ -243,15 +243,22 @@ static float*          s_shUboMap = nullptr;
  * 27.09 вечер ШЕРОХОВАТЫЙ МЕТАЛЛ (dc_raster.frag): 436..439 mrg = шероховатость, сила рельефа из текстуры, матовость
  * ржавчины и грязи, зерно (все 0 — металл как был);
  * 28.09 (6) ПЕЛЕНА ИГРЫ ПОВЕРХ ДЫМКИ (dc_vol_common.glsl, см. «ПЕЛЕНА ИГРЫ» у veil_collect): 284 (vspare.x) = число полос,
- * 440..455 veilV[4] = полоса во всю ширину: строка от, строка до (точки цели), множитель, вычитание; 456..463 — запас
+ * 440..455 veilV[4] = полоса во всю ширину: строка от, строка до (точки цели), множитель, вычитание; 456..459 glint (блеск предметов), 460..463 - запас
  * 19.10.2026 СВЕТ СВЕТЯЩИХСЯ ТЕКСТУР, ИСТОЧНИКИ 9..16 (dc_raster.frag): 143 (spare.w) = сколько их, 464..495 glp2[8] = точка вида +
  * радиус, 496..527 glc2[8] = цвет × сила + обтекание (первые 8 — по-прежнему 140, 144..207; дымка и пыль берут только их)
  * 19.10.2026 вечер ЕЁ ДОВОРОТ В КАДРАХ МЕЖДУ ТАКТАМИ (warp_pc_make, dc_raster.vert): 528..531 hq = кватернион её поворота в виде
  * кадра A, 532..534 hc = точка на её оси, 535 (hc.w) = 1 - доворот есть
  * 20.10.2026 ЕЁ РУКИ, КИСТИ С ОРУЖИЕМ И ГОЛОВА МЕЖДУ ТАКТАМИ (arm_warp_make, dc_raster.vert): 536..567 bq[8] = кватернион
  * вершин кости в виде кадра A, 568..599 bt[8] = перенос + (w) есть
- * 25.10.2026 ВЕСЬ ЕЁ СКЕЛЕТ (15 костей, arm_warp_make): 536..599 bq[16], 600..663 bt[16] */
-#define SH_UBO_FLOATS 664
+ * 25.10.2026 ВЕСЬ ЕЁ СКЕЛЕТ (15 костей, arm_warp_make): 536..599 bq[16], 600..663 bt[16]
+ * 26.10.2026 ПАРЫ КУСКОВ (pair_pc_make, dc_raster.vert / dc_fx.vert): 664..667 pq = (x > 0.5 - пары вместо камеры, y - проход
+ * кадра A & 3, z - число пар), 668.. pr[PAIR_MAX * 3] = строки матрицы куска на эту долю пути (xyz) + сдвиг (w)
+ * 28.10.2026 ВСЕ ЛАМПЫ КОМНАТЫ СРАЗУ (gl_room_out; dc_raster.frag, dc_vol_common.glsl): SH_UBO_GL3.. glp3[16] = источники
+ * «светится» 17..32 (точка вида + радиус), +64.. glc3[16] = цвет × сила + обтекание, +128.. ghz[8] = доля дымки места 0..31
+ * (прежние пути: 1 у мест 0..7, 0 у прочих - дымка у первых 8, как было); 143 (spare.w) - сколько источников за первыми 8 (до 24) */
+#define PAIR_MAX 256
+#define SH_UBO_GL3 (668 + PAIR_MAX * 12)
+#define SH_UBO_FLOATS (SH_UBO_GL3 + 160)
 
 static float s_shWp[4] = { 0.f, 0.f, 0.f, 0.f };   /* ox, oy, H, H * сжатие */
 
@@ -452,11 +459,14 @@ static const VkSpecializationInfo s_repSpec = { 1, &s_repSpecMap, sizeof(int32_t
  * регистров, основной проход быстрее (замер DC_BENCH_WARP, 4K, всё выкл, RTX 4080: 0.58 -> 0.42 мс). Картинка та же: без
  * опции эти ветки и так не шли. Опция сменилась - raster_feat_sync (ниже): новый набор строится в фоне в кэш конвейеров,
  * кадры идут прежним, потом он из кэша. Маска: 1 - Shadows, 2 - Materials. DC_RASTER_FEAT=0 - всё в шейдере, как было. */
-struct RasterSpec { int32_t repN; VkBool32 shadow, mater; };
-static const VkSpecializationMapEntry s_rspecMap[3] = {
+/* 28.10.2026: msFull - константа 3 (DC_MS_FULL): полная маска выборок MSAA «по выборкам» (dc_raster_sl) - внутри полигона
+ * тексель читается раз на пиксель, а не на каждую выборку (там все выборки в одной точке текстуры). 0 - как было. */
+struct RasterSpec { int32_t repN; VkBool32 shadow, mater; int32_t msFull; };
+static const VkSpecializationMapEntry s_rspecMap[4] = {
     { 0, (uint32_t)offsetof(RasterSpec, repN), sizeof(int32_t) },
     { 1, (uint32_t)offsetof(RasterSpec, shadow), sizeof(VkBool32) },
-    { 2, (uint32_t)offsetof(RasterSpec, mater), sizeof(VkBool32) } };
+    { 2, (uint32_t)offsetof(RasterSpec, mater), sizeof(VkBool32) },
+    { 3, (uint32_t)offsetof(RasterSpec, msFull), sizeof(int32_t) } };
 extern "C" int g_dc_gfx_shadows;                       /* pt_renderer.c: GRAPHICS -> Shadows */
 static int raster_feat_want(void) {
     static int on = -1;
@@ -487,6 +497,11 @@ static const char* fx_fs_name(void) { return s_rasterSafe ? "shaders\\dc_fx_safe
 static VkBuffer       s_rvBuf = VK_NULL_HANDLE;
 static VkDeviceMemory s_rvMem = VK_NULL_HANDLE;
 static float*         s_rvMap = nullptr;
+/* ⭐ 26.10.2026 ПАРЫ КУСКОВ (кадры между тактами у дверей, см. «ПАРЫ КУСКОВ» у pair_build): третий поток вершин - метка куска
+ * модели (gte.cpp pair_note: (проход & 3) << 13 | номер куска + 1; 0 - нет), привязка 2, location 6 */
+static VkBuffer       s_pvBuf = VK_NULL_HANDLE;
+static VkDeviceMemory s_pvMem = VK_NULL_HANDLE;
+static uint32_t*      s_pvMap = nullptr;
 static bool trep_gpu_init(void);
 static void trep_tri(const float* v, float* rv);
 static void trep_frame_prepare(void);
@@ -1190,6 +1205,7 @@ static int    s_ppSSok = 1;                 /* устройство умеет s
 /* 09.10.2026: «по выборкам» — свет на пиксель, тексель на выборку (dc_raster_sl.frag.spv, DC_SAMPLE_LOOP): тени, луна, свет и
  * блики считаются раз на пиксель, а не на каждую из N выборок. DC_MSAA_SLOOP=0 — прежний шейдер на каждую выборку. */
 static int    s_ppSloop = 1;
+static int    s_ppMsFast = 1;               /* 28.10.2026: и тексель раз на пиксель внутри полигона (RasterSpec msFull), DC_MSAA_FAST=0 - откат */
 static int    s_ppSLfail = 0;               /* вариант со светом на пиксель не собрался — прежний */
 static int    s_ppMsaaFail = 0;             /* сборка MSAA не удалась — дальше без неё, до новой настройки */
 static int    s_ppAoFrame = 0, s_ppMsFrame = 1;   /* что было в последнем кадре (для панели) */
@@ -1213,6 +1229,7 @@ static void pp_defaults(void) {
     { const char* e = getenv("DC_MSAA_SSHADE"); s_ppSshade = (e && *e == '1') ? 1 : 0; }
     { const char* e = getenv("DC_SSAO");        s_ppSsao   = (e && *e == '0') ? 0 : 1; }
     { const char* e = getenv("DC_MSAA_SLOOP");  s_ppSloop  = (e && *e == '0') ? 0 : 1; }
+    { const char* e = getenv("DC_MSAA_FAST");   s_ppMsFast = (e && *e == '0') ? 0 : 1; }
     { const char* e = getenv("DC_POST_AA");     s_ppAA     = e ? atoi(e) : 0; }
 }
 static void pp_clamp(void) {
@@ -1525,19 +1542,22 @@ static bool mkRasterPipesImpl(VkRenderPass rp, VkSampleCountFlagBits ns, VkShade
     st[1].pSpecializationInfo = spec;                  /* 25.10.2026: размер массива и опции (RasterSpec) */
 
     /* 05.10: привязка 1 — второй буфер вершин s_rvBuf (текстура PNG из mods: номер и место в картинке, TEXREP) */
-    VkVertexInputBindingDescription vb[2]{ { 0, VERT_FLOATS * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX },
-                                           { 1, 4 * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX } };
-    VkVertexInputAttributeDescription va[6]{
+    /* 26.10.2026: привязка 2 - метка куска s_pvBuf (пары кусков) */
+    VkVertexInputBindingDescription vb[3]{ { 0, VERT_FLOATS * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX },
+                                           { 1, 4 * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX },
+                                           { 2, sizeof(uint32_t), VK_VERTEX_INPUT_RATE_VERTEX } };
+    VkVertexInputAttributeDescription va[7]{
         { 0, 0, VK_FORMAT_R32G32_SFLOAT,       0 },
         { 1, 0, VK_FORMAT_R32G32_SFLOAT,       8 },
         { 2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 16 },
         { 3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 32 },
         { 4, 0, VK_FORMAT_R32_SFLOAT,          48 },
         { 5, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 0 },
+        { 6, 2, VK_FORMAT_R32_UINT,            0 },
     };
     VkPipelineVertexInputStateCreateInfo vin{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
-    vin.vertexBindingDescriptionCount = 2; vin.pVertexBindingDescriptions = vb;
-    vin.vertexAttributeDescriptionCount = 6; vin.pVertexAttributeDescriptions = va;
+    vin.vertexBindingDescriptionCount = 3; vin.pVertexBindingDescriptions = vb;
+    vin.vertexAttributeDescriptionCount = 7; vin.pVertexAttributeDescriptions = va;
 
     VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
     ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -1693,8 +1713,9 @@ static VkPipeline mesh_main_pipe(VkRenderPass rp, VkSampleCountFlagBits ns, VkSh
 /* sshade: 0 — шейдер на пиксель, 1 — на каждую выборку (dc_raster_ss), 2 — 09.10: свет на пиксель, тексель на выборку (dc_raster_sl);
  * feat - 25.10.2026: опции в шейдере (raster_feat_want) */
 static bool mkRasterPipes(VkRenderPass rp, VkSampleCountFlagBits ns, int sshade, VkPipeline* pipes, VkPipeline* bgOut, int feat) {
-    const RasterSpec rsd = { s_trepCap, (feat & 1) ? VK_TRUE : VK_FALSE, (feat & 2) ? VK_TRUE : VK_FALSE };
-    const VkSpecializationInfo rsi = { 3, s_rspecMap, sizeof(RasterSpec), &rsd };
+    const RasterSpec rsd = { s_trepCap, (feat & 1) ? VK_TRUE : VK_FALSE, (feat & 2) ? VK_TRUE : VK_FALSE,
+                             (sshade == 2 && s_ppMsFast && ns > VK_SAMPLE_COUNT_1_BIT) ? (1 << (int)ns) - 1 : 0 };
+    const VkSpecializationInfo rsi = { 4, s_rspecMap, sizeof(RasterSpec), &rsd };
     VkShaderModule vs  = loadSpv("dc_raster.vert.spv");
     VkShaderModule fs  = loadSpv(raster_fs_name(sshade));   /* 25.10.2026: безопасные шейдеры (s_rasterSafe) */
     VkShaderModule bvs = loadSpv("dc_bg.vert.spv");
@@ -2546,17 +2567,20 @@ static bool fx_mkGeomPipe(VkShaderModule vs, VkShaderModule fs, int additive, Vk
     st[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = fs; st[1].pName = "main";
     st[1].pSpecializationInfo = &s_repSpec;
-    VkVertexInputBindingDescription vb{ 0, VERT_FLOATS * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX };
-    VkVertexInputAttributeDescription va[5]{
+    /* 26.10.2026: привязка 1 - метка куска s_pvBuf (пары кусков, dc_fx.vert) */
+    VkVertexInputBindingDescription vb[2]{ { 0, VERT_FLOATS * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX },
+                                           { 1, sizeof(uint32_t), VK_VERTEX_INPUT_RATE_VERTEX } };
+    VkVertexInputAttributeDescription va[6]{
         { 0, 0, VK_FORMAT_R32G32_SFLOAT,       0 },
         { 1, 0, VK_FORMAT_R32G32_SFLOAT,       8 },
         { 2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 16 },
         { 3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 32 },
         { 4, 0, VK_FORMAT_R32_SFLOAT,          48 },
+        { 6, 1, VK_FORMAT_R32_UINT,            0 },
     };
     VkPipelineVertexInputStateCreateInfo vin{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
-    vin.vertexBindingDescriptionCount = 1; vin.pVertexBindingDescriptions = &vb;
-    vin.vertexAttributeDescriptionCount = 5; vin.pVertexAttributeDescriptions = va;
+    vin.vertexBindingDescriptionCount = 2; vin.pVertexBindingDescriptions = vb;
+    vin.vertexAttributeDescriptionCount = 6; vin.pVertexAttributeDescriptions = va;
     VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
     ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     VkPipelineViewportStateCreateInfo vp{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
@@ -2804,8 +2828,11 @@ static float fx_pc7(void) {
  * глубиной и для сложения порядок не важен); warp16 — поля wq/wt/wd/wp (кадр A — без сдвига). */
 static void fx_geom_pass(int mode, const std::vector<Draw>& draws, const std::vector<size_t>* ord, size_t from,
                          int w, int h, int dispX, int dispY, int dispW, int dispH, const float* warp16,
-                         VkBuffer vb = VK_NULL_HANDLE, const std::vector<MeshRef>* mrefs = nullptr) {   /* 25.10: снимок - копия вершин и меши */
+                         VkBuffer vb = VK_NULL_HANDLE, const std::vector<MeshRef>* mrefs = nullptr,   /* 25.10: снимок - копия вершин и меши */
+                         VkBuffer pv = VK_NULL_HANDLE) {                                              /* 26.10: и меток кусков */
     if (vb == VK_NULL_HANDLE) vb = s_vbuf;
+    if (pv == VK_NULL_HANDLE) pv = s_pvBuf;
+    const VkBuffer vbp[2] = { vb, pv }; const VkDeviceSize vbo[2] = { 0, 0 };
     const int hw = (w + 1) / 2, hh = (h + 1) / 2;
     VkClearValue cl[2]{}; cl[0].color = { { 0.f, 0.f, 0.f, 0.f } }; cl[1].depthStencil = { 0.f, 0 };
     VkRenderPassBeginInfo rb{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
@@ -2816,8 +2843,7 @@ static void fx_geom_pass(int mode, const std::vector<Draw>& draws, const std::ve
     const VkViewport vpt{ 0.f, 0.f, (float)hw, (float)hh, 0.f, 1.f };
     const VkRect2D scFull{ { 0, 0 }, { (uint32_t)hw, (uint32_t)hh } };
     vkCmdSetViewport(s_cmd, 0, 1, &vpt); vkCmdSetScissor(s_cmd, 0, 1, &scFull);
-    VkDeviceSize zero = 0;
-    vkCmdBindVertexBuffers(s_cmd, 0, 1, &vb, &zero);
+    vkCmdBindVertexBuffers(s_cmd, 0, 2, vbp, vbo);
     vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_plLay, 0, 1, &s_dset, 0, nullptr);
     vkCmdPushConstants(s_cmd, s_plLay, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 64, 64, warp16);
     float pc[16] = { (float)dispX, (float)dispY, (float)dispW, (float)dispH, 0.f, 1.f, 1.f, fx_pc7(),
@@ -2842,8 +2868,7 @@ static void fx_geom_pass(int mode, const std::vector<Draw>& draws, const std::ve
                 vkCmdPushConstants(s_cmd, s_plLay, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 64, pc);
                 medx_record(s_cmd, mp, d, mrefs ? mesh_ref_of(d, *mrefs) : nullptr);
                 bound = -1;
-                VkDeviceSize zM = 0;
-                vkCmdBindVertexBuffers(s_cmd, 0, 1, &vb, &zM);
+                vkCmdBindVertexBuffers(s_cmd, 0, 2, vbp, vbo);
                 nd++;
             }
             continue;
@@ -3229,8 +3254,8 @@ extern "C" void dcvk_glow_light_stats(int* n) { *n = s_glN; }
  * 12 следов) четыре дальних не светили вовсе, а с поворотом камеры выпадали и возвращались. Источник j < 8 - в glp/glc (144/176),
  * дальше - в glp2/glc2 в конце блока (464/496); 140 - сколько первых (до 8), 143 - сколько дальше */
 enum { GL_OUT = 16 };
-static inline float* gl_slot_p(int j) { return s_shUboMap + (j < 8 ? 144 + j * 4 : 464 + (j - 8) * 4); }
-static inline float* gl_slot_c(int j) { return s_shUboMap + (j < 8 ? 176 + j * 4 : 496 + (j - 8) * 4); }
+static inline float* gl_slot_p(int j) { return s_shUboMap + (j < 8 ? 144 + j * 4 : j < 16 ? 464 + (j - 8) * 4 : SH_UBO_GL3 + (j - 16) * 4); }
+static inline float* gl_slot_c(int j) { return s_shUboMap + (j < 8 ? 176 + j * 4 : j < 16 ? 496 + (j - 8) * 4 : SH_UBO_GL3 + 64 + (j - 16) * 4); }
 static inline void gl_set_count(int n) { s_shUboMap[140] = (float)(n < 8 ? n : 8); s_shUboMap[143] = (float)(n > 8 ? n - 8 : 0); }
 static void gl_texel_rgb(const unsigned short* vr, int tp, int cx, int cy, int u, int v, float* rgb, int* ok) {
     const int depth = (tp >> 7) & 3, tpx = (tp & 15) * 64, tpy = ((tp >> 4) & 1) * 256;
@@ -3263,7 +3288,15 @@ static void gl_texel_rgb(const unsigned short* vr, int tp, int cx, int cy, int u
  * «почти»): быстрое среднее мгновенного света (0.15 с). Ровная лампа не меняется: след = её кадр, точка — сглаженное место
  * в комнате (группа «лампа + ореол» и «лампа без ореола» — центры в разных местах). DC_GLOW_LIGHT_STEADY=0 / галка F8 —
  * как было. DC_GLOW_LIGHT_LOG=2 — строка glowlight2: на каждый кадр A (следы, свет, видна/держится). */
-struct GlClus { double p[3], c[3], a, lum; };
+/* 27.10.2026 (игрок, слот 1: «свечение от ламп нужно сделать, чтобы оно все-таки было привязано к их источникам ... это
+ * свечение, оно остается на месте, а там уже этой лампы, так сказать, нету источника. То есть такие вот, как это,
+ * остаточный след остается»): группа видимых треугольников уезжала с поворотом камеры (состав групп по 800 ед. зависел от
+ * того, что видно), а осиротевший след держался hold (1 с) там, где лампы нет. Теперь (1) треугольник светильника комнаты
+ * (pt_renderer.c dc_glow_fixtures: меш комнаты, неподвижный центр) идёт в группу ЭТОГО светильника, точка света - его
+ * центр, след узнаётся по ключу светильника; прочие (не из меша) - группами, как было; (2) свет держится между вспышками
+ * только у следа, который уже мигал (лампа пропадала и возвращалась, пока место в кадре); немигавший без лампы гаснет
+ * сразу (0.15 с). DC_GLOW_LIGHT_FIX=0 - как было. */
+struct GlClus { double p[3], c[3], a, lum; unsigned fix; float fc[3], fa; int fi; };   /* fix - ключ светильника (0 - нет), fc - центр, fa - площадь, fi - его номер (28.10) */
 enum { GLT_N = 32 };
 struct GlTrack {
     float pos[3];      /* место лампы: в комнате (room = 1) или в виде кадра (room = 0, матриц нет) */
@@ -3275,6 +3308,9 @@ struct GlTrack {
     double seen;       /* когда лампу видели в потоке, с */
     double lastOn;     /* когда лампа последний раз горела (не темнее 85 % пика), с */
     int alive, room, hit, id;
+    unsigned fix;      /* 27.10: ключ светильника комнаты (0 - группа видимого, как было) */
+    int miss, blinks;  /* 27.10: в прошлом кадре A лампы не было (место в кадре); сколько раз она так пропадала и возвращалась */
+    float fade;        /* 27.10: доля света немигавшего следа без лампы (гаснет за 0.15 с) */
 };
 static GlTrack s_glt[GLT_N];
 static double  s_gltPrev = 0.0;
@@ -3286,6 +3322,8 @@ static inline void gl_xf(const float* M, const float* p, float* o) {        /* �
     for (int r = 0; r < 3; r++) o[r] = M[r * 4] * p[0] + M[r * 4 + 1] * p[1] + M[r * 4 + 2] * p[2] + M[r * 4 + 3];
 }
 extern "C" int dc_light_epoch(void);    /* pt_renderer.c: растёт при смене комнаты и быстрой загрузке */
+extern "C" int dc_glow_fixtures(const float** cen4, const float** box6, const unsigned** key);   /* pt_renderer.c 27.10: светильники комнаты */
+static int gl_fix_on(void) { static int v = -1; if (v < 0) { const char* e = getenv("DC_GLOW_LIGHT_FIX"); v = (e && *e == '0') ? 0 : 1; } return v; }
 static int gl_steady_out(const GlClus* cl, int ncl) {
     /* 19.10.2026 (игрок: «в другой комнате уже, а старый свет ещё оставался»): след лампы прежней комнаты в координатах
      * комнаты мог совпасть с лампой новой ближе 600 ед. - и та светила прежним пиком и цветом, пока не прошёл hold. Новая
@@ -3303,6 +3341,7 @@ static int gl_steady_out(const GlClus* cl, int ncl) {
     const float* R2V = s_shUboMap + 272;
     const float flick = s_pp[PP_GL_LFLICK], hold = s_pp[PP_GL_LHOLD];
     const float holdMax = room ? hold : (hold < 0.12f ? hold : 0.12f);   /* без матриц место в виде верно, пока камера стоит */
+    const int fixOn = gl_fix_on();                                       /* 27.10: держать свет только мигавшим */
     const float aFast = 1.f - expf(-dt / 0.15f), kDim = expf(-dt / 0.3f), kGone = expf(-dt / 0.15f);
     int cut = 0;                                                         /* смена ракурса / комнаты */
     if (room) {
@@ -3327,6 +3366,7 @@ static int gl_steady_out(const GlClus* cl, int ncl) {
     const int nc = ncl < 32 ? ncl : 32;
     for (int c = 0; c < nc; c++) {
         const double A = cl[c].a;
+        /* 27.10: размер - по видимой площади, как было (по всей площади светильника свет стал ярче, чем настроил игрок) */
         const double sz = sqrt(A) / 300.0;
         const float ki = (float)(sz < 0.35 ? 0.35 : sz > 1.5 ? 1.5 : sz);
         krn[c] = (float)(sz < 0.6 ? 0.6 : sz > 1.6 ? 1.6 : sz);
@@ -3339,11 +3379,14 @@ static int gl_steady_out(const GlClus* cl, int ncl) {
         const double A = cl[c].a;
         const float vw[3] = { (float)(cl[c].p[0] / A), (float)(cl[c].p[1] / A), (float)(cl[c].p[2] / A) };
         float rp[3];
-        if (room) gl_xf(V2R, vw, rp); else { rp[0] = vw[0]; rp[1] = vw[1]; rp[2] = vw[2]; }
+        const unsigned fx = room ? cl[c].fix : 0u;                       /* 27.10: светильник комнаты - его центр и его след */
+        if (fx) { rp[0] = cl[c].fc[0]; rp[1] = cl[c].fc[1]; rp[2] = cl[c].fc[2]; }
+        else if (room) gl_xf(V2R, vw, rp); else { rp[0] = vw[0]; rp[1] = vw[1]; rp[2] = vw[2]; }
         int best = -1; float bd = 600.f * 600.f;
         for (int t = 0; t < GLT_N; t++) {
             const GlTrack& T = s_glt[t];
-            if (!T.alive || T.hit) continue;
+            if (!T.alive || T.hit || T.fix != fx) continue;
+            if (fx) { best = t; break; }
             const float dx = T.pos[0] - rp[0], dy = T.pos[1] - rp[1], dz = T.pos[2] - rp[2], d = dx * dx + dy * dy + dz * dz;
             if (d < bd) { bd = d; best = t; }
         }
@@ -3358,14 +3401,17 @@ static int gl_steady_out(const GlClus* cl, int ncl) {
             T.alive = 1; T.room = room; T.hit = 1; T.id = s_gltNextId++; T.seen = now; T.lastOn = now;
             for (int q = 0; q < 3; q++) { T.pos[q] = rp[q]; T.view[q] = vw[q]; T.e[q] = en[c][q]; T.fast[q] = en[c][q]; }
             T.kr = krn[c]; T.peak = enm[c];
+            T.fix = fx; T.miss = 0; T.blinks = 0; T.fade = 1.f;
             continue;
         }
         GlTrack& T = s_glt[best];
         for (int q = 0; q < 3; q++) {
-            T.pos[q] = room ? T.pos[q] + (rp[q] - T.pos[q]) * 0.35f : rp[q];   /* лампа в комнате стоит: место сглаживается */
+            T.pos[q] = fx ? rp[q] : room ? T.pos[q] + (rp[q] - T.pos[q]) * 0.35f : rp[q];   /* лампа в комнате стоит: место сглаживается */
             T.view[q] = vw[q];
             T.fast[q] += (en[c][q] - T.fast[q]) * aFast;
         }
+        if (T.miss) { T.miss = 0; if (T.blinks < 1000) T.blinks++; }   /* 27.10: пропадала и вернулась - мигает */
+        T.fade = 1.f;
         /* пик держится ровно, пока лампа горела не раньше hold с назад (тёмная фаза мигания); дольше темно — лампа
          * погасла или стала тусклее: пик спадает (0.3 с) до её нового уровня */
         float pk = (now - T.lastOn > hold) ? T.peak * kDim : T.peak;
@@ -3403,7 +3449,11 @@ static int gl_steady_out(const GlClus* cl, int ncl) {
         }
         if (!on) { T.alive = 0; continue; }
         for (int q = 0; q < 3; q++) T.fast[q] -= T.fast[q] * aFast;
-        if (age > holdMax) T.peak *= kGone;                              /* пока держим — пик ровный */
+        /* 27.10: держим только след, который уже мигал; немигавший без лампы гаснет сразу, но помнится до hold + 0.5 с:
+         * вернётся лампа - значит мигает, дальше её свет держится */
+        T.miss = 1;
+        if (fixOn && !T.blinks) T.fade *= kGone;
+        else if (age > holdMax) T.peak *= kGone;                         /* пока держим — пик ровный */
         if (T.peak < 0.002f) T.alive = 0;
     }
     /* вывод: до 8 заметных (свет × близость к камере) */
@@ -3412,7 +3462,7 @@ static int gl_steady_out(const GlClus* cl, int ncl) {
         const GlTrack& T = s_glt[t];
         if (!T.alive) continue;
         const float em = gl_max3(T.e), s = em > 1e-6f ? T.peak / em : 0.f;
-        for (int q = 0; q < 3; q++) { const float x = T.e[q] * s * (1.f - flick) + T.fast[q] * flick; eo[nt][q] = x > 0.f ? x : 0.f; }
+        for (int q = 0; q < 3; q++) { const float x = (T.e[q] * s * (1.f - flick) + T.fast[q] * flick) * T.fade; eo[nt][q] = x > 0.f ? x : 0.f; }
         if (room) gl_xf(R2V, T.pos, vo[nt]); else { vo[nt][0] = T.view[0]; vo[nt][1] = T.view[1]; vo[nt][2] = T.view[2]; }
         const float dd = (vo[nt][0] * vo[nt][0] + vo[nt][1] * vo[nt][1] + vo[nt][2] * vo[nt][2]) / (5000.f * 5000.f);
         pri[nt] = gl_max3(eo[nt]) / (1.f + dd);
@@ -3440,23 +3490,568 @@ static int gl_steady_out(const GlClus* cl, int ncl) {
           for (int j = 0; j < n; j++) sum += gl_max3(gl_slot_c(j));
           p += snprintf(buf + p, sizeof buf - p, "glowlight2: t=%.3f steady groups %d traces %d out %d sum %.4f%s%s |", now, ncl, nt, n, sum,
                         room ? "" : " (no matrices)", cut ? " SHOT CHANGE" : "");
-          for (int j = 0; j < n && p < (int)sizeof buf - 90; j++) {
+          for (int j = 0; j < n && p < (int)sizeof buf - 110; j++) {
               const GlTrack& T = s_glt[tix[sel[j]]];
-              p += snprintf(buf + p, sizeof buf - p, " #%d %s %.3f at %.0f,%.0f,%.0f;", T.id, T.hit ? "visible" : "held",
-                            gl_max3(gl_slot_c(j)), T.pos[0], T.pos[1], T.pos[2]);
+              p += snprintf(buf + p, sizeof buf - p, " #%d %s %.3f at %.0f,%.0f,%.0f %s b%d f%.2f;", T.id, T.hit ? "visible" : "held",
+                            gl_max3(gl_slot_c(j)), T.pos[0], T.pos[1], T.pos[2], T.fix ? "fix" : "grp", T.blinks, T.fade);
           }
           std::fprintf(stderr, "%s%c", buf, 10);
       } }
     return n;
 }
+/* ===== ВСЕ ЛАМПЫ КОМНАТЫ СРАЗУ (28.10.2026) ==========================================================================
+ * Игрок (слот 49): «идешь вперед и прям видно как в глазах включаются эти дымка от света. А может быть и сам свет. А можно
+ * сделать, чтобы оно сразу все было включено и на глазах не появлялось?». Свет и дымка брали лампы только из потока кадра:
+ * лампа входила в кадр - её свет загорался, выходила - гас; ламп в комнате сейва 49 больше, чем мест (16 света, 8 дымки), и на
+ * ходу места переходили от лампы к лампе - свет и дымка вспыхивали на глазах. Теперь, пока комнату рисует обход растра:
+ * (1) светильник комнаты (pt_renderer.c dc_glow_fixtures) светит, пока обход его рисует, в кадре он или нет
+ *     (dc_glow_fixture_present); цвет и размер - по мешу комнаты (его треугольники, обращённые к камере, тексели - как у
+ *     потока), поток кадра даёт только мигание (доля glow_light_flick) и тёмную фазу мигающей лампы, как было;
+ * (2) 32 места (прежние пути - до 16, дымка у первых 8; в комнате сейва 49 30 ламп) держатся за своими лампами, лампа
+ *     входит в место и уходит из него за 0.4 с; дымка - у каждого места, так же плавно, её доля - ghz (SH_UBO_GL3 + 128,
+ *     dc_vol_common.glsl glHazeW); место получает лампа, чей свет достаёт до кадра (шар её радиуса задевает пирамиду вида),
+ *     ярче и ближе к камере - раньше;
+ * (3) быстрая загрузка, новая комната (8 кадров A) и смена ракурса (3) - всё сразу на месте, без плавного входа.
+ * Треугольники «светится» не из меша (группы видимого) - как было, только за краем кадра их свет держится до 10 с, а новый
+ * входит за 0.25 с. Комнату рисует игра (обход стоит) - всё как было (gl_steady_out). DC_GLOW_LIGHT_ROOM=0 - как было;
+ * DC_GLOW_LIGHT_LOG=2 - строка glowroom2 на каждый кадр A, 3 - ещё glowcal (светильник в кадре: поток против меша). */
+enum { GLR_N = 160, GLR_TRI = 2048, GLR_FIX = 128, GLR_OUT = 32 };
+struct GlRTrack {
+    float pos[3];      /* место в комнате: у светильника - его центр, у группы - сглаженное место */
+    float e[3];        /* свет горящей фазы: цвет × множитель силы / 255 */
+    float ki, kr;      /* множители силы и радиуса (по площади) */
+    float peak;        /* группа: наибольший канал с медленным спадом, как у gl_steady_out */
+    float fast[3];     /* быстрое среднее мгновенного света (поток) */
+    double seen;       /* когда лампу видели в потоке, с */
+    double lastOn;     /* когда горела: в потоке не темнее 85 % пика или вне кадра (судить нельзя) */
+    double judged;     /* группа: когда видели в потоке или она была вне кадра */
+    int alive, hit, id;
+    int fi;            /* светильник этого кадра (-1 - группа или его больше нет) */
+    int meshOk;        /* свет светильника уже взят по мешу */
+    int miss, blinks;  /* как у gl_steady_out: лампы не было в потоке; сколько раз она так пропадала и возвращалась */
+    int slot;          /* место 0..31, -1 - нет */
+    int want;          /* в этом кадре ей нужно место */
+    int vis;           /* 1 - в потоке, 2 - в кадре, а в потоке нет (тёмная фаза), 0 - судить нельзя (вне кадра) */
+    int drop;          /* группа на месте светильника, у которого теперь свой след: уходит за 0.3 с */
+    unsigned fix;      /* ключ светильника (0 - группа видимого) */
+    float fade;        /* доля света без лампы в потоке (немигавшая гаснет за 0.15 с) */
+    float pw;          /* доля присутствия: светильник рисует обход, группа видна (0..1) */
+    float lw;          /* доля света в месте (0..1, за 0.4 с), дымка - по ней же */
+};
+struct GlRTri { float col[3], n[3], p0[3], area; int fix; unsigned char ok, two; };
+static GlRTrack s_glr[GLR_N];
+static GlRTri   s_glrT[GLR_TRI];
+static int      s_glrSlot[GLR_OUT];                /* место -> след, -1 - пусто */
+static int      s_glrTn = 0, s_glrOn = 0, s_glrInst = 0, s_glrNextId = 1, s_glrHave = 0;
+static unsigned s_glrGen = 0;
+static long     s_glrTick = 0, s_glrCal = 0;
+static double   s_glrPrev = 0.0;
+static float    s_glrEye[3], s_glrFwd[3];
+static float    s_glFr[4] = { 0.f, 0.f, 0.f, 0.f };   /* пирамида вида кадра A: x/z слева и справа, y/z сверху и снизу (dcvk_render) */
+static int      s_glFrOk = 0;
+static void gl_room_reset(void) {
+    for (int t = 0; t < GLR_N; t++) { s_glr[t].alive = 0; s_glr[t].slot = -1; }
+    for (int j = 0; j < GLR_OUT; j++) s_glrSlot[j] = -1;
+    s_glrOn = 0; s_glrHave = 0; s_glrTn = 0;
+}
+extern "C" int dc_glow_fixture_present(unsigned char* pres, int cap, unsigned char* td, int tcap, long* walk_seq, unsigned* gen);
+extern "C" int dc_glow_fixture_tri(int i, int* fix, int* tp, int* cx, int* cy, int uv[6], int rgb[9], int* code, float* area, float v9[9], int* two);
+static inline float gl_sstep(float a, float b, float x) {
+    float t = b > a ? (x - a) / (b - a) : (x >= b ? 1.f : 0.f);
+    t = t < 0.f ? 0.f : (t > 1.f ? 1.f : t);
+    return t * t * (3.f - 2.f * t);
+}
+/* 28.10 (2): страница источника - как её читает поток (gl_lights_build): (int)(v[8] + 0.5f) во float, а у «светится» в
+ * полосе страницы бит 23 - число не меньше 2^23, шаг float там 1, и +0.5 округляется к чётному: нечётная страница читается
+ * как следующая (слот 49: плафоны рисуются со страницы 0x17, свет всегда брал цвет текселей 0x18). Свет по мешу берёт так
+ * же - цвет света как был. DC_GLOW_LIGHT_TRUEPAGE=1 - оба пути по настоящей странице (цвет самой лампы) */
+static int gl_true_page(void) {
+    static int v = -1;
+    if (v < 0) { const char* e = getenv("DC_GLOW_LIGHT_TRUEPAGE"); v = (e && *e == '1') ? 1 : 0; }
+    return v;
+}
+static inline int gl_lane_page(float lane) { return (gl_true_page() ? (int)((double)lane + 0.5) : (int)(lane + 0.5f)) & 0x1FF; }
+/* цвет треугольника светильника по мешу - как у потока (gl_lights_build): 7 текселей окна UV, прозрачные мимо;
+ * полупрозрачное с цветом вершин - оттенок вершины (glow_light_hue); 0 - не светит */
+static int gl_room_tricol(const unsigned short* vr, int tp, int cx, int cy, const int* uv, const int* rgb, int code, float* col) {
+    tp = gl_lane_page((float)((tp & 0x1FF) | (1 << 23)));               /* страница - как у потока (выше) */
+    const float u0 = (float)uv[0], v0 = (float)uv[1], u1 = (float)uv[2], v1 = (float)uv[3], u2 = (float)uv[4], v2 = (float)uv[5];
+    const float uvs[7][2] = { { u0, v0 }, { u1, v1 }, { u2, v2 }, { (u0 + u1) * 0.5f, (v0 + v1) * 0.5f }, { (u1 + u2) * 0.5f, (v1 + v2) * 0.5f },
+                              { (u0 + u2) * 0.5f, (v0 + v2) * 0.5f }, { (u0 + u1 + u2) / 3.f, (v0 + v1 + v2) / 3.f } };
+    col[0] = col[1] = col[2] = 0.f;
+    int nn = 0;
+    for (int s = 0; s < 7; s++) {
+        float c[3]; int ok = 0;
+        gl_texel_rgb(vr, tp, cx, cy, (int)uvs[s][0], (int)uvs[s][1], c, &ok);
+        if (ok) { col[0] += c[0]; col[1] += c[1]; col[2] += c[2]; nn++; }
+    }
+    if (!nn) return 0;
+    for (int q = 0; q < 3; q++) col[q] /= (float)nn;
+    if ((code & 2) && !(code & 1)) {
+        float vcm[3], mx = 0.f;
+        for (int q = 0; q < 3; q++) { vcm[q] = (float)(rgb[q] + rgb[3 + q] + rgb[6 + q]) / 3.f; if (vcm[q] > mx) mx = vcm[q]; }
+        if (s_pp[PP_GL_LHUE] > 0.5f) {
+            if (mx < 2.f) return 0;
+            for (int q = 0; q < 3; q++) col[q] = col[q] * vcm[q] / mx;
+        } else {
+            for (int q = 0; q < 3; q++) { col[q] = col[q] * vcm[q] / 128.f; if (col[q] > 255.f) col[q] = 255.f; }
+        }
+    }
+    return 1;
+}
+/* треугольники светильников по мешу (pt_renderer.c dc_glow_fixture_tri): новая сборка светильников - всё заново; иначе раз
+ * в ~секунду цвет заново (экраны и лампы анимированы), остаётся более яркий - свет горящей фазы */
+static void gl_room_mesh(const unsigned short* vr, unsigned gen) {
+    const int fresh = gen != s_glrGen || !s_glrTn;
+    if (!fresh && (++s_glrTick % 60) != 0) return;
+    if (fresh) { s_glrGen = gen; s_glrTn = 0; }
+    const int lim = fresh ? GLR_TRI : s_glrTn;
+    for (int i = 0; i < lim; i++) {
+        int fix = 0, tp = 0, cx = 0, cy = 0, uv[6], rgb[9], code = 0, two = 0; float area = 0.f, v9[9];
+        if (!dc_glow_fixture_tri(i, &fix, &tp, &cx, &cy, uv, rgb, &code, &area, v9, &two)) break;
+        GlRTri& M = s_glrT[i];
+        float col[3];
+        const int ok = gl_room_tricol(vr, tp, cx, cy, uv, rgb, code, col);
+        if (fresh) {
+            const float e1[3] = { v9[3] - v9[0], v9[4] - v9[1], v9[5] - v9[2] }, e2[3] = { v9[6] - v9[0], v9[7] - v9[1], v9[8] - v9[2] };
+            M.n[0] = e1[1] * e2[2] - e1[2] * e2[1]; M.n[1] = e1[2] * e2[0] - e1[0] * e2[2]; M.n[2] = e1[0] * e2[1] - e1[1] * e2[0];
+            for (int q = 0; q < 3; q++) { M.p0[q] = v9[q]; M.col[q] = ok ? col[q] : 0.f; }
+            M.area = area; M.fix = fix; M.ok = (unsigned char)(ok ? 1 : 0); M.two = (unsigned char)(two ? 1 : 0);
+            s_glrTn = i + 1;
+        } else if (ok && (!M.ok || gl_max3(col) > gl_max3(M.col))) {
+            M.ok = 1;
+            for (int q = 0; q < 3; q++) M.col[q] = col[q];
+        }
+    }
+}
+/* насколько точка вида (кадр A) вне пирамиды вида: 0 - внутри; иначе сильнее всего нарушенная грань (ближняя - z = 50) -
+ * не больше настоящего расстояния до пирамиды, свет у её края не теряется */
+static float gl_room_outside(const float* v) {
+    float s = 50.f - v[2];
+    if (s_glFrOk) {
+        const float kx0 = s_glFr[0], kx1 = s_glFr[1], ky0 = s_glFr[2], ky1 = s_glFr[3];
+        const float a = (kx0 * v[2] - v[0]) / sqrtf(1.f + kx0 * kx0), b = (v[0] - kx1 * v[2]) / sqrtf(1.f + kx1 * kx1);
+        const float c = (ky0 * v[2] - v[1]) / sqrtf(1.f + ky0 * ky0), d = (v[1] - ky1 * v[2]) / sqrtf(1.f + ky1 * ky1);
+        if (a > s) s = a;
+        if (b > s) s = b;
+        if (c > s) s = c;
+        if (d > s) s = d;
+    }
+    return s > 0.f ? s : 0.f;
+}
+static void gl_room_kill(int t) {
+    GlRTrack& T = s_glr[t];
+    if (T.slot >= 0 && T.slot < GLR_OUT && s_glrSlot[T.slot] == t) s_glrSlot[T.slot] = -1;
+    T.slot = -1; T.alive = 0;
+}
+static int gl_room_out(const GlClus* cl, int ncl, const unsigned short* vr, const float* fxC, const float* fxB, const unsigned* fxK,
+                       int nf, const unsigned char* pres, const unsigned char* td, unsigned gen, int walkAge) {
+    static int lg = -1;
+    if (lg < 0) { const char* e = getenv("DC_GLOW_LIGHT_LOG"); lg = (e && *e >= '1' && *e <= '9') ? *e - '0' : 0; }
+    LARGE_INTEGER qf, qc; QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&qc);
+    const double now = (double)qc.QuadPart / (double)qf.QuadPart;
+    float dt = s_glrPrev > 0.0 ? (float)(now - s_glrPrev) : 0.f;
+    const int gap = s_glrPrev > 0.0 && now - s_glrPrev > 0.5;           /* полсекунды без кадра A (меню, экран предметов) */
+    if (dt < 0.f) dt = 0.f;
+    if (dt > 0.25f) dt = 0.25f;
+    s_glrPrev = now;
+    const float* V2R = s_shUboMap + 260;
+    const float* R2V = s_shUboMap + 272;
+    const float flick = s_pp[PP_GL_LFLICK], hold = s_pp[PP_GL_LHOLD];
+    const float aFast = 1.f - expf(-dt / 0.15f), aE = 1.f - expf(-dt / 0.3f), kDim = expf(-dt / 0.3f), kGone = expf(-dt / 0.15f);
+    const float RAMP = 0.4f;                                             /* вход в место и уход из него, с */
+    /* вход в этот режим, новая комната, быстрая загрузка, перерыв: следы с нуля, всё сразу */
+    { static int ep = -1; const int e = dc_light_epoch();
+      if (!s_glrOn || e != ep || gap) {
+          ep = e;
+          for (int t = 0; t < GLR_N; t++) { s_glr[t].alive = 0; s_glr[t].slot = -1; }
+          for (int j = 0; j < GLR_OUT; j++) s_glrSlot[j] = -1;
+          s_glrTn = 0; s_glrHave = 0; s_glrInst = 8;
+      } }
+    s_glrOn = 1;
+    int cut = 0;                                                         /* смена ракурса - как у gl_steady_out */
+    {
+        const float eye[3] = { V2R[3], V2R[7], V2R[11] };
+        float fwd[3] = { V2R[2], V2R[6], V2R[10] };
+        const float fl = sqrtf(fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2]);
+        if (fl > 1e-6f) for (int q = 0; q < 3; q++) fwd[q] /= fl;
+        if (s_glrHave) {
+            const float dx = eye[0] - s_glrEye[0], dy = eye[1] - s_glrEye[1], dz = eye[2] - s_glrEye[2];
+            const float dot = fwd[0] * s_glrFwd[0] + fwd[1] * s_glrFwd[1] + fwd[2] * s_glrFwd[2];
+            if (dx * dx + dy * dy + dz * dz > 1200.f * 1200.f || dot < 0.95f) cut = 1;
+        }
+        for (int q = 0; q < 3; q++) { s_glrEye[q] = eye[q]; s_glrFwd[q] = fwd[q]; }
+        s_glrHave = 1;
+    }
+    if (cut) {                                                           /* группы видимого - с нуля, места - сразу */
+        for (int t = 0; t < GLR_N; t++) if (s_glr[t].alive && !s_glr[t].fix) gl_room_kill(t);
+        if (s_glrInst < 3) s_glrInst = 3;
+    }
+    const int inst = s_glrInst > 0;
+    /* свет светильников по мешу: треугольники, которые обход рисует (td), лицом к камере или двусторонние
+     * (лицо: знак det(V2R) × (n · (p0 - глаз)) >= 0 - как у отсечения изнанки в обходе) */
+    gl_room_mesh(vr, gen);
+    const float det = V2R[0] * (V2R[5] * V2R[10] - V2R[6] * V2R[9]) - V2R[1] * (V2R[4] * V2R[10] - V2R[6] * V2R[8])
+                    + V2R[2] * (V2R[4] * V2R[9] - V2R[5] * V2R[8]);
+    const float sg = det < 0.f ? -1.f : 1.f;
+    const float eye[3] = { V2R[3], V2R[7], V2R[11] };
+    static float fA[GLR_FIX], fC[GLR_FIX][3], fA2[GLR_FIX], fC2[GLR_FIX][3];
+    for (int f = 0; f < nf; f++) { fA[f] = fA2[f] = 0.f; for (int q = 0; q < 3; q++) fC[f][q] = fC2[f][q] = 0.f; }
+    for (int i = 0; i < s_glrTn; i++) {
+        const GlRTri& M = s_glrT[i];
+        if (!M.ok || !td[i] || M.fix < 0 || M.fix >= nf) continue;
+        fA2[M.fix] += M.area;
+        for (int q = 0; q < 3; q++) fC2[M.fix][q] += M.col[q] * M.area;
+        const float d = M.n[0] * (M.p0[0] - eye[0]) + M.n[1] * (M.p0[1] - eye[1]) + M.n[2] * (M.p0[2] - eye[2]);
+        if (!M.two && sg * d < 0.f) continue;
+        fA[M.fix] += M.area;
+        for (int q = 0; q < 3; q++) fC[M.fix][q] += M.col[q] * M.area;
+    }
+    /* следы светильников - по ключу */
+    static int f2t[GLR_FIX], fcl[GLR_FIX];
+    for (int f = 0; f < nf; f++) { f2t[f] = -1; fcl[f] = -1; }
+    for (int t = 0; t < GLR_N; t++) {
+        GlRTrack& T = s_glr[t];
+        T.hit = 0; T.vis = 0;
+        if (!T.alive || !T.fix) continue;
+        T.fi = -1;
+        for (int f = 0; f < nf; f++) if (fxK[f] == T.fix && f2t[f] < 0) { f2t[f] = t; T.fi = f; break; }
+    }
+    auto take = [&](void) -> int {                                       /* свободный след; нет - самая слабая невидимая группа */
+        for (int t = 0; t < GLR_N; t++) if (!s_glr[t].alive) return t;
+        int best = -1; float wp = 1e30f;
+        for (int t = 0; t < GLR_N; t++) {
+            const GlRTrack& T = s_glr[t];
+            if (T.fix || T.hit) continue;
+            const float w = (T.slot >= 0 ? 10.f : 0.f) + T.peak * T.pw;
+            if (w < wp) { wp = w; best = t; }
+        }
+        if (best >= 0) gl_room_kill(best);
+        return best;
+    };
+    auto boxD2 = [&](const float* B, const float* p) -> float {          /* квадрат расстояния от точки до рамки */
+        float d2 = 0.f;
+        for (int q = 0; q < 3; q++) { const float o = p[q] < B[q] ? B[q] - p[q] : p[q] > B[3 + q] ? p[q] - B[3 + q] : 0.f; d2 += o * o; }
+        return d2;
+    };
+    /* новый след - у каждого светильника, которого рисует обход; группа видимого на его месте становится его следом
+     * (свет не гаснет и не входит заново), прочие группы там уходят */
+    for (int f = 0; f < nf; f++) {
+        if (f2t[f] >= 0 || !pres[f]) continue;
+        const float* B = fxB + f * 6;
+        int t = -1;
+        if (!inst) {
+            float bd = 250.f * 250.f;
+            for (int u = 0; u < GLR_N; u++) {
+                const GlRTrack& G = s_glr[u];
+                if (!G.alive || G.fix) continue;
+                const float d2 = boxD2(B, G.pos);
+                if (d2 < bd) { bd = d2; t = u; }
+            }
+        }
+        if (t >= 0) {
+            GlRTrack& T = s_glr[t];
+            if (lg >= 2) std::fprintf(stderr, "glowroom: group #%d -> fixture F%d%c", T.id, f, 10);
+            T.fix = fxK[f]; T.meshOk = 0; T.drop = 0;
+        } else {
+            t = take();
+            if (t < 0) break;
+            GlRTrack& T = s_glr[t];
+            memset(&T, 0, sizeof T);
+            T.alive = 1; T.id = s_glrNextId++; T.fix = fxK[f]; T.slot = -1;
+            T.fade = 1.f; T.pw = inst ? 1.f : 0.f; T.seen = T.lastOn = T.judged = now;
+            for (int q = 0; q < 3; q++) T.pos[q] = fxC[f * 4 + q];
+            if (lg >= 2) std::fprintf(stderr, "glowroom: new #%d F%d at %.0f,%.0f,%.0f area %.0f%s%c", T.id, f, fxC[f * 4], fxC[f * 4 + 1],
+                                      fxC[f * 4 + 2], fxC[f * 4 + 3], inst ? " (instant)" : "", 10);
+        }
+        s_glr[t].fi = f; f2t[f] = t;
+        if (!inst)
+            for (int u = 0; u < GLR_N; u++) {
+                GlRTrack& G = s_glr[u];
+                if (G.alive && !G.fix && !G.drop && boxD2(B, G.pos) < 250.f * 250.f) G.drop = 1;
+            }
+    }
+    /* свет светильника - по мешу (лицом к камере; первый взгляд изнанкой - по всем его треугольникам); присутствие - обход */
+    for (int f = 0; f < nf; f++) {
+        const int t = f2t[f];
+        if (t < 0) continue;
+        GlRTrack& T = s_glr[t];
+        const float* C = fxC + f * 4;
+        const float ap = inst ? 1.f : aE;
+        for (int q = 0; q < 3; q++) T.pos[q] += (C[q] - T.pos[q]) * ap;
+        float A = fA[f]; const float* S = fC[f];
+        if (A < 1.f && !T.meshOk) { A = fA2[f]; S = fC2[f]; }
+        if (A >= 1.f) {
+            const float sz = sqrtf(A) / 300.f;
+            const float ki = sz < 0.35f ? 0.35f : (sz > 1.5f ? 1.5f : sz), kr = sz < 0.6f ? 0.6f : (sz > 1.6f ? 1.6f : sz);
+            const float a = (inst || !T.meshOk) ? 1.f : aE;
+            for (int q = 0; q < 3; q++) T.e[q] += (S[q] / A * ki / 255.f - T.e[q]) * a;
+            T.ki += (ki - T.ki) * a; T.kr += (kr - T.kr) * a;
+            if (!T.meshOk) { for (int q = 0; q < 3; q++) T.fast[q] = T.e[q]; T.meshOk = 1; }
+        }
+        if (pres[f]) T.pw = inst ? 1.f : (T.pw + dt / 0.3f > 1.f ? 1.f : T.pw + dt / 0.3f);
+        else T.pw = inst ? 0.f : (T.pw - dt / 0.3f < 0.f ? 0.f : T.pw - dt / 0.3f);
+    }
+    for (int t = 0; t < GLR_N; t++) {                                    /* светильника больше нет в таблице - уходит */
+        GlRTrack& T = s_glr[t];
+        if (T.alive && T.fix && T.fi < 0) T.pw = inst ? 0.f : (T.pw - dt / 0.3f < 0.f ? 0.f : T.pw - dt / 0.3f);
+    }
+    /* поток кадра: у светильника - мигание и тёмная фаза; прочее - группы видимого, как у gl_steady_out */
+    enum { GLR_C = 160 };
+    int ord[GLR_C]; float en[GLR_C][3], enm[GLR_C], kin[GLR_C], krn[GLR_C];
+    const int nc = ncl < GLR_C ? ncl : GLR_C;
+    for (int c = 0; c < nc; c++) {
+        const double A = cl[c].a;
+        const double sz = sqrt(A) / 300.0;
+        kin[c] = (float)(sz < 0.35 ? 0.35 : sz > 1.5 ? 1.5 : sz);
+        krn[c] = (float)(sz < 0.6 ? 0.6 : sz > 1.6 ? 1.6 : sz);
+        for (int q = 0; q < 3; q++) en[c][q] = (float)(cl[c].c[q] / A) * kin[c] / 255.f;
+        enm[c] = gl_max3(en[c]); ord[c] = c;
+    }
+    for (int a = 1; a < nc; a++) { const int k = ord[a]; int b = a - 1; while (b >= 0 && enm[ord[b]] < enm[k]) { ord[b + 1] = ord[b]; b--; } ord[b + 1] = k; }
+    for (int oi = 0; oi < nc; oi++) {
+        const int c = ord[oi];
+        const double A = cl[c].a;
+        const int f = cl[c].fi;
+        if (cl[c].fix && f >= 0 && f < nf && pres[f] && f2t[f] >= 0 && !s_glr[f2t[f]].hit) {
+            GlRTrack& T = s_glr[f2t[f]];
+            if (!T.meshOk) {                                             /* по мешу цвета нет (тексели не взялись) - по потоку */
+                const float a = gl_max3(T.e) > 0.f ? aE : 1.f;
+                for (int q = 0; q < 3; q++) T.e[q] += (en[c][q] - T.e[q]) * a;
+                T.ki += (kin[c] - T.ki) * a; T.kr += (krn[c] - T.kr) * a;
+            }
+            for (int q = 0; q < 3; q++) T.fast[q] += ((float)(cl[c].c[q] / A) * T.ki / 255.f - T.fast[q]) * aFast;
+            if (T.miss) { T.miss = 0; if (T.blinks < 1000) T.blinks++; }   /* пропадала и вернулась - мигает */
+            T.fade = inst ? 1.f : (T.fade + dt / 0.3f > 1.f ? 1.f : T.fade + dt / 0.3f);
+            T.seen = T.lastOn = T.judged = now; T.hit = 1; T.vis = 1;
+            fcl[f] = c;
+            continue;
+        }
+        const float vw[3] = { (float)(cl[c].p[0] / A), (float)(cl[c].p[1] / A), (float)(cl[c].p[2] / A) };
+        float rp[3]; gl_xf(V2R, vw, rp);
+        int best = -1; float bd = 600.f * 600.f;
+        for (int t = 0; t < GLR_N; t++) {
+            const GlRTrack& T = s_glr[t];
+            if (!T.alive || T.hit || T.fix) continue;
+            const float dx = T.pos[0] - rp[0], dy = T.pos[1] - rp[1], dz = T.pos[2] - rp[2], d = dx * dx + dy * dy + dz * dz;
+            if (d < bd) { bd = d; best = t; }
+        }
+        if (best < 0) {
+            best = take();
+            if (best < 0) continue;
+            GlRTrack& T = s_glr[best];
+            memset(&T, 0, sizeof T);
+            T.alive = 1; T.hit = 1; T.vis = 1; T.id = s_glrNextId++; T.fi = -1; T.slot = -1; T.seen = T.lastOn = T.judged = now;
+            for (int q = 0; q < 3; q++) { T.pos[q] = rp[q]; T.e[q] = en[c][q]; T.fast[q] = en[c][q]; }
+            T.ki = kin[c]; T.kr = krn[c]; T.peak = enm[c]; T.fade = 1.f; T.pw = inst ? 1.f : 0.f;
+            continue;
+        }
+        GlRTrack& T = s_glr[best];
+        for (int q = 0; q < 3; q++) { T.pos[q] += (rp[q] - T.pos[q]) * 0.35f; T.fast[q] += (en[c][q] - T.fast[q]) * aFast; }
+        if (T.miss) { T.miss = 0; if (T.blinks < 1000) T.blinks++; }
+        T.fade = 1.f;
+        float pk = (now - T.lastOn > hold) ? T.peak * kDim : T.peak;
+        if (enm[c] > pk) pk = enm[c];
+        if (enm[c] >= 0.85f * pk) {
+            for (int q = 0; q < 3; q++) T.e[q] += (en[c][q] - T.e[q]) * 0.5f;
+            T.kr += (krn[c] - T.kr) * 0.5f;
+            T.lastOn = now;
+        }
+        T.peak = pk; T.seen = T.judged = now; T.hit = 1; T.vis = 1;
+        if (!T.drop) T.pw = inst ? 1.f : (T.pw + dt / 0.25f > 1.f ? 1.f : T.pw + dt / 0.25f);
+    }
+    /* следы без лампы в потоке. Светильник: целиком в кадре, лицом, обход рисует - а в потоке нет: тёмная фаза (немигавший
+     * гаснет за 0.15 с, мигавший держится hold); иначе судить нельзя - свет как был. Группа: место в кадре - как у
+     * gl_steady_out; за краем кадра свет держится до 10 с */
+    float sx0 = 1e30f, sx1 = -1e30f, sy0 = 1e30f, sy1 = -1e30f; int haveB = 0;
+    auto centerIn = [&](const float* pos) -> int {                       /* точка в кадре, отступ 5 % внутрь */
+        float v[3]; gl_xf(R2V, pos, v);
+        if (v[2] <= 50.f) return 0;
+        if (s_glFrOk) {
+            const float x = v[0] / v[2], y = v[1] / v[2], mx = (s_glFr[1] - s_glFr[0]) * 0.05f, my = (s_glFr[3] - s_glFr[2]) * 0.05f;
+            return x >= s_glFr[0] + mx && x <= s_glFr[1] - mx && y >= s_glFr[2] + my && y <= s_glFr[3] - my;
+        }
+        if (!haveB) {                                                    /* нет пирамиды - рамка 3D-кадра по вершинам потока */
+            haveB = 1;
+            for (int i = 0; i < s_nverts; i++) {
+                const float* w = s_vmap + (size_t)i * VERT_FLOATS;
+                if (w[12] < 1.5f) continue;
+                if (w[0] < sx0) sx0 = w[0];
+                if (w[0] > sx1) sx1 = w[0];
+                if (w[1] < sy0) sy0 = w[1];
+                if (w[1] > sy1) sy1 = w[1];
+            }
+        }
+        if (sx1 <= sx0 || sy1 <= sy0) return 0;
+        const float sx = v[0] * s_shWp[3] / v[2] + s_shWp[0], sy = v[1] * s_shWp[2] / v[2] + s_shWp[1];
+        const float mx = (sx1 - sx0) * 0.05f, my = (sy1 - sy0) * 0.05f;
+        return sx >= sx0 + mx && sx <= sx1 - mx && sy >= sy0 + my && sy <= sy1 - my;
+    };
+    auto boxIn = [&](int f) -> int {                                     /* рамка светильника целиком в кадре */
+        if (!s_glFrOk) return 0;
+        const float* B = fxB + f * 6;
+        for (int k = 0; k < 8; k++) {
+            const float p[3] = { B[(k & 1) ? 3 : 0], B[(k & 2) ? 4 : 1], B[(k & 4) ? 5 : 2] };
+            float v[3]; gl_xf(R2V, p, v);
+            if (v[2] <= 50.f) return 0;
+            const float x = v[0] / v[2], y = v[1] / v[2];
+            if (x < s_glFr[0] || x > s_glFr[1] || y < s_glFr[2] || y > s_glFr[3]) return 0;
+        }
+        return 1;
+    };
+    for (int t = 0; t < GLR_N; t++) {
+        GlRTrack& T = s_glr[t];
+        if (!T.alive || T.hit) continue;
+        if (T.fix) {
+            const int f = T.fi;
+            if (f >= 0 && pres[f] && fA[f] >= 1.f && boxIn(f)) {
+                T.vis = 2;
+                for (int q = 0; q < 3; q++) T.fast[q] -= T.fast[q] * aFast;
+                T.miss = 1;
+                if (!T.blinks || now - T.lastOn > hold) T.fade *= kGone;
+            } else T.lastOn = now;                                       /* не видно - считаем горящей: вернётся в кадр - не мигнёт */
+            if (T.pw <= 0.f && (f < 0 || !pres[f])) gl_room_kill(t);
+            continue;
+        }
+        if (centerIn(T.pos)) {
+            const float age = (float)(now - T.judged);
+            T.vis = 2;
+            for (int q = 0; q < 3; q++) T.fast[q] -= T.fast[q] * aFast;
+            T.miss = 1;
+            if (gl_fix_on() && !T.blinks) T.fade *= kGone;
+            else if (age > hold) T.peak *= kGone;
+            if (age > hold + 0.5f || T.peak < 0.002f) T.pw -= dt / 0.15f;
+        } else {
+            T.judged = now;
+            if (now - T.seen > 10.0) T.pw -= dt / 0.3f;
+        }
+        if (T.drop) T.pw -= dt / 0.3f;
+        if (T.pw <= 0.f) gl_room_kill(t);
+    }
+    /* свет следа, место в виде и важность: свет × близость к камере × доля шара света (или дымки, если он больше), задевающая
+     * пирамиду вида; лампе вне кадра - малая доля: место у неё есть, пока мест хватает, - вернётся в кадр уже горящей */
+    static float eo[GLR_N][3], vo[GLR_N][3], rr[GLR_N], reach[GLR_N], pri[GLR_N];
+    static unsigned char ro[GLR_N];
+    int cand[GLR_N], nt = 0;
+    for (int t = 0; t < GLR_N; t++) {
+        GlRTrack& T = s_glr[t];
+        T.want = 0; ro[t] = 0;
+        if (!T.alive) continue;
+        const float em = gl_max3(T.e), s = T.fix ? 1.f : (em > 1e-6f ? T.peak / em : 0.f);
+        for (int q = 0; q < 3; q++) { const float x = (T.e[q] * s * (1.f - flick) + T.fast[q] * flick) * T.fade * T.pw; eo[t][q] = x > 0.f ? x : 0.f; }
+        gl_xf(R2V, T.pos, vo[t]);
+        const float dd = (vo[t][0] * vo[t][0] + vo[t][1] * vo[t][1] + vo[t][2] * vo[t][2]) / (5000.f * 5000.f);
+        const float R = s_pp[PP_GL_LRAD] * T.kr, Rw = R * (s_pp[PP_VL_RAD] > 1.f ? s_pp[PP_VL_RAD] : 1.f), out = gl_room_outside(vo[t]);
+        const float m = gl_max3(eo[t]) / (1.f + dd);
+        rr[t] = R;
+        reach[t] = 1.f - gl_sstep(0.5f * Rw, Rw, out);
+        ro[t] = (unsigned char)(out < 1.5f * Rw);                        /* в GPU: свет или дымка достаёт до кадра (запас - кадр B) */
+        pri[t] = m * (reach[t] + 0.02f * (1.f - gl_sstep(Rw, 2.f * Rw, out)) + 0.001f);
+        if (m > 1e-6f) cand[nt++] = t;
+    }
+    for (int a = 1; a < nt; a++) {                                       /* по важности; у занявших место - с запасом 1.2 */
+        const int k = cand[a]; const float pk = pri[k] * (s_glr[k].slot >= 0 ? 1.2f : 1.f);
+        int b = a - 1;
+        while (b >= 0 && pri[cand[b]] * (s_glr[cand[b]].slot >= 0 ? 1.2f : 1.f) < pk) { cand[b + 1] = cand[b]; b--; }
+        cand[b + 1] = k;
+    }
+    const int nw = nt < GLR_OUT ? nt : GLR_OUT;
+    for (int k = 0; k < nw; k++) s_glr[cand[k]].want = 1;
+    /* места: доля света входит и уходит за RAMP; ушедший - место свободно */
+    for (int j = 0; j < GLR_OUT; j++) {
+        const int t = s_glrSlot[j];
+        if (t < 0) continue;
+        GlRTrack& T = s_glr[t];
+        if (!T.alive || T.slot != j) { s_glrSlot[j] = -1; continue; }
+        if (T.want) T.lw = inst ? 1.f : (T.lw + dt / RAMP > 1.f ? 1.f : T.lw + dt / RAMP);
+        else {
+            T.lw = inst ? 0.f : T.lw - dt / RAMP;
+            if (T.lw <= 0.f) { T.lw = 0.f; T.slot = -1; s_glrSlot[j] = -1; }
+        }
+    }
+    for (int k = 0; k < nw; k++) {                                       /* новым - первое свободное место */
+        const int t = cand[k];
+        GlRTrack& T = s_glr[t];
+        if (T.slot >= 0) continue;
+        int j = -1;
+        for (int s = 0; s < GLR_OUT && j < 0; s++) if (s_glrSlot[s] < 0) j = s;
+        if (j < 0) break;
+        s_glrSlot[j] = t; T.slot = j; T.lw = inst ? 1.f : 0.f;
+    }
+    /* вывод в GPU - подряд, по порядку мест, только те, чей свет или дымка достаёт до кадра (прочие держат место, но растр и
+     * дымка их не перебирают); дымка - у всех по доле света (цвет уже × lw); пустое - нули (радиус 0 - растр, дымка и пыль его
+     * пропускают) */
+    int no = 0, nused = 0;
+    for (int j = 0; j < GLR_OUT; j++) {
+        const int t = s_glrSlot[j];
+        if (t < 0) continue;
+        nused++;
+        if (!ro[t]) continue;
+        const GlRTrack& T = s_glr[t];
+        float* gp = gl_slot_p(no);
+        float* gc = gl_slot_c(no);
+        gp[0] = vo[t][0]; gp[1] = vo[t][1]; gp[2] = vo[t][2]; gp[3] = rr[t];
+        for (int q = 0; q < 3; q++) gc[q] = eo[t][q] * s_pp[PP_GL_LSTR] * T.lw;
+        gc[3] = gl_chr_smooth() ? 0.25f : -1.25f;                       /* 28.09: знак < 0 - персонажи по граням, как было */
+        s_shUboMap[SH_UBO_GL3 + 128 + no] = 1.f;
+        no++;
+    }
+    for (int j = no; j < GLR_OUT; j++) {
+        float* gp = gl_slot_p(j);
+        float* gc = gl_slot_c(j);
+        gp[0] = gp[1] = gp[2] = gp[3] = 0.f; gc[0] = gc[1] = gc[2] = gc[3] = 0.f;
+        s_shUboMap[SH_UBO_GL3 + 128 + j] = 0.f;
+    }
+    gl_set_count(no);
+    if (lg >= 2) {
+        char buf[6000]; int p = 0, npres = 0, ntr = 0;
+        for (int f = 0; f < nf; f++) npres += pres[f];
+        for (int t = 0; t < GLR_N; t++) ntr += s_glr[t].alive;
+        p += snprintf(buf + p, sizeof buf - p, "glowroom2: t=%.3f fixtures %d present %d tracks %d walk %d inst %d out %d gpu %d%s |",
+                      now, nf, npres, ntr, walkAge, s_glrInst, nused, no, cut ? " SHOT CHANGE" : "");
+        for (int j = 0; j < GLR_OUT && p < (int)sizeof buf - 200; j++) {
+            const int t = s_glrSlot[j];
+            if (t < 0) continue;
+            const GlRTrack& T = s_glr[t];
+            char nm[16];
+            if (T.fix) snprintf(nm, sizeof nm, "F%d", T.fi); else snprintf(nm, sizeof nm, "grp");
+            p += snprintf(buf + p, sizeof buf - p, " s%d #%d %s e %.4f r %.2f lw %.2f g%d pw %.2f f %.2f %s;", j, T.id, nm,
+                          gl_max3(eo[t]) * s_pp[PP_GL_LSTR] * T.lw, reach[t], T.lw, (int)ro[t], T.pw, T.fade,
+                          T.vis == 1 ? "vis" : T.vis == 2 ? "held" : "out");
+        }
+        p += snprintf(buf + p, sizeof buf - p, " | no slot:");
+        for (int k = 0; k < nt && p < (int)sizeof buf - 40; k++) {
+            const GlRTrack& T = s_glr[cand[k]];
+            if (T.slot >= 0) continue;
+            p += snprintf(buf + p, sizeof buf - p, " #%d %.4f%s", T.id, pri[cand[k]], T.vis == 1 ? "v" : "");
+        }
+        std::fprintf(stderr, "%s%c", buf, 10);
+    }
+    if (lg >= 3 && (s_glrCal++ % 30) == 0)                               /* светильник целиком в кадре: поток против меша */
+        for (int f = 0; f < nf; f++) {
+            const int c = fcl[f];
+            if (c < 0 || !boxIn(f)) continue;
+            const double A = cl[c].a;
+            const float am = fA[f] > 0.f ? fA[f] : 1.f;
+            std::fprintf(stderr, "glowcal: F%d stream area %.0f color %.0f,%.0f,%.0f | mesh facing area %.0f color %.0f,%.0f,%.0f | drawn %.0f | fixture %.0f%c",
+                         f, A, cl[c].c[0] / A, cl[c].c[1] / A, cl[c].c[2] / A, fA[f], fC[f][0] / am, fC[f][1] / am, fC[f][2] / am,
+                         fA2[f], fxC[f * 4 + 3], 10);
+        }
+    if (s_glrInst > 0) s_glrInst--;
+    return no;
+}
 static void gl_lights_build(void) {
     s_glN = 0;
     if (!s_shUboMap) return;
     gl_set_count(0);
-    if (s_pp[PP_GL_LON] < 0.5f || !g_dc_gfx_materials || dc_orig_nogfx() || !s_vmap || s_nverts < 3 || s_shWp[3] == 0.f || s_shWp[2] == 0.f) return;
+    for (int j = 0; j < 32; j++) s_shUboMap[SH_UBO_GL3 + 128 + j] = j < 8 ? 1.f : 0.f;   /* 28.10: дымка - у первых 8, как было (gl_room_out пишет свою) */
+    if (s_pp[PP_GL_LON] < 0.5f || !g_dc_gfx_materials || dc_orig_nogfx() || !s_vmap || s_nverts < 3 || s_shWp[3] == 0.f || s_shWp[2] == 0.f) {
+        if (s_glrOn) gl_room_reset();
+        return;
+    }
     const unsigned short* vr = sw_vram_base();
-    if (!vr) return;
-    enum { GLC = 32 };
+    if (!vr) { if (s_glrOn) gl_room_reset(); return; }
+    enum { GLC = 160 };    /* 28.10: до 160 групп - все светильники кадра (gl_room_out); прежним путям - первые 32, как было */
     GlClus cl[GLC];
     int ncl = 0;
     const float MERGE = 800.f;
@@ -3466,6 +4061,11 @@ static void gl_lights_build(void) {
     if (tbN < 0) { const char* e = getenv("DC_GLOW_LIGHT_TESTBLINK"); tbN = e ? atoi(e) : 0; if (tbN < 2) tbN = 0;
                    if (tbN) std::fprintf(stderr, "glowlight: TEST - 'glows' lamps go out for %d of every %d frames (DC_GLOW_LIGHT_TESTBLINK)%c", tbN / 2, tbN, 10); }
     const int tbOff = tbN ? (int)((tbK++ % tbN) >= tbN - tbN / 2) : 0;
+    /* 27.10: светильники комнаты (pt_renderer.c «СВЕТИЛЬНИКИ ДЛЯ СВЕТА ОТ СВЕТЯЩИХСЯ ТЕКСТУР»): треугольник у рамки светильника
+     * (до 250 ед.) - в его группу; нужны матрицы «вид -> комната» этого кадра (dc_vol_frame) и ровный свет */
+    const float *fxC = nullptr, *fxB = nullptr; const unsigned* fxK = nullptr;
+    const int nfx = (gl_fix_on() && s_pp[PP_GL_LSTEADY] > 0.5f && s_shUboMap[259] > 0.5f) ? dc_glow_fixtures(&fxC, &fxB, &fxK) : 0;
+    const float* V2R = s_shUboMap + 260;
     for (int i = 0; i + 2 < s_nverts; i += 3) {
         const float* v0 = s_vmap + (size_t)i * VERT_FLOATS;
         const int fl = (int)(v0[11] + 0.5f);
@@ -3490,7 +4090,7 @@ static void gl_lights_build(void) {
         if (area < 1.f) continue;
         const float cen[3] = { (P[0][0] + P[1][0] + P[2][0]) / 3.f, (P[0][1] + P[1][1] + P[2][1]) / 3.f, (P[0][2] + P[1][2] + P[2][2]) / 3.f };
         /* цвет самой текстуры: вершины окна UV, середины рёбер и центр (прозрачные тексели мимо) */
-        const int tp = tpf & 0x1FF, cxl = (int)(v0[9] + 0.5f) & 0x3FF, cyl = (int)(v0[10] + 0.5f) & 0x3FF;
+        const int tp = gl_lane_page(v0[8]), cxl = (int)(v0[9] + 0.5f) & 0x3FF, cyl = (int)(v0[10] + 0.5f) & 0x3FF;
         const float* va = v0; const float* vb = v0 + VERT_FLOATS; const float* vc_ = v0 + 2 * VERT_FLOATS;
         const float uvs[7][2] = { { va[2], va[3] }, { vb[2], vb[3] }, { vc_[2], vc_[3] },
                                   { (va[2] + vb[2]) * 0.5f, (va[3] + vb[3]) * 0.5f }, { (vb[2] + vc_[2]) * 0.5f, (vb[3] + vc_[3]) * 0.5f },
@@ -3519,30 +4119,67 @@ static void gl_lights_build(void) {
             }
         }
         const float lum = (col[0] > col[1] ? (col[0] > col[2] ? col[0] : col[2]) : (col[1] > col[2] ? col[1] : col[2])) / 255.f;
-        int k = -1;
-        for (int c = 0; c < ncl; c++) {
-            const double cxp = cl[c].p[0] / cl[c].a, cyp = cl[c].p[1] / cl[c].a, czp = cl[c].p[2] / cl[c].a;
-            const double dx = cen[0] - cxp, dy = cen[1] - cyp, dz = cen[2] - czp;
-            if (dx * dx + dy * dy + dz * dz < (double)MERGE * MERGE) { k = c; break; }
+        int k = -1, fi = -1;
+        if (nfx > 0) {                                                  /* 27.10: ближайший по рамке светильник, внутри - ближайший центр */
+            float rc[3]; gl_xf(V2R, cen, rc);
+            float bdd = 0.f, bcc = 0.f;
+            for (int f = 0; f < nfx; f++) {
+                const float* B = fxB + f * 6;
+                float d2 = 0.f;
+                for (int q = 0; q < 3; q++) { const float o = rc[q] < B[q] ? B[q] - rc[q] : rc[q] > B[3 + q] ? rc[q] - B[3 + q] : 0.f; d2 += o * o; }
+                if (d2 > 250.f * 250.f) continue;
+                const float* C = fxC + f * 4;
+                const float cc = (rc[0] - C[0]) * (rc[0] - C[0]) + (rc[1] - C[1]) * (rc[1] - C[1]) + (rc[2] - C[2]) * (rc[2] - C[2]);
+                if (fi < 0 || d2 < bdd || (d2 == bdd && cc < bcc)) { bdd = d2; bcc = cc; fi = f; }
+            }
+        }
+        if (fi >= 0) {
+            for (int c = 0; c < ncl; c++) if (cl[c].fix == fxK[fi]) { k = c; break; }
+        } else {
+            for (int c = 0; c < ncl; c++) {
+                if (cl[c].fix) continue;                                /* 27.10: группы видимого - без светильников */
+                const double cxp = cl[c].p[0] / cl[c].a, cyp = cl[c].p[1] / cl[c].a, czp = cl[c].p[2] / cl[c].a;
+                const double dx = cen[0] - cxp, dy = cen[1] - cyp, dz = cen[2] - czp;
+                if (dx * dx + dy * dy + dz * dz < (double)MERGE * MERGE) { k = c; break; }
+            }
         }
         if (k < 0) {
             if (ncl >= GLC) continue;
             k = ncl++;
-            for (int q = 0; q < 3; q++) { cl[k].p[q] = 0.0; cl[k].c[q] = 0.0; }
+            for (int q = 0; q < 3; q++) { cl[k].p[q] = 0.0; cl[k].c[q] = 0.0; cl[k].fc[q] = fi >= 0 ? fxC[fi * 4 + q] : 0.f; }
             cl[k].a = 0.0; cl[k].lum = 0.0;
+            cl[k].fix = fi >= 0 ? fxK[fi] : 0u; cl[k].fa = fi >= 0 ? fxC[fi * 4 + 3] : 0.f; cl[k].fi = fi;
         }
         for (int q = 0; q < 3; q++) { cl[k].p[q] += (double)cen[q] * area; cl[k].c[q] += (double)col[q] * area; }
         cl[k].a += area; cl[k].lum += (double)lum * area;
     }
+    const int ncl32 = ncl < 32 ? ncl : 32;
     static int lg = -1; static long k2 = 0;
     if (lg < 0) { const char* e = getenv("DC_GLOW_LIGHT_LOG"); lg = (e && *e >= '1' && *e <= '9') ? *e - '0' : 0; }
     /* 27.09: ровный свет мигающих ламп — вывод через следы (выше); выкл — как было */
     if (s_pp[PP_GL_LSTEADY] > 0.5f) {
-        const int n = gl_steady_out(cl, ncl);
+        if (nfx > 0) {   /* 28.10: пока комнату рисует обход растра - все лампы комнаты сразу (gl_room_out) */
+            static unsigned char pres[GLR_FIX], td[GLR_TRI]; static long wsLast = -1; static int wsAge = 1000;
+            long ws = 0; unsigned fg = 0;
+            const int np = dc_glow_fixture_present(pres, GLR_FIX, td, GLR_TRI, &ws, &fg);
+            if (ws != wsLast) { wsLast = ws; wsAge = 0; } else if (wsAge < 1000) wsAge++;
+            int npres = 0;
+            for (int f = 0; f < np; f++) npres += pres[f];
+            if (np > 0 && npres > 0 && wsAge <= 10) {
+                if (!s_glrOn) gl_steady_reset();
+                const int n = gl_room_out(cl, ncl, vr, fxC, fxB, fxK, np, pres, td, fg, wsAge);
+                s_glN = n;
+                if (lg && (++k2 % 120) == 1)
+                    std::fprintf(stderr, "glowlight: %d sources (room mode: %d fixtures, %d drawn by the walk; %d groups)%c", n, np, npres, ncl, 10);
+                return;
+            }
+        }
+        if (s_glrOn) gl_room_reset();
+        const int n = gl_steady_out(cl, ncl32);
         gl_set_count(n);
         s_glN = n;
         if (lg && (++k2 % 120) == 1) {
-            std::fprintf(stderr, "glowlight: %d sources (%d groups), steady light for blinking ones%c", n, ncl, 10);
+            std::fprintf(stderr, "glowlight: %d sources (%d groups), steady light for blinking ones%c", n, ncl32, 10);
             for (int j = 0; j < n; j++) {
                 const float *gp = gl_slot_p(j), *gc = gl_slot_c(j);
                 std::fprintf(stderr, "   #%d at %.0f,%.0f,%.0f radius %.0f color %.2f,%.2f,%.2f%c", j, gp[0], gp[1], gp[2], gp[3],
@@ -3551,21 +4188,22 @@ static void gl_lights_build(void) {
         }
         return;
     }
+    if (s_glrOn) gl_room_reset();
     gl_steady_reset();
     /* до 8 самых заметных: средняя яркость × размер (корень площади, как у силы света ниже) и ближе к камере — важнее:
      * мелкая яркая табличка рядом значит больше, чем ряд тусклых плафонов в конце комнаты */
     int ord[GLC]; double pri[GLC];
-    for (int c = 0; c < ncl; c++) {
+    for (int c = 0; c < ncl32; c++) {
         ord[c] = c;
         const double A = cl[c].a, mx = cl[c].p[0] / A, my = cl[c].p[1] / A, mz = cl[c].p[2] / A;
         double sz = sqrt(A) / 300.0; if (sz < 0.35) sz = 0.35; if (sz > 1.5) sz = 1.5;
         const double dd = (mx * mx + my * my + mz * mz) / (5000.0 * 5000.0);
         pri[c] = (cl[c].lum / A) * sz / (1.0 + dd);
     }
-    for (int a = 0; a < ncl; a++)
-        for (int b2 = a + 1; b2 < ncl; b2++)
+    for (int a = 0; a < ncl32; a++)
+        for (int b2 = a + 1; b2 < ncl32; b2++)
             if (pri[ord[b2]] > pri[ord[a]]) { const int tt = ord[a]; ord[a] = ord[b2]; ord[b2] = tt; }
-    const int n = ncl < 8 ? ncl : 8;
+    const int n = ncl32 < 8 ? ncl32 : 8;
     for (int j = 0; j < n; j++) {
         const int c = ord[j];
         const double A = cl[c].a;
@@ -3583,7 +4221,7 @@ static void gl_lights_build(void) {
     gl_set_count(n);
     s_glN = n;
     if (lg && (++k2 % 120) == 1) {
-        std::fprintf(stderr, "glowlight: %d sources (%d groups)%c", n, ncl, 10);
+        std::fprintf(stderr, "glowlight: %d sources (%d groups)%c", n, ncl32, 10);
         for (int j = 0; j < n; j++)
             std::fprintf(stderr, "   #%d at %.0f,%.0f,%.0f radius %.0f color %.2f,%.2f,%.2f%c", j, s_shUboMap[144 + j * 4],
                          s_shUboMap[145 + j * 4], s_shUboMap[146 + j * 4], s_shUboMap[147 + j * 4],
@@ -3594,7 +4232,7 @@ static void gl_lights_build(void) {
         char buf[1024]; int p = 0; float sum = 0.f;
         for (int j = 0; j < n; j++) { const float* g = s_shUboMap + 176 + j * 4; sum += g[0] > g[1] ? (g[0] > g[2] ? g[0] : g[2]) : (g[1] > g[2] ? g[1] : g[2]); }
         p += snprintf(buf + p, sizeof buf - p, "glowlight2: t=%.3f as before groups %d out %d sum %.4f |",
-                      (double)qc.QuadPart / (double)qf.QuadPart, ncl, n, sum);
+                      (double)qc.QuadPart / (double)qf.QuadPart, ncl32, n, sum);
         for (int j = 0; j < n && p < (int)sizeof buf - 60; j++) {
             const float* g = s_shUboMap + 176 + j * 4;
             p += snprintf(buf + p, sizeof buf - p, " %.3f at %.0f,%.0f,%.0f;", g[0] > g[1] ? (g[0] > g[2] ? g[0] : g[2]) : (g[1] > g[2] ? g[1] : g[2]),
@@ -4202,6 +4840,12 @@ static bool buildFixed() {
         snprintf(s_rasterErr, sizeof s_rasterErr, "no memory for the second vertex stream"); return false;
     }
     for (size_t i = 0; i < (size_t)MAX_VERTS; i++) { s_rvMap[i * 4] = -1.f; s_rvMap[i * 4 + 1] = s_rvMap[i * 4 + 2] = s_rvMap[i * 4 + 3] = 0.f; }
+    /* 26.10.2026: третий поток - метка куска (пары кусков), 0 - нет */
+    if (!makeBufStream((VkDeviceSize)MAX_VERTS * sizeof(uint32_t),
+                       &s_pvBuf, &s_pvMem, (void**)&s_pvMap, "pair tag stream") || !s_pvMap) {
+        snprintf(s_rasterErr, sizeof s_rasterErr, "no memory for the pair tag stream"); return false;
+    }
+    memset(s_pvMap, 0, (size_t)MAX_VERTS * sizeof(uint32_t));
     if (!trep_gpu_init()) {
         rlog("[VKR] texture replacement init failed\n");
         snprintf(s_rasterErr, sizeof s_rasterErr, "the texture array could not be set up"); return false;
@@ -4695,7 +5339,10 @@ static int raster_init_impl(void) {
     s_log = dc_diag_log() ? fopen("dcvk_raster.txt", "w") : nullptr;
     s_rlogMirror = 1;                /* 23.10.2026: the bring-up into the game's log too (rlog) */
     C = ptvk_core_acquire();
-    if (!C) { rlog("[VKR] core acquire FAILED\n"); s_rlogMirror = 0; return 0; }
+    if (!C) {   /* 26.10.2026: the window shows the core's own reason first (ptvk_last_error); this only if it gave none */
+        snprintf(s_rasterErr, sizeof s_rasterErr, "the Vulkan core of the renderer could not start");
+        rlog("[VKR] core acquire FAILED\n"); s_rlogMirror = 0; return 0;
+    }
     pc_load();                       /* 11.10: кэш конвейеров - до первой сборки */
     if (!buildFixed()) { std::fprintf(stderr, "raster: bring-up FAILED%c", 10); s_rlogMirror = 0; return 0; }
     s_draws.reserve(512);
@@ -5931,13 +6578,18 @@ static void dcvk_push_tri_raw(const float* v, int semi_mode, int ztest);
 
 #define NC_NEAR 2.0f     /* view units; our raster has no divider to saturate */
 
-struct NCv { float x, y, z, u, vv, r, g, b; };   /* x,y = VIEW space; z = depth */
+struct NCv { float x, y, z, u, vv, r, g, b; uint32_t tag; };   /* x,y = VIEW space; z = depth; 26.10: метка куска */
+
+/* 26.10.2026: метки кусков следующего треугольника (gpu_sw_renderer.c - вокруг dcvk_push_tri; пишет dcvk_push_tri_raw) */
+static uint32_t s_pairTri[3] = { 0u, 0u, 0u };
+extern "C" void dcvk_pair_next(const unsigned* pq) { for (int i = 0; i < 3; i++) s_pairTri[i] = pq ? (uint32_t)pq[i] : 0u; }
 
 static void nc_mix(NCv& o, const NCv& a, const NCv& b, float t) {
     o.x = a.x + (b.x - a.x) * t;   o.y  = a.y  + (b.y  - a.y)  * t;
     o.z = a.z + (b.z - a.z) * t;   o.u  = a.u  + (b.u  - a.u)  * t;
     o.vv= a.vv+ (b.vv- a.vv)* t;   o.r  = a.r  + (b.r  - a.r)  * t;
     o.g = a.g + (b.g - a.g) * t;   o.b  = a.b  + (b.b  - a.b)  * t;
+    o.tag = a.tag;                 /* точка на ребре - метка той вершины, что перед камерой (вызывающий) */
 }
 
 /* ---- INTERFACE SQUEEZE (2026-09-02) ---------------------------------------
@@ -6746,6 +7398,7 @@ extern "C" void dcvk_push_tri(const float* v, int semi_mode, int ztest) {
         in[i].y = (s[1] - oy) * z / H;
         in[i].u = s[2]; in[i].vv = s[3];
         in[i].r = s[4]; in[i].g = s[5]; in[i].b = s[6];
+        in[i].tag = s_pairTri[i];
     }
 
     NCv poly[4];
@@ -6755,9 +7408,10 @@ extern "C" void dcvk_push_tri(const float* v, int semi_mode, int ztest) {
         const NCv& b = in[(i + 1) % 3];
         float da = a.z - NC_NEAR, db = b.z - NC_NEAR;
         if (da >= 0.0f && n < 4) poly[n++] = a;
-        if ((da < 0.0f) != (db < 0.0f) && n < 4) nc_mix(poly[n++], a, b, da / (da - db));
+        if ((da < 0.0f) != (db < 0.0f) && n < 4) { nc_mix(poly[n], a, b, da / (da - db)); poly[n].tag = (da >= 0.0f) ? a.tag : b.tag; n++; }
     }
     if (n < 3) { if (ACTOR_TRI(v)) s_alost_short++; return; }
+    const uint32_t pin[3] = { s_pairTri[0], s_pairTri[1], s_pairTri[2] };   /* 26.10: метки - у каждого куска обрезки свои */
 
     /* per-primitive lanes (texture page, clut, flags) belong to the whole
      * triangle, so they come across untouched */
@@ -6773,9 +7427,11 @@ extern "C" void dcvk_push_tri(const float* v, int semi_mode, int ztest) {
             o[4] = p.r;  o[5] = p.g;  o[6] = p.b;  o[7] = 0.0f;
             o[8] = v[8]; o[9] = v[9]; o[10] = v[10]; o[11] = v[11];
             o[12] = p.z;
+            s_pairTri[j] = p.tag;
         }
         { const int n0m = s_nverts; dcvk_push_tri_raw(out, semi_mode, ztest); m43reg(n0m); }
     }
+    for (int j = 0; j < 3; j++) s_pairTri[j] = pin[j];
     { static long n_clip = 0, last = -1;
       static int stat = -1;
       if (stat < 0) { const char* e = ::getenv("DC_NCSTAT"); stat = (e && *e == '1') ? 1 : 0; }
@@ -6849,6 +7505,8 @@ static void dcvk_push_tri_raw(const float* v, int semi_mode, int ztest) {
     memcpy(s_vmap + (size_t)s_nverts * VERT_FLOATS, v,
            3 * VERT_FLOATS * sizeof(float));
     trep_tri(v, s_rvMap + (size_t)s_nverts * 4);   /* 05.10: текстура PNG из mods (−1 — родная) */
+    /* 26.10.2026: метки кусков (пары кусков) - только у треугольников игры с глубиной; повтор мигающих - без меток */
+    if (s_pvMap) for (int i = 0; i < 3; i++) s_pvMap[(size_t)s_nverts + (size_t)i] = (ztest && !s_fuse_replaying) ? s_pairTri[i] : 0u;
     /* 12.10.2026: блеск предметов - место вдоль диагонали предмета (pt_renderer.c rl_glint_*: цвет-альфа 16..17) в четвёртое
      * число второго буфера (шейдер - v_glint 1..2); цвет-альфу ниже перепишет номер вывода */
     for (int i = 0; i < 3; i++) { const float gq = v[i * VERT_FLOATS + 7];
@@ -7132,14 +7790,23 @@ struct WarpSnap {
     unsigned long long frame = 0;
     int vcopy = 0;                         /* 25.10: вершины кадра скопированы в s_wsVb / s_wsRv */
     std::vector<MeshRef> mrefs;            /* 25.10: меши его draw (Draw::mref) */
+    int pairs = 0;                         /* 26.10: пары кусков собраны (s_pairSet, pair_build) */
 };
 static WarpSnap s_wsnap;
+/* 26.10.2026: пары кусков (gte.cpp - учёт проекций по проходам; сборка - pair_build у warp_pc_make) */
+extern "C" int g_dc_pair_track, g_dc_dma_pass, g_dc_pass_id;
+extern "C" int dc_pair_pass_get(int pass, int* nproj);
+extern "C" int dc_pair_run_get(int pass, int i, uint32_t* key, int* n, double M[9], double t[3]);
+extern "C" int dc_pair_vetoed(int passA);   /* gte.cpp: у кадров между тактами A -> A+1 пар нет (pt_renderer.c, смена ракурса в сцене) */
+static int pair_build(int passA, unsigned long long frame);
 /* ⭐ 25.10.2026 - КОПИЯ ВЕРШИН КАДРА A В ПАМЯТИ ВИДЕОКАРТЫ (поток показа, main.cpp DC_PRESENT_THREAD). Кадры между тактами
  * перерисовывают треугольники кадра A, а поток s_vbuf / s_rvBuf эмуляция следующего такта пишет с нуля. Здесь в конце кадра A
  * видеокарта копирует вершины кадра (s_nverts) в свои буферы - кадры между тактами (и кадр B) берут их оттуда, пока эмуляция
  * пишет новый поток. Включает main.cpp (dcvk_warp_copy_on); не вышло выделить - кадры между тактами остаются в главном потоке. */
 static VkBuffer       s_wsVb = VK_NULL_HANDLE, s_wsRv = VK_NULL_HANDLE;
 static VkDeviceMemory s_wsVbMem = VK_NULL_HANDLE, s_wsRvMem = VK_NULL_HANDLE;
+static VkBuffer       s_wsPv = VK_NULL_HANDLE;          /* 26.10: и метки кусков кадра A */
+static VkDeviceMemory s_wsPvMem = VK_NULL_HANDLE;
 static int s_wsCopyOn = 0, s_wsCopyState = 0;      /* состояние: 0 - не создавали, 1 - есть, -1 - не вышло */
 extern "C" void dcvk_warp_copy_on(int on) { s_wsCopyOn = on ? 1 : 0; }
 extern "C" int  dcvk_warp_copy_state(void) { return s_wsCopyState; }   /* 25.10: main.cpp pt_on - -1: копии нет, поток показа не включать */
@@ -7149,7 +7816,9 @@ static bool ws_copy_ready(void) {                  /* под замком вид
         const bool ok = makeBuf((VkDeviceSize)MAX_VERTS * VERT_FLOATS * sizeof(float), u, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                                 &s_wsVb, &s_wsVbMem, nullptr) &&
                         makeBuf((VkDeviceSize)MAX_VERTS * 4 * sizeof(float), u, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                                &s_wsRv, &s_wsRvMem, nullptr);
+                                &s_wsRv, &s_wsRvMem, nullptr) &&
+                        makeBuf((VkDeviceSize)MAX_VERTS * sizeof(uint32_t), u, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                &s_wsPv, &s_wsPvMem, nullptr);
         s_wsCopyState = ok ? 1 : -1;
         rlog("[VKR] frame A vertex copy for the present thread: %s\n", ok ? "on" : "failed, extras stay on the main thread");
     }
@@ -7802,6 +8471,12 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
         s_shWp[1] = g_pt_proj_ofy + (float)doy;
         s_shWp[2] = g_pt_proj_h;
         s_shWp[3] = g_pt_proj_h * dc_ws_sq();
+        /* 28.10: пирамида вида кадра A для gl_room_out (какой свет достаёт до кадра): края дисплея, как луч дымки */
+        s_glFrOk = s_shWp[2] != 0.f && s_shWp[3] != 0.f && dispW > 0 && dispH > 0;
+        if (s_glFrOk) {
+            s_glFr[0] = ((float)dispX - s_shWp[0]) / s_shWp[3]; s_glFr[1] = ((float)(dispX + dispW) - s_shWp[0]) / s_shWp[3];
+            s_glFr[2] = ((float)dispY - s_shWp[1]) / s_shWp[2]; s_glFr[3] = ((float)(dispY + dispH) - s_shWp[1]) / s_shWp[2];
+        }
         if (glLightFrame) gl_lights_build();        /* 25.09 поздно: источники света от светящихся текстур этого кадра */
         { static int fd = -1; static long nf = 0;       /* DC_SHCAM_DBG=1: шейдерная выкладка на CPU для вершин персонажа */
           if (fd < 0) { const char* e = getenv("DC_SHCAM_DBG"); fd = (e && *e == '1') ? 1 : 0; }
@@ -7892,6 +8567,7 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
         }
     } else { pp_ts(8); pp_ts(9); }
     pp_ts(4);                 /* 09.10: после заливок и теней (DC_VK_STAGES) */
+    if (s_shUboMap) s_shUboMap[664] = 0.f;   /* 26.10.2026: кадр A - без пар кусков (их ставит только кадр между тактами) */
     /* 10.10.2026 (DC_HZ): кадр A с камерой на момент показа - только кадр мира, как у снимка для кадра B */
     float wpcA[16]; int warpA = 0;
     if (s_frame_alpha > 0.001f && g_pt_proj_h > 0.f && !s_flat_frame && !s_frameCopy && !s_prev_copyflat && !s_mon_frame &&
@@ -7924,8 +8600,8 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
     VkRect2D sc{ { 0, 0 }, { (uint32_t)w, (uint32_t)h } };
     vkCmdSetViewport(s_cmd, 0, 1, &vpt);
     vkCmdSetScissor(s_cmd, 0, 1, &sc);
-    {   const VkBuffer vbs[2] = { s_vbuf, s_rvBuf }; const VkDeviceSize vofs[2] = { 0, 0 };   /* 05.10: + текстуры PNG из mods */
-        vkCmdBindVertexBuffers(s_cmd, 0, 2, vbs, vofs); }
+    {   const VkBuffer vbs[3] = { s_vbuf, s_rvBuf, s_pvBuf }; const VkDeviceSize vofs[3] = { 0, 0, 0 };   /* 05.10: + текстуры PNG из mods; 26.10: + метки кусков */
+        vkCmdBindVertexBuffers(s_cmd, 0, 3, vbs, vofs); }
     vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_plLay,
                             0, 1, &s_dset, 0, nullptr);
 
@@ -8119,6 +8795,7 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
                     const int nk = (int)(keepV.size() / VERT_FLOATS);
                     memcpy(s_vmap + (size_t)base * VERT_FLOATS, keepV.data(), keepV.size() * sizeof(float));
                     if (keepR.size() == (size_t)nk * 4) memcpy(s_rvMap + (size_t)base * 4, keepR.data(), keepR.size() * sizeof(float));
+                    if (s_pvMap) memset(s_pvMap + base, 0, (size_t)nk * sizeof(uint32_t));   /* 26.10: комната прошлого показа - без меток */
                     /* игра рисует кадры попеременно в две половины видеопамяти (y 0 / 256): копия лежит в половине
                      * ПРОШЛОГО показа — переносим её в показываемую сейчас (замер 23.09: без сдвига кадр показал то,
                      * что было на 256 строк ниже комнаты, — пол «из-под» картинки) */
@@ -8607,8 +9284,8 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
                 vkCmdPushConstants(s_cmd, s_plLay, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, pc);
                 medx_record(s_cmd, P[12], d);
                 bound = -1;
-                const VkBuffer vbsM[2] = { s_vbuf, s_rvBuf }; const VkDeviceSize vofsM[2] = { 0, 0 };
-                vkCmdBindVertexBuffers(s_cmd, 0, 2, vbsM, vofsM);
+                const VkBuffer vbsM[3] = { s_vbuf, s_rvBuf, s_pvBuf }; const VkDeviceSize vofsM[3] = { 0, 0, 0 };
+                vkCmdBindVertexBuffers(s_cmd, 0, 3, vbsM, vofsM);
             }
             continue;
         }
@@ -8726,8 +9403,10 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
     if (s_wsCopyOn && s_nverts > 0 && ws_copy_ready()) {
         const VkBufferCopy cv{ 0, 0, (VkDeviceSize)s_nverts * VERT_FLOATS * sizeof(float) };
         const VkBufferCopy cr{ 0, 0, (VkDeviceSize)s_nverts * 4 * sizeof(float) };
+        const VkBufferCopy cp{ 0, 0, (VkDeviceSize)s_nverts * sizeof(uint32_t) };
         vkCmdCopyBuffer(s_cmd, s_vbuf, s_wsVb, 1, &cv);
         vkCmdCopyBuffer(s_cmd, s_rvBuf, s_wsRv, 1, &cr);
+        vkCmdCopyBuffer(s_cmd, s_pvBuf, s_wsPv, 1, &cp);
         VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
         mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; mb.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
         vkCmdPipelineBarrier(s_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
@@ -8777,6 +9456,10 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
         }
         s_wsnap.vcopy = vcopy;
         s_wsnap.frame++;
+        s_wsnap.pairs = 0;                               /* 26.10: пары кусков кадра A и следующего такта (двери; main.cpp включает учёт) */
+        { static int pen = -1;
+          if (pen < 0) { const char* e = getenv("DC_PAIR_WARP"); pen = (e && *e == '0') ? 0 : 1; }
+          if (pen && g_dc_pair_track && s_wsnap.world) s_wsnap.pairs = pair_build(g_dc_dma_pass, s_wsnap.frame); }
     }
     if (s_prevImg && s_prevOnGpu) {
         s_prevValid = 1;
@@ -8886,6 +9569,12 @@ extern "C" int dcvk_warp_ready(void) {
     if (s_warp_en < 0) { const char* e = getenv("DC_FRAME_WARP"); s_warp_en = (e && *e == '0') ? 0 : 1; }
     return s_warp_en && s_wsnap.valid && !s_wsnap.dropped && s_wsnap.world && s_nverts == 0 && s_wsnap.nverts > 0 && s_vmap;
 }
+/* 26.10.2026: кадр B такта ещё не показан, а вершины кадра A - в копии (s_wsVb): главный поток рисует его и тогда, когда поток
+ * кадра уже пишет следующий кадр игры (придержанная или отложенная развёртка, main.cpp s_vb_held) */
+extern "C" int dcvk_warp_copy_ok(void) {
+    if (s_warp_en < 0) { const char* e = getenv("DC_FRAME_WARP"); s_warp_en = (e && *e == '0') ? 0 : 1; }
+    return s_warp_en && s_wsnap.valid && !s_wsnap.used && !s_wsnap.dropped && s_wsnap.world && s_wsnap.vcopy && s_wsnap.nverts > 0;
+}
 static const unsigned int* warp_render_impl(float alpha_in, int extra, const WarpIn* in_pt);
 extern "C" int dc_tank_warp_rigid(void);     /* 15.10: memory.c - камера Tank / RE4 идёт за её поворотом */
 extern "C" int dc_nots_warp_turn(float* dcam, float* dher);   /* 19.10: memory.c - поворот камеры и её самой между Dp и D */
@@ -8913,6 +9602,7 @@ static int arm_warp_vmode(void) {                                /* 21.10 (2): D
     if (vmode < 0) { const char* e = getenv("DC_ARM_WARP_VIEW"); vmode = (e && *e == '0') ? 0 : 1; }
     return vmode;
 }
+static void warp_in_orig(WarpIn* w);                             /* 26.10: тип Original - камеры игры (ниже) */
 static void warp_in_take(WarpIn* w) {                            /* 25.10: все живые входы warp_pc_make / arm_warp_make */
     memset(w, 0, sizeof *w);
     w->cams = dc_nots_warp_cams(w->Nr, w->er, w->tr, w->Nn, w->en3, w->tn, &w->fr, &w->fn);
@@ -8932,6 +9622,7 @@ static void warp_in_take(WarpIn* w) {                            /* 25.10: вс�
     w->dhA = vmode ? pt_skel_get_delta(w->pA, w->dA, w->tA) : 0;
     w->dhN = (vmode && w->pN == w->pA + 1) ? pt_skel_get_delta(w->pN, w->dNd, w->tNd) : 0;
     w->okW = pt_skel_get(w->pA, 0, w->rw, w->tw);
+    if (w->cams == 2) warp_in_orig(w);
 }
 /* ⭐ 25.10.2026 - ВЕСЬ ЕЁ СКЕЛЕТ МЕЖДУ ТАКТАМИ (игрок: «вся анимация Регины... стробит больше, чем... при малых FPS, типа
  * 30-60 FPS. Когда 120+, смотрится более дерганно»). Кадры между тактами двигали только руки, кисти и голову и только в прицеле
@@ -8973,6 +9664,30 @@ static void m3_ortho(const float* m, double o[9]) {                         /* �
     double d[9], q[4];
     for (int i = 0; i < 9; i++) d[i] = m[i];
     wq_from_m(d, q); wq_to_m(q, o);
+}
+/* ⭐ 26.10.2026 - ТИП ORIGINAL: КАДРЫ МЕЖДУ ТАКТАМИ ПО КАМЕРЕ ИГРЫ (memory.c dc_nots_warp_cams, ответ 2). Поворот пары игры - числа
+ * 1.3.12 (|R R^T - I| ~ 1e-4): здесь он строго ортогональный, и у неподвижной камеры обе пары одинаковы до бита - сдвиг мира ровно
+ * 0. Переприцела нет: вид кадра - вид GTE (единичная дельта - корпус между тактами, arm_warp_make). Пивот - её корпус (кость 0) в
+ * виде своего прохода: в составной комнате секции рисуются разными парами, и место из RAM ложится в вид только со своей парой;
+ * корпуса нет в проходе N - ход по RAM, нет в проходе A - место из RAM как есть. Прицел, Tank, стрейф - не для камеры игры: она
+ * за ней не поворачивается. */
+static void warp_in_orig(WarpIn* w) {
+    double o[9];
+    m3_ortho(w->Nr, o); for (int i = 0; i < 9; i++) w->Nr[i] = (float)o[i];
+    m3_ortho(w->Nn, o); for (int i = 0; i < 9; i++) w->Nn[i] = (float)o[i];
+    w->aim = 0; w->tank = 0; w->strafe = 0;
+    for (int i = 0; i < 9; i++) w->dA[i] = w->dNd[i] = (i % 4 == 0) ? 1.f : 0.f;
+    for (int i = 0; i < 3; i++) w->tA[i] = w->tNd[i] = 0.f;
+    w->dhA = 1; w->dhN = (w->pN == w->pA + 1) ? 1 : 0;
+    if (w->okA & 1u) {
+        const float hA[3] = { w->tr[0], w->tr[1], w->tr[2] }, hN[3] = { w->tn[0], w->tn[1], w->tn[2] };
+        const float *a = w->tAb[0], *n = w->tNb[0];
+        for (int r = 0; r < 3; r++) w->tr[r] = w->er[r] + w->Nr[r] * a[0] + w->Nr[3 + r] * a[1] + w->Nr[6 + r] * a[2];
+        if (w->okN & 1u)
+            for (int r = 0; r < 3; r++) w->tn[r] = w->en3[r] + w->Nn[r] * n[0] + w->Nn[3 + r] * n[1] + w->Nn[6 + r] * n[2];
+        else
+            for (int r = 0; r < 3; r++) w->tn[r] = w->tr[r] + (hN[r] - hA[r]);
+    }
 }
 static int arm_warp_make(float alpha, const WarpIn& in, int rigid, float hdl, int dbg) {   /* -> сколько костей сдвинуто;
                                                                     hdl - её доворот 19.10 за весь такт (рад, 0 - его нет) */
@@ -9190,6 +9905,284 @@ static int arm_warp_make(float alpha, const WarpIn& in, int rigid, float hdl, in
             } } }
     return nb;
 }
+/* ⭐ 26.10.2026 - ПАРЫ КУСКОВ: КАДРЫ МЕЖДУ ТАКТАМИ У ДВЕРЕЙ (игрок: «ни сцены с открытием двери, ни катсцены... не должны менять
+ * своё значение FPS»; «если игрок выставил 120 кадров, значит, будет везде 120 кадров»). Кадры между тактами двигают картинку
+ * такта по нашей камере (warp_pc_make) - у дверей её нет, и там шло 30 новых кадров в секунду при любой частоте. Здесь каждый
+ * кусок модели прохода кадра A (gte.cpp pair_note: подряд идущие проекции с одной матрицей, ключ - первые три вершины модели)
+ * сопоставляется с тем же куском прохода N (следующий такт - к показу A он уже посчитан): точка вида N = Q·(точка вида A) + c,
+ * Q = M_N·M_A^-1, c = t_N - Q·t_A. На долю пути alpha: поворот Q - доля от единицы (slerp), остаток Q (масштаб) - линейно,
+ * начало куска - линейно (кусок поворачивается вокруг своего начала; при повороте камеры ошибка ~ alpha(1-alpha)/2·угол²·дальность
+ * - доли пикселя). Метку куска несёт вершина (третий поток, s_pvMap), шейдер берёт строки своей пары (UBO 664.., dc_raster.vert).
+ * Пара не взята (куска нет в N, скачок > 0.7 рад / 2000 ед., вырожденная матрица, масштаб > 25%) - кусок
+ * стоит, как в кадре A. У кусков без пары больше 10% вершин кадра A или движется кусок за PAIR_MAX - пар нет: кадр между тактами -
+ * повтор, как было. Собирает снимок кадра A (под замком видеокарты), берёт кадр между тактами. DC_PAIR_WARP=0 - выкл (main.cpp),
+ * DC_PAIR_DBG=1 - строка pairwarp: на снимок. */
+struct PairBase { double q[4], S[9], tA[3], tN[3]; int on; };
+struct PairSet { int ok = 0, passA = -1, count = 0, moving = 0; unsigned long long frame = 0; PairBase p[PAIR_MAX]; };
+static PairSet s_pairSet;
+static void m3_inv(const double* m, double* o, double* det) {
+    const double a = m[0], b = m[1], c = m[2], d = m[3], e = m[4], f = m[5], g = m[6], h = m[7], i = m[8];
+    const double A = e * i - f * h, B = -(d * i - f * g), Cc = d * h - e * g;
+    *det = a * A + b * B + c * Cc;
+    if (fabs(*det) < 1e-12) return;
+    const double k = 1.0 / *det;
+    o[0] = A * k;  o[1] = -(b * i - c * h) * k; o[2] = (b * f - c * e) * k;
+    o[3] = B * k;  o[4] = (a * i - c * g) * k;  o[5] = -(a * f - c * d) * k;
+    o[6] = Cc * k; o[7] = -(a * h - b * g) * k; o[8] = (a * e - b * d) * k;
+}
+/* пара куска по его матрицам кадров A и N (pair_build): 1 - взята (b заполнена, *mv - кусок движется), 0 - скачок (поворот
+ * больше 0.7 рад, сдвиг больше 2000 ед., масштаб больше 25%), -1 - матрица кадра A вырождена */
+static int pair_base_make(const double* MA, const double* tA, const double* MN, const double* tN, PairBase& b, int* mv) {
+    *mv = 0;
+    double iA[9], det = 0.0;
+    m3_inv(MA, iA, &det);
+    if (fabs(det) < 1e-12) return -1;
+    double Q[9]; m3_mul(MN, iA, Q);
+    double R[9]; memcpy(R, Q, sizeof R);                     /* поворот Q: полярное разложение (итерации Хайэма) */
+    for (int it = 0; it < 6; it++) {
+        double Ri[9], d2 = 0.0; m3_inv(R, Ri, &d2);
+        if (fabs(d2) < 1e-12) break;
+        for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) R[r * 3 + c] = 0.5 * (R[r * 3 + c] + Ri[c * 3 + r]);
+    }
+    double q[4]; wq_from_m(R, q);
+    double Ro[9]; wq_to_m(q, Ro);
+    double S[9]; m3_mult(Q, Ro, S);                          /* S = Q·R^T */
+    const double ang = 2.0 * acos(q[3] > 1.0 ? 1.0 : q[3]);
+    double sdev = 0.0;
+    for (int k = 0; k < 9; k++) { const double dv = fabs(S[k] - ((k % 4 == 0) ? 1.0 : 0.0)); if (dv > sdev) sdev = dv; }
+    const double dt = sqrt((tN[0] - tA[0]) * (tN[0] - tA[0]) + (tN[1] - tA[1]) * (tN[1] - tA[1]) + (tN[2] - tA[2]) * (tN[2] - tA[2]));
+    *mv = ang > 1e-5 || dt > 0.05 || sdev > 1e-5;
+    if (ang > 0.7 || dt > 2000.0 || sdev > 0.25) return 0;
+    memcpy(b.q, q, sizeof q); memcpy(b.S, S, sizeof S); memcpy(b.tA, tA, 3 * sizeof(double)); memcpy(b.tN, tN, 3 * sizeof(double));
+    b.on = 1;
+    return 1;
+}
+static int pair_build(int passA, unsigned long long frame) {
+    PairSet& P = s_pairSet;
+    P.ok = 0; P.passA = passA; P.count = 0; P.moving = 0; P.frame = frame;
+    static int dbg = -1;
+    if (dbg < 0) { const char* e = getenv("DC_PAIR_DBG"); dbg = e ? atoi(e) : 0; }   /* 2 - строка на каждый снимок */
+    if (dc_pair_vetoed(passA)) {
+        if (dbg) { static long nl = 0; if (++nl % 30 == 1) std::fprintf(stderr, "pairwarp: pass %d - no pairs (a shot change or unknown motion of our room)%c", passA, 10); }
+        return 0;
+    }
+    int npA = 0, npN = 0;
+    const int rA = dc_pair_pass_get(passA, &npA), rN = dc_pair_pass_get(passA + 1, &npN);
+    if (rA <= 0 || rN <= 0) {
+        if (dbg) { static long nl = 0; if (++nl % 60 == 1) std::fprintf(stderr, "pairwarp: pass %d runs %d, next %d (current %d) - no pairs%c",
+                                                                       passA, rA, rN, g_dc_pass_id, 10); }
+        return 0;
+    }
+    static std::vector<std::pair<uint32_t, int>> ka, kn;
+    ka.clear(); kn.clear();
+    { int n0 = 0; double M0[9], t0[3];                          /* dc_pair_run_get пишет M и t всегда */
+      for (int i = 0; i < rA; i++) { uint32_t k = 0; if (dc_pair_run_get(passA, i, &k, &n0, M0, t0)) ka.push_back({ k, i }); }
+      for (int j = 0; j < rN; j++) { uint32_t k = 0; if (dc_pair_run_get(passA + 1, j, &k, &n0, M0, t0)) kn.push_back({ k, j }); } }
+    std::sort(ka.begin(), ka.end()); std::sort(kn.begin(), kn.end());
+    P.count = rA < PAIR_MAX ? rA : PAIR_MAX;
+    for (int i = 0; i < P.count; i++) P.p[i].on = 0;
+    int matched = 0, rej = 0, beyond = 0, beyondMoving = 0, movingRej = 0, nDiff = 0;
+    long vOn = 0, vStill = 0;                                    /* вершины кусков с парой и неподвижных кусков за PAIR_MAX */
+    static std::vector<char> usedA, usedN;                       /* 27.10: прогоны, у которых ключ нашёлся (DC_PAIR_SAMEPLACE ниже) */
+    usedA.assign((size_t)rA, 0); usedN.assign((size_t)rN, 0);
+    size_t ia = 0, in = 0;
+    while (ia < ka.size() && in < kn.size()) {                   /* одинаковые ключи - по порядку появления */
+        if (ka[ia].first < kn[in].first) { ia++; continue; }
+        if (ka[ia].first > kn[in].first) { in++; continue; }
+        const int i = ka[ia].second, j = kn[in].second;
+        ia++; in++;
+        usedA[(size_t)i] = 1; usedN[(size_t)j] = 1;
+        int nA = 0, nN = 0; uint32_t k0 = 0; double MA[9], tA[3], MN[9], tN[3];
+        if (!dc_pair_run_get(passA, i, &k0, &nA, MA, tA) || !dc_pair_run_get(passA + 1, j, &k0, &nN, MN, tN)) {
+            if (i < PAIR_MAX) { matched++; rej++; }
+            continue;
+        }
+        if (nA != nN) nDiff++;          /* число вершин куска от такта к такту меняется (у двери - на 1-2): матрица та же, пара годится */
+        if (i >= PAIR_MAX) {                                     /* кусок за PAIR_MAX стоит, как в кадре A, - годится, только если не движется */
+            int mvb = 0;
+            for (int k = 0; k < 9; k++) if (fabs(MA[k] - MN[k]) > 1e-9) mvb = 1;
+            for (int k = 0; k < 3; k++) if (fabs(tA[k] - tN[k]) > 0.05) mvb = 1;
+            beyond++;
+            if (mvb) beyondMoving++; else vStill += nA;
+            continue;
+        }
+        matched++;
+        int mv = 0;
+        const int pr = pair_base_make(MA, tA, MN, tN, P.p[i], &mv);
+        if (pr < 0) { rej++; continue; }
+        if (pr == 0) { rej++; if (mv) movingRej++; continue; }
+        vOn += nA;
+        if (mv) P.moving++;
+    }
+    /* ⭐ 27.10.2026 - КУСОК С НОВЫМИ ВЕРШИНАМИ (игрок, слот 43: «катсцена как будто тозмозит и дрожит. мало фпс в пролетах,
+     * когда камера поворачивается»). Ключ куска - его первые три вершины, а их меняет сама игра: в облёте сцены ST10D пять
+     * мелких кусков (48 вершин, спрайты лицом к камере: поворот единичный, центр едет с камерой) она перестраивает раз в два
+     * такта, в крупных планах у головы (75 вершин) шевелится рот. Ключ новый - пары нет, и каждый второй такт облёта шёл
+     * повтором (порог ниже: 48 из 473 - чуть больше 10%; 75 - 16%), новых картинок 90-105 из 165. Кусок без пары по ключу
+     * берёт в следующем такте ближайший по сдвигу кусок без пары с тем же числом вершин, и пара считается как всегда (поворот,
+     * масштаб, сдвиг; скачок - отказ): между тактами едет весь кусок, а новые вершины (рот, спрайт) приходят с тактом, как и
+     * шли. Куски с парой по ключу должны покрывать хотя бы половину вершин кадра A (по ним видно движение кадра), иначе - как
+     * было. DC_PAIR_SAMEPLACE=0 - как было. */
+    int samePlace = 0;
+    { static int sp = -1;
+      if (sp < 0) { const char* e = getenv("DC_PAIR_SAMEPLACE"); sp = (e && *e == '0') ? 0 : 1; }
+      if (sp) {
+          struct Fb { int i, j, nA, mv; PairBase b; };
+          static Fb fb[64];
+          int nf = 0; long pv = 0;
+          for (int i = 0; i < rA && i < P.count && nf < 64; i++) {
+              if (usedA[(size_t)i]) continue;
+              uint32_t k0 = 0; int nA = 0; double MA[9], tA[3];
+              if (!dc_pair_run_get(passA, i, &k0, &nA, MA, tA) || nA <= 0) continue;
+              int best = -1; double bd = 2000.0, MB[9] = {}, tB[3] = {};
+              for (int j = 0; j < rN; j++) {
+                  if (usedN[(size_t)j]) continue;
+                  int nN = 0; double MN[9], tN[3];
+                  if (!dc_pair_run_get(passA + 1, j, &k0, &nN, MN, tN) || nN != nA) continue;
+                  const double d = sqrt((tN[0] - tA[0]) * (tN[0] - tA[0]) + (tN[1] - tA[1]) * (tN[1] - tA[1]) + (tN[2] - tA[2]) * (tN[2] - tA[2]));
+                  if (d <= bd) { bd = d; best = j; memcpy(MB, MN, sizeof MB); memcpy(tB, tN, sizeof tB); }
+              }
+              if (best < 0) continue;
+              Fb& f = fb[nf];
+              f.b.on = 0;
+              if (pair_base_make(MA, tA, MB, tB, f.b, &f.mv) != 1) continue;
+              usedN[(size_t)best] = 1;
+              f.i = i; f.j = best; f.nA = nA; nf++; pv += nA;
+              if (dbg >= 2) { static long nl = 0;
+                  if (++nl <= 600) std::fprintf(stderr, "pairfb: pass %d run %d -> %d n %d move %.0f turn %.3f%c", passA, i, best, nA, bd,
+                                                2.0 * acos(f.b.q[3] > 1.0 ? 1.0 : f.b.q[3]), 10); }
+          }
+          if (nf && (vOn + vStill) * 2 >= (long)npA) {
+              for (int q = 0; q < nf; q++) {
+                  P.p[fb[q].i] = fb[q].b;
+                  if (fb[q].mv) P.moving++;
+              }
+              vOn += pv; samePlace = nf;
+          } else {
+              for (int q = 0; q < nf; q++) usedN[(size_t)fb[q].j] = 0;
+          }
+      } }
+    /* кусок без пары стоит в кадре между тактами, пока соседи едут, - дрожь: таких вершин больше 10% кадра A - пар нет (повтор) */
+    P.ok = matched > 0 && !beyondMoving && (vOn + vStill) * 10 >= (long)npA * 9;
+    if (dbg >= 3 && !P.ok) { static long nd = 0;   /* 27.10 (проба): прогоны обоих проходов - у каких кусков нет пары */
+        if (++nd <= 12) {
+            for (int side = 0; side < 2; side++) {
+                const int ps = passA + side, rc = side ? rN : rA;
+                for (int i = 0; i < rc && i < 64; i++) {
+                    uint32_t k = 0; int n = 0; double M[9], t[3];
+                    if (!dc_pair_run_get(ps, i, &k, &n, M, t)) continue;
+                    int seen = 0;
+                    const auto& other = side ? ka : kn;
+                    for (const auto& o : other) if (o.first == k) { seen = 1; break; }
+                    std::fprintf(stderr, "pairruns: pass %d %s run %d key %08X n %d t %.0f,%.0f,%.0f M0 %.4f,%.4f,%.4f %s%c", ps, side ? "N" : "A", i, k, n,
+                                 t[0], t[1], t[2], M[0], M[1], M[2], seen ? "" : "<- no match", 10);
+                }
+            }
+        } }
+    /* 26.10.2026: то же по потоку кадра A - вершины мира (с глубиной, без интерфейса) с меткой своей пары. Нашу комнату в сцене
+     * (pt_renderer.c rl_ptag_of) порог выше не видит: проекций GTE у неё нет. Меш из mods в кадре - пар нет: его вершины меток
+     * не несут (dc_mesh.vert), он стоял бы, пока мир едет. DC_PAIR_COVER=0 - без этой проверки. */
+    long cw = 0, co = 0; int cmesh = 0;
+    { static int cov_on = -1;
+      if (cov_on < 0) { const char* e = getenv("DC_PAIR_COVER"); cov_on = (e && *e == '0') ? 0 : 1; }
+      if (cov_on && P.ok && s_pvMap && s_vmap) {
+          for (const Draw& d : s_wsnap.draws) {
+              if (d.ui) continue;
+              if (d.mesh >= 0) { cmesh++; continue; }
+              for (int k = 0; k < d.count; k++) {
+                  const size_t vi = (size_t)(d.first + k);
+                  if (s_vmap[vi * VERT_FLOATS + 12] < 1.5f) continue;
+                  cw++;
+                  const uint32_t t = s_pvMap[vi];
+                  const int ix = (int)(t & 0x1FFFu) - 1;
+                  if (t && (int)(t >> 13) == (passA & 3) && ix >= 0 && (ix >= P.count || P.p[ix].on)) co++;   /* за PAIR_MAX - стоят (beyondMoving = 0) */
+              }
+          }
+          if (cmesh || co * 10 < cw * 9) P.ok = 0;
+      } }
+    if (dbg) { static int last = -2; static long nl = 0;
+        if (P.ok != last || ++nl % 120 == 0 || dbg >= 2) { last = P.ok;
+            std::fprintf(stderr, "pairwarp: pass %d runs %d (proj %d), next %d (proj %d, current %d): matched %d (other vertex count %d), "
+                                 "rejected %d (moving %d), beyond %d (moving %d), verts paired %ld still %ld, moving %d, stream %ld of %ld "
+                                 "(mods meshes %d), same place %d -> %s%c", passA, rA, npA, rN, npN, g_dc_pass_id, matched, nDiff, rej, movingRej, beyond,
+                                 beyondMoving, vOn, vStill, P.moving, co, cw, cmesh, samePlace, P.ok ? "pairs" : "off", 10); } }
+    if (dbg) { static long nc = 0;   /* 26.10 (проба): сколько вершин мира кадра A несут метку своей пары */
+        if (++nc % 30 == 1 && s_pvMap && s_vmap) {
+            long wv = 0, tg = 0, own = 0, rv = 0, rt = 0, av = 0, at = 0; int md = 0;
+            struct Hk { int kind, fl, tp, late, room; long n; float x, y, w; };
+            Hk hk[32]; int nh = 0;                            /* вершины без своей пары: вид draw, флаги, страница, поздний */
+            for (const Draw& d : s_wsnap.draws) {
+                if (d.ui) continue;
+                if (d.mesh >= 0) { md++; continue; }
+                for (int k = 0; k < d.count; k++) {
+                    const size_t vi = (size_t)(d.first + k);
+                    const float* v = s_vmap + vi * VERT_FLOATS;
+                    if (v[12] < 1.5f) continue;
+                    wv++;
+                    const int act = ((int)v[11] & 16) != 0;
+                    if (d.room) rv++;
+                    if (act) av++;
+                    const uint32_t t = s_pvMap[vi];
+                    const int ix = (int)(t & 0x1FFFu) - 1;
+                    const int mine = t && (int)(t >> 13) == (passA & 3) && ix >= 0 && (ix >= P.count || P.p[ix].on);
+                    if (t) { tg++; if (d.room) rt++; if (act) at++; }
+                    if (mine) { own++; continue; }
+                    const int fl = (int)v[11], tp = (int)v[8];
+                    int h = 0;
+                    while (h < nh && !(hk[h].kind == d.kind && hk[h].fl == fl && hk[h].tp == tp && hk[h].late == d.late && hk[h].room == d.room)) h++;
+                    if (h == nh && nh < 32) { hk[nh] = Hk{ d.kind, fl, tp, d.late, d.room, 0, v[0], v[1], v[12] }; nh++; }
+                    if (h < nh) hk[h].n++;
+                }
+            }
+            std::fprintf(stderr, "paircover: frame %llu pass %d world verts %ld tagged %ld own pair %ld (our room %ld tagged %ld, hers %ld tagged %ld), "
+                                 "mesh draws %d -> %s%c", frame, passA, wv, tg, own, rv, rt, av, at, md, P.ok ? "pairs" : "off", 10);
+            for (int r = 0; r < 6 && nh > 0; r++) {
+                int b = 0;
+                for (int h = 1; h < nh; h++) if (hk[h].n > hk[b].n) b = h;
+                if (hk[b].n <= 0) break;
+                std::fprintf(stderr, "paircover:   no own pair %ld verts: kind %d flags %d tpage %d late %d room %d (e.g. %.1f,%.1f w %.1f)%c",
+                             hk[b].n, hk[b].kind, hk[b].fl, hk[b].tp, hk[b].late, hk[b].room, hk[b].x, hk[b].y, hk[b].w, 10);
+                hk[b].n = -hk[b].n;
+            }
+        } }
+    return P.ok;
+}
+/* строки пар на долю пути alpha (pr - PAIR_MAX * 12 чисел); wpc - единичная камера с признаком перепроецирования. 0 - пар нет */
+static int pair_pc_make(float alpha, float wpc[16], float* pr, int* stand) {
+    const PairSet& P = s_pairSet;
+    *stand = 0;
+    if (!P.ok) return 0;
+    for (int i = 0; i < 16; i++) wpc[i] = 0.f;
+    wpc[3] = 1.f; wpc[7] = 1.f;
+    const double a = alpha < 0.f ? 0.0 : alpha > 1.f ? 1.0 : (double)alpha;
+    for (int i = 0; i < P.count; i++) {
+        float* r = pr + (size_t)i * 12;
+        const PairBase& b = P.p[i];
+        if (!b.on) {
+            for (int k = 0; k < 12; k++) r[k] = 0.f;
+            r[0] = r[5] = r[10] = 1.f;
+            continue;
+        }
+        const double ang = 2.0 * acos(b.q[3] > 1.0 ? 1.0 : b.q[3]), s = sin(ang * 0.5);
+        double qa[4];
+        if (s > 1e-9) { const double k = sin(0.5 * ang * a) / s; qa[0] = b.q[0] * k; qa[1] = b.q[1] * k; qa[2] = b.q[2] * k; qa[3] = cos(0.5 * ang * a); }
+        else { qa[0] = b.q[0] * a; qa[1] = b.q[1] * a; qa[2] = b.q[2] * a; qa[3] = 1.0; }
+        { const double n = sqrt(qa[0] * qa[0] + qa[1] * qa[1] + qa[2] * qa[2] + qa[3] * qa[3]); for (int k = 0; k < 4; k++) qa[k] /= n; }
+        double Ra[9]; wq_to_m(qa, Ra);
+        double L[9];
+        for (int k = 0; k < 9; k++) L[k] = ((k % 4 == 0) ? 1.0 : 0.0) * (1.0 - a) + b.S[k] * a;
+        double M[9]; m3_mul(L, Ra, M);
+        for (int row = 0; row < 3; row++) {
+            const double tm = b.tA[row] + (b.tN[row] - b.tA[row]) * a;
+            const double c = tm - (M[row * 3] * b.tA[0] + M[row * 3 + 1] * b.tA[1] + M[row * 3 + 2] * b.tA[2]);
+            r[row * 4] = (float)M[row * 3]; r[row * 4 + 1] = (float)M[row * 3 + 1]; r[row * 4 + 2] = (float)M[row * 3 + 2]; r[row * 4 + 3] = (float)c;
+        }
+    }
+    if (!P.moving) *stand = 1;
+    return 1;
+}
+/* main.cpp: у снимка кадра A есть пары кусков (кадры между тактами без нашей камеры - двери) */
+extern "C" int dcvk_pair_ready(void) { return s_wsnap.valid && !s_wsnap.dropped && s_wsnap.world && s_wsnap.pairs; }
 static int warp_pc_make(float alpha, float wpc[16], int* stand, int dbg, double* o_ang, double* o_de, double* o_dt,
                         unsigned long long* o_fr, unsigned long long* o_fn, const WarpIn* in_) {
     *stand = 0;
@@ -9208,7 +10201,8 @@ static int warp_pc_make(float alpha, float wpc[16], int* stand, int dbg, double*
     double ang = 2.0 * acos(q[3] > 1.0 ? 1.0 : q[3]);
     double de = sqrt((double)(en3[0] - er[0]) * (en3[0] - er[0]) + (double)(en3[1] - er[1]) * (en3[1] - er[1]) + (double)(en3[2] - er[2]) * (en3[2] - er[2]));
     double dt = sqrt((double)(tn[0] - tr[0]) * (tn[0] - tr[0]) + (double)(tn[1] - tr[1]) * (tn[1] - tr[1]) + (double)(tn[2] - tr[2]) * (tn[2] - tr[2]));
-    if (fn == fr || ang > 0.7 || de > 1800.0 || dt > 700.0) {   /* нет следующей камеры / переход / телепорт */
+    const int og = in.cams == 2 && (ang > 0.35 || de > 1200.0);   /* 26.10: камера игры (тип Original) за такт столько не ходит */
+    if (fn == fr || ang > 0.7 || de > 1800.0 || dt > 700.0 || og) {   /* нет следующей камеры / переход / телепорт */
         if (dbg) std::fprintf(stderr, "warp: skip flips %llu->%llu ang %.3f eye %.0f pivot %.0f%c", fr, fn, ang, de, dt, 10);
         return 0;
     }
@@ -9316,22 +10310,42 @@ static const unsigned int* warp_render_impl(float alpha_in, int extra, const War
     }
     if (in_pt) {                                                    /* 25.10: поток показа - только из копии вершин кадра */
         if (!s_wsnap.vcopy || s_wsnap.nverts <= 0) return nullptr;
-    } else if (s_nverts != 0 || s_wsnap.nverts <= 0 || !s_vmap) return nullptr;   /* поток уже пишет новый кадр */
+    } else if ((s_nverts != 0 && !s_wsnap.vcopy) || s_wsnap.nverts <= 0 || (!s_vmap && !s_wsnap.vcopy)) return nullptr;   /* поток уже пишет новый кадр; 26.10: с копией вершин - можно (main.cpp s_vb_held) */
     float wpc[16]; int stand = 0; double ang = 0.0, de = 0.0, dt = 0.0; unsigned long long fr = 0, fn = 0;
-    if (!warp_pc_make(alpha, wpc, &stand, dbg, &ang, &de, &dt, &fr, &fn, in_pt)) return nullptr;
-    if (dbg && !in_pt) { static int nn = 0;                         /* 19.10: её вершины в снимке (F_ACTOR, с глубиной) */
+    const int pairB = s_wsnap.pairs;              /* 26.10: у кадра A пары кусков (двери) - камеры нет, строки пар ниже, под замком */
+    if (!pairB && !warp_pc_make(alpha, wpc, &stand, dbg, &ang, &de, &dt, &fr, &fn, in_pt)) return nullptr;
+    if (dbg && !in_pt && s_nverts == 0 && s_vmap) { static int nn = 0;   /* 19.10: её вершины в снимке (F_ACTOR, с глубиной) */
         if (nn++ < 12) { int na = 0, naw = 0;
             for (int i = 0; i < s_wsnap.nverts; i++) { const float* v = s_vmap + (size_t)i * VERT_FLOATS;
                 if ((int)v[11] & 16) { na++; if (v[12] >= 1.5f) naw++; } }
             std::fprintf(stderr, "warp-her: snapshot verts %d, hers %d, hers with depth %d, ubo hc.w %.0f%c", s_wsnap.nverts, na, naw,
                          s_shUboMap ? s_shUboMap[535] : -1.f, 10); } }
-    { int scapB = 0;                                                /* 01.10 вечер: ячейки «третьей энергии» идут на 60 Гц */
-      for (size_t i = 0; i < s_wsnap.scaps.size() && !scapB; i++) if (s_wsnap.scaps[i].ab == 2) scapB = 1;
-      if (stand && !scapB) return nullptr; }                        /* камера стоит — кадр тот же */
+    int scapB = 0;                                                  /* 01.10 вечер: ячейки «третьей энергии» идут на 60 Гц */
+    for (size_t i = 0; i < s_wsnap.scaps.size() && !scapB; i++) if (s_wsnap.scaps[i].ab == 2) scapB = 1;
+    if (!pairB && stand && !scapB) return nullptr;                  /* камера стоит — кадр тот же */
     wpc[12] = s_wsnap.ox; wpc[13] = s_wsnap.oy; wpc[14] = s_wsnap.H; wpc[15] = s_wsnap.Hs;
 
     struct GpuGuard { GpuGuard() { ptvk_gpu_lock(); } ~GpuGuard() { ptvk_gpu_unlock(); } } gpu_guard;
     if (!raster_init_impl()) return nullptr;
+    if (s_shUboMap) s_shUboMap[664] = 0.f;                          /* 26.10.2026: пары кусков - только если взяты ниже */
+    if (pairB) {                                                    /* строки пар на эту долю пути: UBO общий с кадром A - под замком */
+        int standP = 0;
+        if (!s_shUboMap || s_pairSet.frame != s_wsnap.frame || !pair_pc_make(alpha, wpc, s_shUboMap + 668, &standP)) return nullptr;
+        if (standP && !scapB) return nullptr;                       /* ни один кусок не движется - кадр тот же */
+        { static int pdb = -1; if (pdb < 0) { const char* e = getenv("DC_PAIR_DBG"); pdb = e ? atoi(e) : 0; }
+          if (pdb >= 3) {                                           /* 3 - строка на каждый кадр между тактами: доля пути, сдвиг, метки */
+              float mo = 0.f; const float* pr = s_shUboMap + 668;
+              for (int i = 0; i < s_pairSet.count; i++) for (int r = 0; r < 3; r++) { const float c = fabsf(pr[i * 12 + r * 4 + 3]); if (c > mo) mo = c; }
+              int nt = 0, nm = 0;
+              if (!in_pt && s_nverts == 0 && s_pvMap) for (int i = 0; i < s_wsnap.nverts; i++) { const uint32_t t = s_pvMap[i];
+                  if (t) { nt++; const int ix = (int)(t & 0x1FFFu) - 1;
+                           if ((int)(t >> 13) == (s_pairSet.passA & 3) && ix >= 0 && ix < s_pairSet.count && s_pairSet.p[ix].on) nm++; } }
+              std::fprintf(stderr, "pairwarp-b: alpha %.3f extra %d thread %d frame %llu pass %d moving %d max offset %.2f, tags %d of %d verts, own pair %d%c",
+                           alpha, extra, in_pt ? 1 : 0, s_wsnap.frame, s_pairSet.passA, s_pairSet.moving, mo, nt, s_wsnap.nverts, nm, 10); } }
+        wpc[12] = s_wsnap.ox; wpc[13] = s_wsnap.oy; wpc[14] = s_wsnap.H; wpc[15] = s_wsnap.Hs;
+        s_shUboMap[665] = (float)(s_pairSet.passA & 3); s_shUboMap[666] = (float)s_pairSet.count; s_shUboMap[667] = 0.f;
+        s_shUboMap[664] = 1.f;
+    }
     const int w = s_wsnap.w, h = s_wsnap.h;
     if (w <= 0 || h <= 0 || !ensureTargets(w, h)) return nullptr;
     LARGE_INTEGER t0, t1; static LARGE_INTEGER qpf = { 0 };
@@ -9357,6 +10371,7 @@ static const unsigned int* warp_render_impl(float alpha_in, int extra, const War
     VkPipeline* const P  = (msN > 1) ? s_pipesMS : s_pipes;
     const VkPipeline  BG = (msN > 1) ? s_bgPipeMS : s_bgPipe;
     const VkBuffer wvb = s_wsnap.vcopy ? s_wsVb : s_vbuf, wrv = s_wsnap.vcopy ? s_wsRv : s_rvBuf;   /* 25.10: копия вершин кадра A */
+    const VkBuffer wpv = s_wsnap.vcopy ? s_wsPv : s_pvBuf;                                         /* 26.10: и его меток кусков */
     cmdBegin();
     pp_ts_reset();
     VkClearValue clears[2]{};
@@ -9375,9 +10390,9 @@ static const unsigned int* warp_render_impl(float alpha_in, int extra, const War
     if (glowB || reflB) {
         fx_init_layouts();
         if (reflB) fx_geom_pass(2, s_wsnap.draws, &s_wsnap.order, 0, w, h, s_wsnap.dispX, s_wsnap.dispY, s_wsnap.dispW, s_wsnap.dispH, wpc,
-                                wvb, &s_wsnap.mrefs);
+                                wvb, &s_wsnap.mrefs, wpv);
         if (glowB) fx_geom_pass(1, s_wsnap.draws, &s_wsnap.order, 0, w, h, s_wsnap.dispX, s_wsnap.dispY, s_wsnap.dispW, s_wsnap.dispH, wpc,
-                                wvb, &s_wsnap.mrefs);
+                                wvb, &s_wsnap.mrefs, wpv);
     }
     pp_ts(0);
     vkCmdBeginRenderPass(s_cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
@@ -9385,8 +10400,8 @@ static const unsigned int* warp_render_impl(float alpha_in, int extra, const War
     VkRect2D sc{ { 0, 0 }, { (uint32_t)w, (uint32_t)h } };
     vkCmdSetViewport(s_cmd, 0, 1, &vpt);
     vkCmdSetScissor(s_cmd, 0, 1, &sc);
-    {   const VkBuffer vbs[2] = { wvb, wrv }; const VkDeviceSize vofs[2] = { 0, 0 };   /* 05.10: + текстуры PNG из mods */
-        vkCmdBindVertexBuffers(s_cmd, 0, 2, vbs, vofs); }
+    {   const VkBuffer vbs[3] = { wvb, wrv, wpv }; const VkDeviceSize vofs[3] = { 0, 0, 0 };   /* 05.10: + текстуры PNG из mods; 26.10: + метки */
+        vkCmdBindVertexBuffers(s_cmd, 0, 3, vbs, vofs); }
     vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_plLay, 0, 1, &s_dset, 0, nullptr);
     vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, BG);
     vkCmdPushConstants(s_cmd, s_plLay, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, s_wsnap.bgpc);
@@ -9437,8 +10452,8 @@ static const unsigned int* warp_render_impl(float alpha_in, int extra, const War
                 vkCmdPushConstants(s_cmd, s_plLay, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, pc);
                 medx_record(s_cmd, P[12], d, mesh_ref_of(d, s_wsnap.mrefs));
                 bound = -1;
-                const VkBuffer vbsM[2] = { wvb, wrv }; const VkDeviceSize vofsM[2] = { 0, 0 };
-                vkCmdBindVertexBuffers(s_cmd, 0, 2, vbsM, vofsM);
+                const VkBuffer vbsM[3] = { wvb, wrv, wpv }; const VkDeviceSize vofsM[3] = { 0, 0, 0 };
+                vkCmdBindVertexBuffers(s_cmd, 0, 3, vbsM, vofsM);
             }
             continue;
         }

@@ -1,0 +1,15 @@
+# Dino Crisis ME: a supported game version (tools/make_version.py; setup and its window read this)
+id = jp_sru
+order = 19
+name = Dino Crisis (Japan, Russian voice-over SRU)
+name_ru = Dino Crisis (Япония, русская озвучка SRU)
+exe = SLPS_021.80
+exe_sha256 = 8c7fede91e293d85735ae165a6b8ad6912ff0fb50f7f51d9ff2958a062501e09
+exe_size = 618496
+entry_pc = 0x80012220
+load_address = 0x80010000
+text_size = 0x00096800
+voice_print = STAGE01.XAS A4B95C0D
+runtime_patch = runtime.dcpatch
+hooks_patch = hooks.dcpatch
+faces = faces

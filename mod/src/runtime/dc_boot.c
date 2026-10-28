@@ -138,7 +138,8 @@ static const LogKeep s_keep[] = {
     { "present thread: *", 4 },        /* 26.10.2026: frames between ticks on their own thread, or why not (main.cpp) */
     { "dpi: *", 2 },                   /* 26.10.2026: the Windows scale, the window in points and in pixels (main.cpp) */
     { "raster: options in the shader*", 4 }, { "raster: pipelines for*", 4 },   /* 25.10.2026: lean pipelines by the options */
-    { "[VKR] post: MSAA up to*", 1 }, { "canvas: *", 4 }, { "hz: *", 4 },
+    { "[VKR] post: MSAA up to*", 1 }, { "canvas: *", 4 },
+    { "hz: *", 12 },                   /* 28.10.2026: was 4 - the lines on G-Sync / FreeSync and on V-Sync with no refresh grid come 3rd to 6th (main.cpp) */
     { "shaders: *", 12 }, { "pipecache: *", 4 }, { "post: SSAO *", 2 }, { "post: MSAA *", 4 },
     { "graphics: *", 4 },              /* 24.10.2026: the first start check - lowered for a weak graphics card or not (main.cpp) */
     { "vram: *", 12 },                 /* 24.10.2026: video memory in use and what the system gives (gpu_vk_raster.cpp, main.cpp) */

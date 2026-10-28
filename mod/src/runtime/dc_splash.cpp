@@ -830,7 +830,9 @@ extern "C" void dc_splash_shader_present(SDL_Renderer *r, int lw, int lh, int la
         const float iw = (SH_BAR_W - 2.0f) * progress;       /* заполнение - внутри рамки */
         if (iw > 0.25f) {
             SDL_SetRenderDrawColor(r, 127, 227, 214, 255);   /* #7fe3d6 - бирюза дизайна */
-            const SDL_FRect fill = { ox + (SH_BAR_X + 1.0f) * sc, oy + (SH_BAR_Y + 1.0f) * sc, iw * sc, (SH_BAR_H - 2.0f) * sc };
+            /* 27.10.2026: арабский читается справа налево - полоса растёт от правого края, как полоска пропуска сцены */
+            const float fx = (lang == DC_LANG_AR) ? SH_BAR_X + SH_BAR_W - 1.0f - iw : SH_BAR_X + 1.0f;
+            const SDL_FRect fill = { ox + fx * sc, oy + (SH_BAR_Y + 1.0f) * sc, iw * sc, (SH_BAR_H - 2.0f) * sc };
             SDL_RenderFillRectF(r, &fill);
         }
         if (td) {
@@ -903,6 +905,9 @@ static float  s_fb_a;                  /* видимость 0..1 */
 static Uint32 s_fb_t;                  /* SDL_GetTicks прошлого показа */
 static float  s_fb_hot[4];             /* строка со ссылкой - в логических координатах рендерера (прошлый показ) */
 static int    s_fb_hot_ok;
+static int    s_fb_drawn, s_fb_dhover; /* 26.10.2026: что нарисовал прошлый показ - кадрам между тактами (dc_splash_feedback_again) */
+static Uint8  s_fb_da;
+static SDL_FRect s_fb_d;
 
 extern "C" int dc_splash_feedback_hit(float lx, float ly)
 {
@@ -919,6 +924,7 @@ extern "C" void dc_splash_feedback_present(SDL_Renderer *r, int lw, int lh, int 
     if (s_fb_a < 0.0f) s_fb_a = 0.0f;
     if (s_fb_a > 1.0f) s_fb_a = 1.0f;
     s_fb_hot_ok = 0;
+    s_fb_drawn = 0;
     if (s_fb_a <= 0.0f || lw <= 0 || lh <= 0) return;
     SDL_Texture *t = tex_get(r, hover ? "ui_feedback_on.png" : "ui_feedback_off.png");
     if (!t) return;
@@ -944,6 +950,22 @@ extern "C" void dc_splash_feedback_present(SDL_Renderer *r, int lw, int lh, int 
     s_fb_hot[0] = (x + FB_HIT_X * k) / msx - vx;  s_fb_hot[1] = y / msy - vy;
     s_fb_hot[2] = (FB_W - FB_HIT_X) * k / msx;     s_fb_hot[3] = FB_HIT_H * k / msy;
     s_fb_hot_ok = show;
+    s_fb_drawn = 1; s_fb_dhover = hover; s_fb_d = d; s_fb_da = (Uint8)(255.0f * s_fb_a + 0.5f);
+}
+
+/* 26.10.2026: кадр между тактами (поток показа, main.cpp pt_compose) - тот же блок, что нарисовал кадр такта; появление и
+ * область ссылки ведёт только кадр такта. Без этого при частоте выше 60 блок мигал: на кадрах между тактами его не было */
+extern "C" void dc_splash_feedback_again(SDL_Renderer *r, int lw, int lh)
+{
+    if (!s_fb_drawn) return;
+    SDL_Texture *t = tex_get(r, s_fb_dhover ? "ui_feedback_on.png" : "ui_feedback_off.png");
+    if (!t) return;
+    OutFrame f; float sc, ox, oy;
+    frame_begin(r, &f, lw, lh, &sc, &ox, &oy);
+    SDL_SetTextureAlphaMod(t, s_fb_da);
+    SDL_RenderCopyF(r, t, nullptr, &s_fb_d);
+    SDL_SetTextureAlphaMod(t, 255);
+    frame_end(r, &f);
 }
 
 /* ==== МЕНЮ НАСТРОЕК В СТИЛЕ ЭТИХ ЭКРАНОВ (10.09.2026) ========================
@@ -1441,9 +1463,14 @@ extern "C" void dc_menu_ui_present(SDL_Renderer *r, int lw, int lh)
     const DcMenuRow *sr = nullptr;
     for (int i = 0; i < n; i++) if (rows[i].opt == sel) sr = &rows[i];
     float py = (float)M_PANEL_Y + 21.0f;                          /* рамка 1 + поле 20 */
+    /* 27.10.2026: арабский пишется справа налево - заголовок и строка состояния прижаты к правому полю плашки, как
+     * пояснение под ними (его полоса 1050 px в атласе, текст в ней уже справа) */
+    auto px = [&](int idx) {
+        return L == DC_LANG_AR ? (float)(M_LIST_X + M_LIST_W) - 25.0f - k_mt_rect[L][idx][2] : (float)M_LIST_X + 25.0f;
+    };
     if (sr) {
         const int ih = mt_find(DC_MT_HDR, sr->title);
-        text(ih, (float)M_LIST_X + 25.0f, py, C_TEAL);
+        text(ih, px(ih), py, C_TEAL);
         py += k_mt_rect[L][ih][3] + 12.0f;
         if (sr->hint) {
             const int ip = mt_find(DC_MT_HINT, sr->hint);
@@ -1452,7 +1479,7 @@ extern "C" void dc_menu_ui_present(SDL_Renderer *r, int lw, int lh)
         }
     }
     const int in = mt_find(DC_MT_NOTE, dc_menu_note_key());
-    if (in >= 0) text(in, (float)M_LIST_X + 25.0f, py + 6.0f, C_TEAL);
+    if (in >= 0) text(in, px(in), py + 6.0f, C_TEAL);
 
     if (tf) {
         const SDL_FRect d = { ox, oy + DC_SPLASH_FOOTER_Y * sc, 1920.0f * sc, 120.0f * sc };

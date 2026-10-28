@@ -22,7 +22,7 @@ void main() {
     const int li = id % nt;
     vec3 L; float Rh; vec3 col; int layer = -1;
     if (li < nl) { L = sh.vlp[li].xyz; Rh = sh.vlp[li].w * pc.par.z; col = sh.vlc[li].rgb; layer = int(floor(sh.vlc[li].w + 0.5)); }
-    else { L = sh.glp[li - nl].xyz; Rh = sh.glp[li - nl].w * pc.par.z; col = sh.glc[li - nl].rgb; }
+    else { L = sh.glp[li - nl].xyz; Rh = sh.glp[li - nl].w * pc.par.z; col = sh.glc[li - nl].rgb * glHazeW(li - nl); }
     if (Rh < 10.0) return;
     const float t = pc.par2.y;
     const vec3 h = hash31(float(id) * 1.618 + 3.1), h2 = hash31(float(id) * 2.39 + 11.7);

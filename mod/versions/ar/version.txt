@@ -1,0 +1,17 @@
+# Dino Crisis ME: a supported game version (tools/make_version.py; setup and its window read this)
+id = ar
+order = 18
+name = Dino Crisis (Arabic, abodora)
+name_ru = Dino Crisis (арабская, abodora)
+exe = SLPS_021.80
+exe_sha256 = ba6cfce0f67a4e1569aa71f0ba1a06d6be79f6cae04318bdf6d659a6775fa10e
+exe_size = 618496
+entry_pc = 0x80012220
+load_address = 0x80010000
+text_size = 0x000CC800
+runtime_patch = runtime.dcpatch
+hooks_patch = hooks.dcpatch
+faces = faces
+exe_unpack = lzss
+exe_unpacked_sha256 = 43f53cd11287046534d3877f6cc5fe81db6bf13f13a036907e3ee4c22e15e4dc
+seeds = seeds.txt

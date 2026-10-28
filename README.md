@@ -15,7 +15,7 @@ Remove the game: `Uninstall.exe` in its folder.
 Without the setup window: download `DinoCrisisME_unpacked.zip` from Releases (the same files Setup carries), unpack it and run from that folder:
 
 ```
-powershell -ExecutionPolicy Bypass -File installer\dcme-install.ps1 -DiscPath "D:\Dino Crisis (USA) (v1.1) (Track 1).bin" -InstallPath "C:\Games\DinoCrisisME"
+mod\tools\python\python.exe -I installer\dcme_install.py -DiscPath "D:\Dino Crisis (USA) (v1.1) (Track 1).bin" -InstallPath "C:\Games\DinoCrisisME"
 ```
 
 ## Features
@@ -51,6 +51,8 @@ Your own Dino Crisis disc image (Track 1 `.bin` or `.cue`), one of:
 | Dino Crisis (Spain) PAL | SLES-02211 | + `.sbi` |
 | Dino Crisis (Japan) | SLPS-02180 | |
 | Dino Crisis, Russian translations | SLUS-00922 | the USA disc translated: VIT / Akella (also v2 and ViT v3), Vector, Golden Leon, Enterity, RGR Studio, Paradox |
+| Dino Crisis, Russian voice-over | SLPS-02180 | the Japanese disc, by SRU |
+| Dino Crisis, Arabic translation | SLPS-02180 | by abodora |
 
 `.sbi` is the LibCrypt file of a PAL disc, next to the image (the same file DuckStation uses).
 
@@ -58,7 +60,7 @@ Windows 10 or 11, 64-bit, a graphics card with Vulkan.
 
 ## Known issues
 
-- Integrated graphics. At the first start the game turns its graphics down once (Anti-Aliasing, Materials, Shadows, Lamp Haze off). You can turn them back on in Modern Options > Graphics.
+- Integrated graphics. At the first start the game turns its graphics down once: Shadows off, Anti-Aliasing SMAA. You can change them in Modern Options > Graphics.
 - Windows 11 Smart App Control. If setup stops at "Recompiling the game to C", this Windows feature is probably on. It only lets through apps it already knows, and the game is built from your disc right on your PC, so to Windows it is a brand-new app. To install and play, set Smart App Control to Off (Windows Security > App & browser control > Smart App Control settings) and run setup again.
 
 ## Reporting a problem
@@ -73,7 +75,7 @@ Send the log to the developer: `DinoCrisisME_log.txt` next to `DinoCrisisME.exe`
   - `generated/`, `versions/` - hooks into the recompiled game code, per disc version
   - `shaders/`, `assets/`, `config/`, `collision/` - shaders, the mod's own images and data, default settings, camera collision
   - `build/`, `project/`, `tools/` - build plans, the game project, the scripts Setup runs
-- `installer/` - the setup window (`Setup.cs`), the install script (`dcme-install.ps1`), the uninstaller, the README that comes with Setup
+- `installer/` - the setup window (`Setup.cs`), the install script (`dcme_install.py`), the uninstaller, the README that comes with Setup
 
 Not here: the compiler (llvm-mingw), Python, SDL2 and the Vulkan headers. Setup and `DinoCrisisME_unpacked.zip` carry them. The recompiler framework [psxrecomp](https://github.com/mstan/psxrecomp) is downloaded by Setup at a fixed commit.
 

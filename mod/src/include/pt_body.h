@@ -36,6 +36,7 @@ typedef struct {
                                * so the steady shift must be matched by stamp */
     int      pass;            /* game draw pass (orchestrator camera load) it was built in */
     signed char bone[4];      /* 20.10.2026: her bone of each vertex (-1 unknown) - the in-between frames move arms/hands/head */
+    uint32_t ptag[4];         /* 26.10.2026: piece tag of each vertex (gte.cpp pair_note via the pool, 0 - none) - the in-between frames at doors */
 } PtBodyPrim;
 
 #ifdef __cplusplus

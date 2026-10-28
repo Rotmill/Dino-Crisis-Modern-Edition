@@ -360,7 +360,8 @@ const PtBodyPrim *pt_body_at(int i) {
 #define PGEO_HASH 65536u
 #define PGEO_PROBE 4u
 typedef struct { uint64_t key; uint32_t stamp; int n; float fx[4], fy[4], w[4]; uint8_t player; uint32_t ctx;
-                 int pass; int8_t bone[4]; } PGeoEnt;   /* 20.10: bone - её кость вершины (-1 - нет) */           /* 25.09 ночь: pass — проход сборки (g_dc_pass_id), см. pt_shx_take */
+                 int pass; int8_t bone[4]; uint32_t ptag[4]; } PGeoEnt;   /* 20.10: bone - её кость вершины (-1 - нет) */           /* 25.09 ночь: pass — проход сборки (g_dc_pass_id), см. pt_shx_take */
+                                                                         /* 26.10: ptag - метка куска вершины (пары кусков, 0 - нет) */
 /* WHOSE BODY (2026-08-23). Every skinned character - Regina AND the
  * dinosaurs - comes through the assembler pool, so "pool primitive" does not
  * mean "Regina": the first short-boom dissolve dithered a raptor standing
@@ -374,6 +375,10 @@ int g_pgeo_last_player = 0;
 int g_pgeo_last_bone[4] = { -1, -1, -1, -1 };   /* 20.10: её кости вершин последнего поданного из пула полигона */
 int g_pps_last_bone = -1;                       /* 20.10: кость последнего узнанного реестром (кисть / оружие / волосы) */
 uint32_t g_pgeo_last_ctx = 0;          /* 25.09: владелец кости последнего поданного из пула полигона (F_CHAR) */
+/* 26.10.2026: метки кусков вершин последнего поданного из сборки полигона (pt_poolgeom_prim_uv; 0 - нет). Его точные координаты
+ * пересчитаны из вершин модели, по ним метку проекции (gte.cpp pgxp_pair_of) не найти: тела зверей и других персонажей в сцене
+ * оставались без пары, и кадры между тактами выключались. */
+uint32_t g_pgeo_last_ptag[4] = { 0u, 0u, 0u, 0u };
 int g_dc_laser_jump = 0;               /* 09.10: сторож лазера (rl_emit_walk) — лазер прыгнул; main.cpp: DC_RING_LASER */
 static int s_pool_cur_player = 0;
 static uint32_t s_pool_cur_ctx = 0;   /* projector's character context: whose bone this is */
@@ -1134,14 +1139,15 @@ float dc_focus_damage_scale(void) {
  *            all (see the HUD), so a shot is judged by how close she is: full
  *            force in her face, half of it across the room. Buckshot spreading
  *            with distance is the real-world reason and the remakes' rule too.
- *   GRENADE  (0x30) - the reticle matters, but barely: 0.8 .. 1.1. The round
+ *   GRENADE  (0x30) - the reticle matters, but barely: 1.0 .. 1.2 since
+ *            27.10.2026 (was 0.8 .. 1.1, then a flat 1.0 from 15.10). The round
  *            detonates for area damage, so aiming it well is worth something
- *            and worth little.
+ *            and worth little; only the creature it struck gets the aim.
  * dist is in DC world units, measured from Regina to the creature (0 = unknown,
  * which falls back to the mid-range value). Tunable:
  *   DC_SG_NEAR / DC_SG_FAR      the range window (default 700 .. 3000)
  *   DC_SG_MAX  / DC_SG_MIN      its multipliers   (default 1.5 .. 0.5)
- *   DC_GL_MIN  / DC_GL_MAX      the launcher's band (default 1.0 .. 1.0 since 15.10.2026, was 0.8 .. 1.1)
+ *   DC_GL_MIN  / DC_GL_MAX      the launcher's band (default 1.0 .. 1.2 since 27.10.2026, 1.0 .. 1.0 from 15.10, was 0.8 .. 1.1)
  */
 static float envf(const char *name, float def) {
     const char *e = getenv(name);
@@ -1174,13 +1180,17 @@ float dc_damage_mult(int weapon, float dist) {
          * даёт раптору 1000 при его 850 HP на лёгком, а полоса 0.8..1.1 по прицелу оставляла ему 50 HP (журнал игрока 07.10:
          * «slot 3 hp 850 -> 50 (x0.80)»). Теперь множитель 1.0; спад у соседей по взрыву - в dc_grenade_tick.
          * DC_GL_MIN=0.8;DC_GL_MAX=1.1 - прежняя полоса. */
+        /* 27.10.2026 (игрок: «он должен идти от единички, а если перекрестие сходится, то 1-1.2»): с разведённым прицелом
+         * x1.0 - урон гранаты игры как есть, по мере сведения до x1.15 и x1.2 в замке (тот же щелчок кольца, что у
+         * пистолета). Только тому, в кого попала граната: соседям по взрыву - один спад по расстоянию (memory.c).
+         * DC_GL_MAX=1.0 - как с 15.10. */
         static float lo = -1.f, hi;
-        if (lo < 0.f) { lo = envf("DC_GL_MIN", 1.0f); hi = envf("DC_GL_MAX", 1.0f); }
+        if (lo < 0.f) { lo = envf("DC_GL_MIN", 1.0f); hi = envf("DC_GL_MAX", 1.2f); }
         if (hi - lo < 0.001f) return lo;
         float f = focus_curve(s_focus_shot);
         if (f >= 0.985f)
             return (s_hold_shot >= focus_hold_time()) ? hi : (hi - 0.05f);
-        return lo + (hi - 0.05f - lo) * f;              /* 0.8 .. 1.05, then 1.1 */
+        return lo + (hi - 0.05f - lo) * f;              /* 1.0 .. 1.15, then 1.2 */
     }
     return dc_focus_damage_scale();                     /* HANDGUN and the rest */
 }
@@ -1327,6 +1337,7 @@ int pt_poolgeom_vtxn(const uint32_t *packed, int n, float *fx, float *fy, float 
         if (i == 0) cx = e->ctx;
     }
     for (int i = n; i < 4; i++) g_pgeo_last_bone[i] = -1;
+    for (int i = 0; i < 4; i++) g_pgeo_last_ptag[i] = 0u;   /* 26.10: координаты - точные проекции, метку найдёт pgxp_pair_of */
     g_pvxn_hit++;
     g_pgeo_last_player = pl;
     g_pgeo_last_ctx = cx;
@@ -1373,7 +1384,7 @@ static uint64_t pgeo_key_uv(const uint32_t *packed, int n, uint32_t tpage, const
     return h ? h : 1;
 }
 static void pgeo_put(uint64_t key, int n, const float *fx, const float *fy, const float *w, int player, uint32_t ctx,
-                     const int *bone) {
+                     const int *bone, const uint32_t *ptag) {
     uint32_t h = (uint32_t)((key ^ (key >> 29)) & (PGEO_HASH - 1u));
     PGeoEnt *e = 0;
     for (uint32_t i = 0; i < PGEO_PROBE; i++) {
@@ -1387,6 +1398,7 @@ static void pgeo_put(uint64_t key, int n, const float *fx, const float *fy, cons
     { extern int g_dc_pass_id; e->pass = g_dc_pass_id; }
     for (int i = 0; i < n; i++) { e->fx[i] = fx[i]; e->fy[i] = fy[i]; e->w[i] = w[i]; }
     for (int i = 0; i < 4; i++) e->bone[i] = (int8_t)((bone && i < n) ? bone[i] : -1);   /* 20.10 */
+    for (int i = 0; i < 4; i++) e->ptag[i] = (ptag && i < n) ? ptag[i] : 0u;             /* 26.10 */
 }
 /* 25.09 ночь: проход сборки полигонов персонажа, пришедших в поток этого кадра (pt_poolgeom_prim) — по нему
  * pt_shx_take берёт не нарисованные игрой части того же кадра; -1 — таких не было (сброс в pt_poolgeom_frame) */
@@ -1520,6 +1532,7 @@ int pt_poolgeom_prim_uv(const uint32_t *packed, int n, uint32_t tpage, const uin
     g_pgeo_last_player = e->player;
     g_pgeo_last_ctx = e->ctx;
     for (int i = 0; i < 4; i++) g_pgeo_last_bone[i] = i < n ? e->bone[i] : -1;   /* 20.10 */
+    for (int i = 0; i < 4; i++) g_pgeo_last_ptag[i] = i < n ? e->ptag[i] : 0u;   /* 26.10 */
     return 1;
 }
 /* ⭐ 25.09.2026 — ПЕРСОНАЖ ЛИ ЭТО (флаг F_CHAR: окклюдер тени; «персонаж» тень от ламп на себя не получает). В сцене на
@@ -1619,7 +1632,9 @@ typedef struct { uint32_t addr, gen; int mx, my, mz, mid;
                  float rN[9], trN[3];    /* camera-removed: B (world rot) / P_world */     uint8_t player;                  /* bone belongs to the player (projector context) */
                  uint32_t ctx;           /* WHOSE bone: 0xB928C = Regina, 0xB7ACC+608k = an enemy */
                  int8_t bone;            /* 20.10: её кость (-1 - не её / не узнана) */
+                 uint32_t ptag;          /* 26.10: метка куска (gte.cpp g_dc_pair_last - проекция этой вершины; 0 - нет) */
 } PoolVtx;
+extern uint32_t g_dc_pair_last;          /* 26.10.2026: gte.cpp - метка последней проекции (пары кусков у дверей) */
 #define PV_HASH (1 << 16)
 static PoolVtx *s_pv;
 /* Pool coverage diagnostic: address ranges written by the projector vs read
@@ -1640,6 +1655,7 @@ static float s_pool_vrN[4][9], s_pool_vtrN[4][3];  /* camera-removed native (B /
 static uint32_t s_pool_vctx[4];                    /* which character each pool vertex belongs to */
 static int   s_pool_vplayer[4];                    /* owner of each pool vertex's bone */
 static int   s_pool_vbone[4] = { -1, -1, -1, -1 }; /* 20.10: её кость каждой вершины пула (-1 - нет) */
+static uint32_t s_pool_vtag[4];                    /* 26.10: метка куска каждой вершины пула (пары кусков у дверей) */
 
 /* Room library (DC_ROOM_LIBRARY): rooms exported from the game, matched to the view by the triangle votes of the
  * room walk (roomx_library_tick); the match picks per-room data such as camera collision. */
@@ -2407,6 +2423,7 @@ static void pv_store(uint32_t addr, int mx, int my, int mz, int mid,
     slot->player = (uint8_t)s_pool_cur_player;
     slot->ctx = s_pool_cur_ctx;
     slot->bone = (int8_t)s_pool_cur_bone;    /* 20.10 */
+    slot->ptag = g_dc_pair_last;             /* 26.10: хук идёт сразу за RTPT этих вершин - метка их прогона */
     memcpy(slot->r, r9, sizeof(slot->r));
     memcpy(slot->tr, tr3, sizeof(slot->tr));
     memcpy(slot->rN, rN, sizeof(slot->rN));
@@ -2767,6 +2784,7 @@ void pt_dc_poolprim(CPUState *cpu, uint32_t prim, uint32_t poolBase,
                      memcpy(s_pool_vtrN[k], pv->trN, sizeof(s_pool_vtrN[k]));
                      s_pool_vplayer[k] = pv->player;
                      s_pool_vbone[k] = pv->bone;
+                     s_pool_vtag[k] = pv->ptag;
                      s_pool_vctx[k] = pv->ctx; }
         uint32_t xy = cpu->read_word(pkt + pxy[k]);
         sx4[k] = (int16_t)(xy & 0xFFFF); sy4[k] = (int16_t)(xy >> 16);
@@ -2820,7 +2838,7 @@ void pt_dc_poolprim(CPUState *cpu, uint32_t prim, uint32_t poolBase,
                 uint32_t uvw[4];                         /* 04.10 (2): слова UV пакета (GT: +12/+24/+36/+48), как их читает gpu.c */
                 for (int k = 0; k < nv; k++) uvw[k] = cpu->read_word(pkt + 12u + 12u * (uint32_t)k);
                 pgeo_put(pgeo_key_uv(packed, nv, (uint32_t)(tpage & 0x1FFu), uvw), nv, fx, fy, fw,
-                         s_pool_vplayer[0], s_pool_vctx[0], s_pool_vbone);
+                         s_pool_vplayer[0], s_pool_vctx[0], s_pool_vbone, s_pool_vtag);
                 g_pgeo_pub++;
             }
             /* ---- direct draw: keep the whole primitive, reconstructed ----
@@ -2914,6 +2932,7 @@ void pt_dc_poolprim(CPUState *cpu, uint32_t prim, uint32_t poolBase,
                         b->player = 1;
                         b->stamp = s_pgeo_stamp;
                         for (int k = 0; k < 4; k++) b->bone[k] = (signed char)(k < nv ? s_pool_vbone[k] : -1);   /* 20.10 */
+                        for (int k = 0; k < 4; k++) b->ptag[k] = k < nv ? s_pool_vtag[k] : 0u;                    /* 26.10 */
                         { extern int g_dc_pass_id; b->pass = g_dc_pass_id; }
                         pps_put(cpu, pkt, nv, 3);    /* reconstructed: the game's copy is redundant */
                         for (int k = 0; k < nv; k++) { b->vx[k] = vvx[k]; b->vy[k] = vvy[k]; b->vz[k] = vvz[k]; }
@@ -3117,6 +3136,9 @@ extern float g_pt_proj_h, g_pt_proj_ofx, g_pt_proj_ofy;
 extern int   dc_nots_get_delta(float D[9], float T[3]);
 extern void  dcvk_push_tri(const float *v, int semi_mode, int ztest);
 extern int   dcvk_enabled(void);
+extern void  dcvk_pair_next(const unsigned *pq);   /* 26.10.2026: метки пар кусков следующего треугольника (NULL - нет) */
+extern uint32_t dc_pair_run_add(int pass, uint32_t key, const float M[9], const float t[3]);   /* gte.cpp: свой прогон пары */
+extern void  dc_pair_veto(int passA);               /* gte.cpp: у кадров между тактами A -> следующий пар нет */
 
 #define RRM_BASE   0x100000u          /* 0x80100000 in RAM */
 #define RRM_VADDR  0x80100000u
@@ -3126,6 +3148,7 @@ static int16_t  *s_rrm_v, *s_rrm_uv;
 static uint16_t *s_rrm_tp, *s_rrm_cx, *s_rrm_cy;
 static uint8_t  *s_rrm_rgb;
 static uint8_t  *s_rrm_code = NULL;   /* 27.09: старший байт первого цвета записи — код команды GPU (бит 1 — полупрозрачный) */
+static uint32_t *s_rrm_rec = NULL;    /* 28.10: адрес записи (& 0x1FFFFF, обе половины четырёхугольника - одна запись): по нему обход отмечает светильники */
 static int       s_rrm_n   = 0;
 static uint32_t  s_rrm_sig = 0;       /* signature of the RAM block we parsed */
 static uint32_t  s_rrm_ghdr[64]; static int s_rrm_ng = 0;   /* group-header addresses */
@@ -3338,6 +3361,7 @@ static void rrm_emit_prim(const uint8_t *ram, uint32_t voff, const int *order, i
     s_rrm_cx[t] = (uint16_t)((clut & 0x3F) * 16);
     s_rrm_cy[t] = (uint16_t)((clut >> 6) & 0x1FF);
     if (s_rrm_code) s_rrm_code[t] = (uint8_t)(rrm_u32(ram, coff) >> 24);
+    if (s_rrm_rec) s_rrm_rec[t] = voff & 0x1FFFFFu;
     s_rrm_n = t + 1;
 }
 
@@ -3362,6 +3386,7 @@ static int rrm_refresh(void) {
         s_rrm_rgb = (uint8_t*)malloc((size_t)9 * RRM_MAX);
         s_rrm_gi  = (uint8_t*)malloc((size_t)RRM_MAX);
         s_rrm_code = (uint8_t*)calloc((size_t)RRM_MAX, 1);
+        s_rrm_rec = (uint32_t*)calloc((size_t)RRM_MAX, sizeof(uint32_t));
         s_rrm_hcap = 1 << 16;
         s_rrm_hh  = (uint32_t*)malloc(sizeof(uint32_t) * s_rrm_hcap);
         s_rrm_hi  = (int32_t*)malloc(sizeof(int32_t) * s_rrm_hcap);
@@ -3759,10 +3784,84 @@ static int      s_rl_semi_m[RL_MAXSEMI];
 static int      s_rl_dither = 0;          /* 13.09: полигонов с дизеринг-маской, нарисованных ровным затемнением (за кадр) */
 static int      s_rl_semi_n = 0;
 
+/* ⭐ 26.10.2026 - НАША КОМНАТА В КАДРАХ МЕЖДУ ТАКТАМИ СЦЕНЫ (игрок: «in-game кат-сцены, in-game переходы, сама игра - то, что
+ * игрок выставил в настройках, вот та частота кадров и должна быть»). Кадры между тактами без нашей камеры (двери, сцены:
+ * gpu_vk_raster.cpp pair_build) ведут каждый кусок мира его парой «матрица кадра A -> матрица следующего такта», метку пары
+ * вершина несёт с проекции GTE. Нашу комнату рисуем мы сами, проекций GTE у неё нет: в сцене она стояла, пока ехала камера
+ * сцены, и пар не было вовсе (порог покрытия). Теперь у тела комнаты своя пара - пара прохода (passR/passT -> та же запись
+ * сейчас), у куска с историей, который едет не как тело, - своя (rl_ptag_of); метка уходит в растр с каждым треугольником
+ * (rl_push_tagged). Смена ракурса (поворот за такт больше ~3.4 градуса, скачок места) или пары тела нет - кадрам этого такта
+ * пар нет вовсе (dc_pair_veto: повтор кадра, как было). DC_PAIR_ROOM=0 - как было. */
+static uint32_t s_rl_ptag = 0;                    /* метка пары для треугольников, которые сейчас выводит обход (0 - нет) */
+static uint32_t s_rl_semi_tag[RL_MAXSEMI];        /* у отложенных полупрозрачных - своя */
+static float    s_rl_liftm[36][3];                /* подъём записи в осях куска (rf_lift, rl_obj_lift) с прошлой сборки */
+static void rl_push_tagged(const float *vv, int semi, uint32_t tag) {
+    if (!tag) { dcvk_push_tri(vv, semi, 1); return; }
+    const unsigned pq[3] = { tag, tag, tag };
+    dcvk_pair_next(pq);
+    dcvk_push_tri(vv, semi, 1);
+    dcvk_pair_next(NULL);
+}
+/* движение за такт: Rn = Q·Ra, Tn = Q·Ta + c (0 - матрица кадра A вырождена) */
+static int rl_motion(const float *Ra, const float *Ta, const float *Rn, const float *Tn, float *Q, float *c) {
+    const float a = Ra[0], b = Ra[1], cc = Ra[2], d = Ra[3], e = Ra[4], f = Ra[5], g = Ra[6], hh = Ra[7], i = Ra[8];
+    const float A = e * i - f * hh, B = -(d * i - f * g), C = d * hh - e * g;
+    const float det = a * A + b * B + cc * C;
+    if (fabsf(det) < 1e-6f) return 0;
+    const float k = 1.0f / det;
+    const float inv[9] = { A * k, -(b * i - cc * hh) * k, (b * f - cc * e) * k,
+                           B * k, (a * i - cc * g) * k, -(a * f - cc * d) * k,
+                           C * k, -(a * hh - b * g) * k, (a * e - b * d) * k };
+    for (int r = 0; r < 3; r++)
+        for (int q = 0; q < 3; q++)
+            Q[r * 3 + q] = Rn[r * 3] * inv[q] + Rn[r * 3 + 1] * inv[3 + q] + Rn[r * 3 + 2] * inv[6 + q];
+    for (int r = 0; r < 3; r++) c[r] = Tn[r] - (Q[r * 3] * Ta[0] + Q[r * 3 + 1] * Ta[1] + Q[r * 3 + 2] * Ta[2]);
+    return 1;
+}
+/* смена ракурса: поворот за такт больше ~3.4 градуса или точка в 4000 ед. перед камерой ушла дальше 400 ед. */
+static int rl_motion_cut(const float *Q, const float *c) {
+    if ((Q[0] + Q[4] + Q[8] - 1.0f) * 0.5f < 0.9982f) return 1;
+    const float x = Q[2] * 4000.f + c[0], y = Q[5] * 4000.f + c[1], z = (Q[8] - 1.0f) * 4000.f + c[2];
+    return x * x + y * y + z * z > 400.f * 400.f;
+}
+/* кусок едет как тело: Q·Ra = Rn, Q·Ta + c = Tn с допуском на целые числа игры */
+static int rl_moves_with(const float *Q, const float *c, const float *Ra, const float *Ta, const float *Rn, const float *Tn) {
+    for (int r = 0; r < 3; r++)
+        for (int q = 0; q < 3; q++) {
+            const float v = Q[r * 3] * Ra[q] + Q[r * 3 + 1] * Ra[3 + q] + Q[r * 3 + 2] * Ra[6 + q];
+            if (fabsf(v - Rn[r * 3 + q]) > 3e-3f) return 0;
+        }
+    float dt = 0.f;
+    for (int r = 0; r < 3; r++) dt += fabsf(Q[r * 3] * Ta[0] + Q[r * 3 + 1] * Ta[1] + Q[r * 3 + 2] * Ta[2] + c[r] - Tn[r]);
+    return dt <= 2.0f + 5e-4f * (fabsf(Ta[0]) + fabsf(Ta[1]) + fabsf(Ta[2]));
+}
+/* Пара куска: прогон кадра A (прошлый проход, g_dc_dma_pass) и прогон следующего такта (текущий проход) с одним ключом.
+ * Прогон следующего такта прошлой сборки и есть прогон кадра A этой, если матрица та же: тогда берём его метку и ключ
+ * (второй прогон с тем же ключом в проходе спутал бы пары). Иначе ключ новый: с солью прохода. 0 - прогона нет. */
+typedef struct { int passN; uint32_t key, tagA, tagN, gp; float M[9], t[3]; } RlPairMem;
+static RlPairMem s_rl_pm[37];                      /* 0..35 - записи таблицы, 36 - тело комнаты */
+static uint32_t rl_ptag_of(int slot, uint32_t key0, uint32_t gp, const float *Ra, const float *Ta, const float *Rn, const float *Tn) {
+    extern int g_dc_pass_id, g_dc_dma_pass;
+    if (slot < 0 || slot > 36) return 0u;
+    RlPairMem *m = &s_rl_pm[slot];
+    if (m->passN == g_dc_pass_id && m->gp == gp) return m->tagA;
+    uint32_t key, tA;
+    if (m->passN == g_dc_dma_pass && m->gp == gp && m->tagN && !memcmp(m->M, Ra, sizeof m->M) && !memcmp(m->t, Ta, sizeof m->t)) {
+        key = m->key; tA = m->tagN;
+    } else {
+        key = key0 ^ (gp * 0x9E3779B1u) ^ ((uint32_t)g_dc_dma_pass * 0x85EBCA77u) ^ ((uint32_t)slot * 0xC2B2AE35u);
+        tA = dc_pair_run_add(g_dc_dma_pass, key, Ra, Ta);
+    }
+    const uint32_t tN = tA ? dc_pair_run_add(g_dc_pass_id, key, Rn, Tn) : 0u;
+    m->passN = g_dc_pass_id; m->gp = gp; m->key = key; m->tagN = tN; m->tagA = tN ? tA : 0u;
+    memcpy(m->M, Rn, sizeof m->M); memcpy(m->t, Tn, sizeof m->t);
+    return m->tagA;
+}
+
 /* Pieces held back to be drawn after the room's body (see the walk). */
 #define RL_MAXOBJ 48
 typedef struct { float R[9], TR[3], Dm[9], Dt[3]; uint32_t tri, quad; int n_tri, n_quad; int plate; float dim;
-                 int ot_mode, ot_slot, ot_order; int glint; int live_k; } RLObj;   /* glint: 12.10 - предмет (секция типа 2), блеск */   /* ot_*: порядок консоли для двойников (15.09 ночь) */
+                 int ot_mode, ot_slot, ot_order; int glint; int live_k; uint32_t ptag; } RLObj;   /* glint: 12.10 - предмет (секция типа 2), блеск */   /* ot_*: порядок консоли для двойников (15.09 ночь) */
 static RLObj    s_rl_obj[RL_MAXOBJ];
 static int      s_rl_obj_n = 0;
 
@@ -6505,7 +6604,7 @@ extern int dc_tex_dither_pub2(uint16_t tpage, uint16_t cl, const int *u, const i
 typedef struct { float n[3], d; float p[4][3]; float mn[3], mx[3]; int nv, ax; uint32_t rec; } MtGreen;   /* rec (28.09): чья запись */
 typedef struct { uint32_t rec; int nv; float R[9], TR[3], D[9], T[3]; float h, ofx, ofy, wsx;
                  int world_space, is_object, npoly; float dim; const char *src;
-                 int ot_mode, ot_slot, ot_order; const uint8_t *mem; int live_k; } MtDef;   /* mem (17.09 вечер): чья память записи */
+                 int ot_mode, ot_slot, ot_order; const uint8_t *mem; int live_k; uint32_t ptag; } MtDef;   /* mem (17.09 вечер): чья память записи */
 static MtGreen  s_mt_g[MT_GMAX];
 static int      s_mt_gn = 0;
 static MtDef    s_mt_d[MT_DMAX];
@@ -7916,6 +8015,7 @@ extern int dc_secvis_forced(int k);
 static int va_active(void);                                 /* 16.09 ночь: комната со сборкой — варианты ближнего слоя решены (блок va_*), правило ракурса vs_* выкл. */
 static int vz_skip_poly(uint32_t rec);                      /* 17.09: версия чужого ракурса на месте (блок vz_*) — не рисуется */
 static int vz_has(uint32_t rec);                            /* 23.10 (2): то же без счётчика */
+static int vz_group_kind(const uint8_t *ram, uint32_t gp);  /* 27.10: группа - вариант места (1), кусок один (0), разбора нет (-1) */
 static int s_vz_n, s_vz_live;
 static void vz_frame_check(const uint8_t *ram);
 static void vz_walk_log(void);
@@ -8402,6 +8502,7 @@ static OpCell s_op[OP_GW * OP_GH];
 static int s_op_ready = 0;                                         /* сетка этого обхода собрана */
 static long s_op_tested = 0, s_op_pushed = 0, s_op_hid_tested = 0, s_op_hid_pushed = 0;
 static uint64_t s_op_hid = 0;                                      /* 23.10: записи, которые подпрограмма ракурса прячет (бит вернули мы) */
+static uint64_t s_op_hidv = 0;                                     /* 27.10: из них - варианты места (их уводит op_push_hidden) */
 static uint64_t s_op_vis = 0; static int s_op_cam = 0;             /* 23.10 (2): записи, которые она показывает; камера игры в оригинальном типе */
 static long s_op_vzkept = 0;
 static int op_dbg_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DC_ORIG_PAINTER_DBG"); v = (e && *e == '1') ? 1 : 0; } return v; }
@@ -8522,6 +8623,23 @@ static void op_shot_hold(const float *Rd, const float *Td, uint64_t *vis, uint64
                           "masks until the view changes (DC_ORIG_SHOT_HOLD=0 off)%c", room, *rec, s_os_rec, 10); }
     *vis = s_os_vis; *hid = s_os_hid; *rec = s_os_rec;
 }
+/* ⭐ 27.10.2026 (игрок, дев слот 0 - ST10D в оригинальном типе, ракурс проулка: «почему тут опять стал пропадать кусок забора,
+ * кусок сетки?»). Сетка в конце проулка - запись 8 таблицы (группа 101770): её показывает ракурс из клетки (подпрограмма 5), а
+ * подпрограмма ракурса проулка (2) прячет, бит ей возвращает наше объединение комнаты. С 23.10 грань записи, которую ракурс прячет,
+ * уходит за всё, что рисует консоль (op_push_hidden; в ST40A спрятанная запись - другой вариант той же стены), - и сетка ушла за
+ * двор. У сетки вариантов нет: разбор версий мест (vz_*) не нашёл у 101770 ни одной грани, которую покрывает кусок другого
+ * ракурса, - это единственный кусок мира, ракурс его просто не рисует (чистый кадр консоли - DC_FULLROOM_FORCE=0, DC_ROOM_SHOWALL=0,
+ * выход из ракурса и возврат: у самой игры сетки там нет; у нас до 23.10 она была). Теперь за консоль уходят только записи-варианты
+ * места (у группы есть грани-версии чужого ракурса; в ST40A - 105AE8, 1083CC, 10A2A8), спрятанный ракурсом единственный кусок -
+ * по общему правилу порядка, как до 23.10. Разбора версий для этой комнаты нет - как было. DC_ORIG_PAINTER_HIDDEN_VER=0 - как было. */
+static int op_hidden_ver_env(void) { static int v = -1; if (v < 0) { const char *e = getenv("DC_ORIG_PAINTER_HIDDEN_VER"); v = (e && *e == '0') ? 0 : 1; } return v; }
+/* ⭐ 27.10.2026 (игрок, дев слот 21 - ST50B в оригинальном типе: «полигоны пола, которые расположены над экранами визуально, мигают»).
+ * Над экранами нижнего этажа - решётка пола (постоянный слот), на экранах - тёмные добавочные накладки мерцания (запись 15, группа
+ * 123164, слот по глубине); игра включает их через кадр. Правило считало накладку тем, что консоль рисует позже, и в кадрах с ней
+ * уводило 6 граней решётки за неё - а значит и за сами экраны: через кадр экраны вставали поверх решётки. Полупрозрачное (бит 0x02
+ * команды GPU) у консоли ничего не закрашивает - то, что под ним, видно сквозь него (на кадре самой игры решётка поверх экранов в
+ * обоих кадрах). Теперь такие грани идут в сетку только как «консоль здесь что-то рисует» (zall). DC_ORIG_PAINTER_SEMI=0 - как было. */
+static int op_semi_env(void) { static int v = -1; if (v < 0) { const char *e = getenv("DC_ORIG_PAINTER_SEMI"); v = (e && *e == '0') ? 0 : 1; } return v; }
 static void op_build(const uint8_t *ram, uint32_t S, float h, const float *Rp, const float *Rc, const float *Tp, const float *Tc) {
     s_op_ready = 0;
     float X[9]; int xf = (Rp && Rc && Tp && Tc);
@@ -8555,9 +8673,10 @@ static void op_build(const uint8_t *ram, uint32_t S, float h, const float *Rp, c
     }
     if (op_shot_env() && !dc_room_shot_ready()) return;             /* 22.10 день: первый кадр комнаты/загрузки - без правила */
     memset(s_op, 0, sizeof s_op);
-    s_op_hid = 0;
+    s_op_hid = 0; s_op_hidv = 0;
     const int shift = ram[(S + 33u) & 0x1FFFFFu] & 15;
     const float zn = h * 0.5f;
+    long nsemi = 0;
     for (int k = 0; k < 36; k++) {
         const uint32_t e = S + 0x7CDCu + 136u * (uint32_t)k;
         if (e + 136u > 0x200000u) break;
@@ -8568,9 +8687,14 @@ static void op_build(const uint8_t *ram, uint32_t S, float h, const float *Rp, c
             static int lroom = -1, lcam = -1; static uint64_t lmask = 0; static long nlog = 0;
             if (lroom != dc_room_current() || lcam != shot_rec) { lroom = dc_room_current(); lcam = shot_rec; lmask = 0; }
             s_op_hid |= 1ull << k;
+            const int vk = op_hidden_ver_env() ? vz_group_kind(ram, gp) : -1;   /* 27.10: вариант места или единственный кусок */
+            if (vk != 0) s_op_hidv |= 1ull << k;
             if (!((lmask >> k) & 1ull) && ++nlog <= 200) { lmask |= 1ull << k;
                 fprintf(stderr, "orig painter: room %d camera record %d - slot %d grp %06X is hidden by the shot routine (its bit is ours): "
-                                "not counted as painted later (DC_ORIG_PAINTER_SHOT=0 off)%c", dc_room_current(), shot_rec, k, gp, 10); }
+                                "not counted as painted later (DC_ORIG_PAINTER_SHOT=0 off); %s%c", dc_room_current(), shot_rec, k, gp,
+                        vk == 1 ? "a version of a place - behind what the console draws" :
+                        vk == 0 ? "a single piece of the room (no other-shot versions) - ordered as the other pieces (DC_ORIG_PAINTER_HIDDEN_VER=0 off)" :
+                                  "no version analysis - behind what the console draws", 10); }
             continue;
         }
         const int mode = ram[e + 72u], fslot = rrm_u16(ram, e + 74u);
@@ -8615,12 +8739,18 @@ static void op_build(const uint8_t *ram, uint32_t S, float h, const float *Rp, c
                     const float zs = (mode == 0) ? zmin : (mode == 1) ? zmax : trz;
                     if (((int)zs >> shift) >= 900) key = -2;               /* так далеко, что консоль рисует это раньше тела */
                 }
+                if (key != -2 && op_semi_env() && ((rrm_u32(ram, r + (pass ? 36u : 28u)) >> 24) & 0x02u)) { key = -2; nsemi++; }   /* 27.10: сквозь него видно */
                 OpAdd ad = { key, r };
                 op_tri(p[0], p[1], p[2], h, op_cell_add, &ad);
                 if (nv == 4) op_tri(p[1], p[2], p[3], h, op_cell_add, &ad);
             }
         }
     }
+    { static int lroom = -1; static long lmax = 0, nlog = 0;
+      if (lroom != dc_room_current()) { lroom = dc_room_current(); lmax = 0; }
+      if (nsemi > lmax && ++nlog <= 200) { lmax = nsemi;
+          fprintf(stderr, "orig painter: room %d - %ld see-through polys (GPU semi bit) not counted as painting over the fixed slots, "
+                          "only as 'the console draws here' (DC_ORIG_PAINTER_SEMI=0 off)%c", lroom, nsemi, 10); } }
     s_op_ready = 1;
 }
 typedef struct { int32_t key; float margin; int cells, over; float zneed; int32_t kneed; float zown; int nc; uint32_t crec[6]; int ccnt[6]; } OpTest;
@@ -8746,6 +8876,33 @@ static float op_push_for(const RRVert *v, int nv, float h, int slot, int entry, 
 static inline int op_live_shown(void) {
     return s_op_cam && s_rl_in_walk && s_rl_live_k >= 0 && s_rl_live_k < 36 && ((s_op_vis >> s_rl_live_k) & 1ull);
 }
+/* 28.10.2026: КАКИЕ СВЕТИЛЬНИКИ «СВЕТИТСЯ» НАРИСОВАЛ ОБХОД (игрок, слот 49: «идешь вперед и прям видно как в глазах
+ * включаются эти дымка от света. А может быть и сам свет. А можно сделать, чтобы оно сразу все было включено и на глазах не
+ * появлялось?»). Свет брал лампы только из потока кадра: лампа входила в кадр - её свет и дымка загорались сразу, выходила -
+ * гасли. Теперь обход отмечает нарисованный им треугольник светильника (по адресу записи; таблицу строит glfix_refresh
+ * ниже), и растр знает все лампы комнаты, а не только видимые (dc_glow_fixture_present). DC_GLOW_LIGHT_ROOM=0 - как было. */
+enum { GLF_MAX = 128, GLF_TILE = 1600, GLF_TRI = 2048, GLH_N = 4096 };
+static uint32_t s_glh_rec[GLH_N];          /* адрес записи треугольника светильника (0 - пусто) */
+static int      s_glh_t[GLH_N];            /* первый треугольник меша этой записи (вторая половина четырёхугольника - следующий) */
+static uint32_t s_glh_sig = 0;              /* таблица собрана для меша с этой подписью (0 - нет) */
+static long    *s_rrm_tws = NULL;           /* по треугольникам меша: номер обхода растра (s_glf_dseq), последним его нарисовавшего (0 - не рисовал) */
+static long     s_glf_dseq = 0;             /* обходов растра, рисовавших комнату (свой счёт: обходов за кадр бывает больше одного) */
+static long     s_glf_wseen = -1;           /* обход (s_rl_walkseq), уже посчитанный в s_glf_dseq */
+static inline unsigned glh_slot(uint32_t r) { return (r * 2654435761u) >> 20; }   /* 12 бит */
+static void glfix_drawn(uint32_t rec) {
+    if (s_glf_wseen != s_rl_walkseq) { s_glf_wseen = s_rl_walkseq; s_glf_dseq++; }
+    if (!s_glh_sig || s_glh_sig != s_rrm_sig || !s_rrm_tws || !s_rrm_rec) return;
+    const uint32_t r = rec & 0x1FFFFFu;
+    unsigned h = glh_slot(r);
+    for (int k = 0; k < GLH_N; k++, h = (h + 1) & (GLH_N - 1)) {
+        if (!s_glh_rec[h]) return;
+        if (s_glh_rec[h] != r) continue;
+        const int t = s_glh_t[h];
+        s_rrm_tws[t] = s_glf_dseq;
+        if (t + 1 < s_rrm_n && s_rrm_rec[t + 1] == r) s_rrm_tws[t + 1] = s_glf_dseq;
+        return;
+    }
+}
 static int emit_dbg_match(uint32_t gp) {
     static int g = -1;
     if (g < 0) { const char *e = getenv("DC_EMIT_GP_DBG"); g = e ? (int)strtol(e, NULL, 16) : 0; }
@@ -8806,6 +8963,7 @@ static void rl_emit_poly(const uint8_t *ram, uint32_t rec, int nv,
             d->world_space = world_space; d->is_object = is_object;
             d->npoly = s_rl_piece_npoly; d->dim = s_rl_dim; d->src = s_rl_emit_src;
             d->ot_mode = s_rl_ot_mode; d->ot_slot = s_rl_ot_slot; d->ot_order = s_rl_ot_order; d->live_k = s_rl_live_k;
+            d->ptag = s_rl_ptag;
             return;
         }
     }
@@ -9024,8 +9182,8 @@ static void rl_emit_poly(const uint8_t *ram, uint32_t rec, int nv,
     /* 21.10 (3): кусок с постоянным слотом под камерой игры - за то, что консоль нарисует поверх него позже (op_*) */
     float op_push = 1.f;
     if (s_op_ready && s_rl_in_walk && (s_rl_target & 1)) {
-        if (s_rl_live_k >= 0 && s_rl_live_k < 36 && ((s_op_hid >> s_rl_live_k) & 1ull) && op_hidden_env())
-            op_push = op_push_hidden(v, nv, h, wsx, s_rl_live_k, rec);          /* 23.10: запись, которую прячет подпрограмма ракурса */
+        if (s_rl_live_k >= 0 && s_rl_live_k < 36 && ((s_op_hid >> s_rl_live_k) & 1ull) && op_hidden_env() && ((s_op_hidv >> s_rl_live_k) & 1ull))
+            op_push = op_push_hidden(v, nv, h, wsx, s_rl_live_k, rec);          /* 23.10: запись-вариант, которую прячет подпрограмма ракурса (27.10) */
         else if (s_rl_ot_mode == 2 && s_rl_ot_slot >= 900)
             op_push = op_push_for(v, nv, h, s_rl_ot_slot, s_rl_ot_order, rec);   /* 22.10: и номер записи (s_rl_ot_order 0..35 - запись таблицы) */
     }
@@ -9310,6 +9468,8 @@ static void rl_emit_poly(const uint8_t *ram, uint32_t rec, int nv,
         }
     }
 
+    /* 28.10: светильник есть в комнате этого кадра (в кадре он или нет, лицом или изнанкой); скрытый игроком - нет */
+    if (!zf_hide && s_rl_in_walk && (s_rl_target & 1)) glfix_drawn(rec);
     if (zf_hide) return;                        /* 13.09: скрытый полигон не рисуется (коллизию камеры он уже дал) */
     /* 13.09 (игрок): текстуры с прозрачными текселями (решётки, декали) —
      * двусторонние, всё остальное одностороннее; проверка кэшируется в gpu.c */
@@ -9725,9 +9885,10 @@ static void rl_emit_poly(const uint8_t *ram, uint32_t rec, int nv,
             if (semi >= 0 && s_rl_semi_n < RL_MAXSEMI) {
                 memcpy(s_rl_semi_v[s_rl_semi_n], vv, sizeof(vv));
                 s_rl_semi_m[s_rl_semi_n] = semi;
+                s_rl_semi_tag[s_rl_semi_n] = s_rl_ptag;
                 s_rl_semi_n++;
             } else {
-                dcvk_push_tri(vv, semi, 1);
+                rl_push_tagged(vv, semi, s_rl_ptag);
             }
             s_rl_tris++;
             if (s_rl_target == 1) s_rl_tris_r++;   /* 22.09: ушло именно в растр */
@@ -9749,6 +9910,7 @@ static void mt_flush(const uint8_t *ram) {
     if (s_mt_dn > 0) {
         float dim0 = s_rl_dim, pull0 = s_cur_plate_pull_units; int np0 = s_rl_piece_npoly; const char *src0 = s_rl_emit_src;
         int otm0 = s_rl_ot_mode, ots0 = s_rl_ot_slot, oto0 = s_rl_ot_order; const int lk0 = s_rl_live_k;
+        const uint32_t pt0 = s_rl_ptag;
         s_mt_flushing = 1;
         for (int i = 0; i < s_mt_dn; i++) {
             const MtDef *d = &s_mt_d[i];
@@ -9771,12 +9933,14 @@ static void mt_flush(const uint8_t *ram) {
                         if (si >= 0 && mt_green_in_frame(s_mt_sk_grn[si])) { hidden++; held++; continue; } }
             s_rl_dim = d->dim; s_rl_piece_npoly = d->npoly; s_rl_emit_src = d->src;
             s_rl_ot_mode = d->ot_mode; s_rl_ot_slot = d->ot_slot; s_rl_ot_order = d->ot_order; s_rl_live_k = d->live_k;
+            s_rl_ptag = d->ptag;
             rl_emit_poly(dm, d->rec, d->nv, d->R, d->TR, d->D, d->T, d->h, d->ofx, d->ofy, d->wsx, d->world_space, d->is_object);
             kept++;
         }
         s_mt_flushing = 0;
         s_rl_dim = dim0; s_cur_plate_pull_units = pull0; s_rl_piece_npoly = np0; s_rl_emit_src = src0;
         s_rl_ot_mode = otm0; s_rl_ot_slot = ots0; s_rl_ot_order = oto0; s_rl_live_k = lk0;
+        s_rl_ptag = pt0;
     }
     { static int lh = -1, lk = -1, lhd = -1, n = 0;
       if ((hidden != lh || kept != lk || held != lhd) && n < 60 && s_rl_target == 1) { lh = hidden; lk = kept; lhd = held; n++;
@@ -9945,7 +10109,9 @@ static int rl_obj_lift(const uint8_t *ram, uint32_t gp, int px, int py, int pz, 
 static void rl_emit_walk_body(void);
 static void rl_emit_walk(void) {                         /* 06.10.2026: рамка обхода для ответов «раз на обход» (rl_sor) */
     s_rl_walkseq++; s_rl_in_walk = 1;
+    s_rl_ptag = 0;
     rl_emit_walk_body();
+    s_rl_ptag = 0;
     s_rl_in_walk = 0;
 }
 static void rl_emit_walk_body(void) {
@@ -10075,6 +10241,7 @@ static void rl_emit_walk_body(void) {
     }
     { extern int g_dc_passdbg, g_dc_pass_id, g_dc_dma_pass, g_dc_body_pass;
       extern int dc_nots_delta_pass(int prev);
+
       if (g_dc_passdbg && s_rl_target == 1) {
           extern uint64_t s_frame_count; extern uint64_t gpu_flip_seq(void);
           fprintf(stderr, "passdbg: emit Dp_pass=%d D_pass=%d cur=%d dma_pass=%d body_pass=%d flip=%llu frame=%llu D0=%.4f\n",
@@ -10219,6 +10386,7 @@ static void rl_emit_walk_body(void) {
      * (второй проход в том же потоке) - по-прежнему fillm: там кусок обязан лечь на копию, уже стоящую в потоке.
      * DC_ROOM_SPAWN_PASS=0 - как было. */
     float passR[9], passT[3], passRc[9], passTc[3]; int pass_ok = 0;   /* 22.10: passTc - перенос того же куска сейчас */
+    int pass_bk = -1;                                                  /* 26.10: чья это пара (запись таблицы) */
     {   static int sp_on = -1;
         if (sp_on < 0) { const char *esp = getenv("DC_ROOM_SPAWN_PASS"); sp_on = (esp && *esp == '0') ? 0 : 1; }
         if (sp_on && s_rl_target == 1 && ref_known && !s_rl_cont_build) {
@@ -10241,8 +10409,69 @@ static void rl_emit_walk_body(void) {
                 for (int q = 0; q < 9; q++) { passR[q] = s_rl_prevR[bk][q];
                                               passRc[q] = (float)rrm_s16(ram, e2 + (uint32_t)q * 2u) * (1.0f / 4096.0f); }
                 for (int q = 0; q < 3; q++) { passT[q] = s_rl_prevTR[bk][q]; passTc[q] = (float)(int32_t)rrm_u32(ram, e2 + 20u + (uint32_t)q * 4u); }
-                pass_ok = 1;
+                pass_ok = 1; pass_bk = bk;
             }
+        }
+    }
+    /* ⭐ 28.10.2026 (игрок, слот 0: «пробежишь вперёд, потом назад - куски локации подгружаются, подгрузка слишком видна… чтобы
+     * подгруженный кусок сразу вставал на место»). Замер (skipq/walkrec.py w0a, кадр 130 = проход 27666, смена со следящей камеры на
+     * стоящую на беге назад): жильцы слотов 0/1 сменились, история есть только у 11DABC (то же место, но свой поворот), пара прохода
+     * берётся от него, и новые куски тела с ней не сходятся (поворот другой) - они шли fillm: парой достройки прошлого прохода, то
+     * есть записью таблицы ПОЗАПРОШЛОЙ сборки (перенос -8743,3461,9630), а дельта прохода построена против пары ПРОШЛОЙ (история
+     * 11DABC: -8771,3457,9683). Следящая камера игры за сборку уезжает, и вся комната с достройкой один кадр стояла там, где была
+     * кадр назад, а следующим кадром догоняла двойным шагом (flow.py: перила, стена, пол -1,+1 вместо +3,-3, потом +8,-7; Регина
+     * ровно). Пара тела прошлой сборки - запись, которую игра положила в прошлом проходе самому крупному куску: она запоминается на
+     * каждом проходе, и если эталон стоит с тем же местом, поворотом и родителем, новый кусок тела, который иначе ушёл бы в fillm,
+     * рисуется ею обычным путём (seedr, как seedp): комната в одном шаге с камерой. Пара прохода, ownrel, лазеры и сетка порядка не
+     * меняются; что показывать (скрипт комнаты) - тоже. DC_ROOM_SPAWN_REC=0 - как было. */
+    float recR[9], recT[3], recRc[9]; int pass_rec = 0; uint32_t rec_from = 0;
+    {   static int sr_on = -1;
+        if (sr_on < 0) { const char *esr = getenv("DC_ROOM_SPAWN_REC"); sr_on = (esr && *esr == '0') ? 0 : 1; }
+        static float rec_R[9], rec_T[3]; static int16_t rec_pt[6]; static uint32_t rec_S = 0, rec_gp = 0; static long rec_pass = -10;
+        if (sr_on && s_rl_target == 1) {
+            const uint32_t er = (vs_refk >= 0) ? S + 0x7CDCu + 136u * (uint32_t)vs_refk : 0u;
+            const uint32_t par = er ? (rrm_u32(ram, er + 64u) & 0x1FFFFFFFu) : 1u;
+            const int er_ok = ref_known && er && (par == 0u || par == ((S + 180u) & 0x1FFFFFFFu));
+            if (!s_rl_cont_build && er_ok && rec_S == S && rec_pass == s_rl_passno - 1) {
+                int same = 1;
+                for (int q = 0; q < 3; q++)
+                    if (rrm_s16(ram, er + 32u + 2u * (uint32_t)q) != rec_pt[q] || rrm_s16(ram, er + 40u + 2u * (uint32_t)q) != rec_pt[3 + q]) same = 0;
+                if (same) {
+                    for (int q = 0; q < 9; q++) { recR[q] = rec_R[q]; recRc[q] = (float)rrm_s16(ram, er + (uint32_t)q * 2u) * (1.0f / 4096.0f); }
+                    for (int q = 0; q < 3; q++) recT[q] = rec_T[q];
+                    pass_rec = 1; rec_from = rec_gp;
+                }
+            }
+            if (er_ok) {                     /* запись этой сборки - пара тела следующего прохода (и после сборки-продолжения, как история) */
+                for (int q = 0; q < 9; q++) rec_R[q] = (float)rrm_s16(ram, er + (uint32_t)q * 2u) * (1.0f / 4096.0f);
+                for (int q = 0; q < 3; q++) rec_T[q] = ref_T[q];
+                for (int q = 0; q < 3; q++) { rec_pt[q] = rrm_s16(ram, er + 32u + 2u * (uint32_t)q); rec_pt[3 + q] = rrm_s16(ram, er + 40u + 2u * (uint32_t)q); }
+                rec_S = S; rec_gp = rrm_u32(ram, er + 60u) & 0x1FFFFFFFu; rec_pass = s_rl_passno;
+            } else rec_pass = -10;
+        }
+    }
+    /* 26.10.2026: пара тела нашей комнаты на кадры между тактами (rl_ptag_of, у s_rl_ptag выше). Только с учётом пар (main.cpp: экран
+     * мира без нашей камеры между тактами) и единичной дельтой - кадр строит камера игры. Перенос записи сейчас - с подъёмом прошлой
+     * сборки (сверка в обходе). Смены ракурса или пары нет - кадрам этого такта пар нет (dc_pair_veto). */
+    uint32_t room_tag = 0; float roomQ[9], roomC[3], room_tN[3] = { 0.f, 0.f, 0.f };
+    {   static int pr_on = -1;
+        if (pr_on < 0) { const char *epr = getenv("DC_PAIR_ROOM"); pr_on = (epr && *epr == '0') ? 0 : 1; }
+        extern int g_dc_pair_track, g_dc_pass_id, g_dc_dma_pass;
+        int unit = 1;
+        for (int q = 0; q < 9; q++) if (fabsf(D[q] - ((q % 4 == 0) ? 1.f : 0.f)) > 1e-5f) unit = 0;
+        for (int q = 0; q < 3; q++) if (fabsf(T[q]) > 1e-3f) unit = 0;
+        if (pr_on && g_dc_pair_track && s_rl_target == 1 && unit && !s_rl_cont_build && ram[0xB7878] == 3) {
+            int ok = 0;
+            if (pass_ok && pass_bk >= 0 && g_dc_pass_id == g_dc_dma_pass + 1) {
+                for (int q = 0; q < 3; q++)
+                    room_tN[q] = passTc[q] - (passRc[q * 3] * s_rl_liftm[pass_bk][0] + passRc[q * 3 + 1] * s_rl_liftm[pass_bk][1] +
+                                              passRc[q * 3 + 2] * s_rl_liftm[pass_bk][2]);
+                if (rl_motion(passR, passT, passRc, room_tN, roomQ, roomC) && !rl_motion_cut(roomQ, roomC)) {
+                    room_tag = rl_ptag_of(36, 0x524F4F4Du, 0u, passR, passT, passRc, room_tN);
+                    ok = room_tag != 0;
+                }
+            }
+            if (!ok) dc_pair_veto(g_dc_dma_pass);
         }
     }
     /* ⭐ 01.10 (2) — НОВЫЙ ЭТАЛОН БЕЗ ИСТОРИИ (игрок, слот 12: «появились мусорные кадры (видимо подгрузка частей локации)»).
@@ -10345,6 +10574,7 @@ static void rl_emit_walk_body(void) {
      * misaligned actor slots (see memory.c for the arithmetic). */
     for (int k = 0; k < 36; k++) {
         s_rl_live_k = -1;
+        s_rl_ptag = 0;
         uint32_t e = S + 0x7CDCu + 136u * (uint32_t)k;
         if (e + 136u > 0x200000u) break;
         /* DC_LAMP_DBG_ALL=1 (14.09 вечер): состояние ВСЕХ 36 слотов таблицы на каждом
@@ -10649,6 +10879,18 @@ static void rl_emit_walk_body(void) {
           } }
         { const int ol = rl_obj_lift(ram, gp, rrm_s16(ram, e + 32u), rrm_s16(ram, e + 34u), rrm_s16(ram, e + 36u), "walk");   /* 21.10: лист ST202 */
           if (ol) { TRcur[0] -= R[1] * (float)ol; TRcur[1] -= R[4] * (float)ol; TRcur[2] -= R[7] * (float)ol; } }
+        if (s_rl_target == 1 && k < 36) {                     /* 26.10.2026: подъём записи в осях куска - пара тела следующей сборки */
+            const float d0 = (float)(int32_t)rrm_u32(ram, e + 20u) - TRcur[0], d1 = (float)(int32_t)rrm_u32(ram, e + 24u) - TRcur[1],
+                        d2 = (float)(int32_t)rrm_u32(ram, e + 28u) - TRcur[2];
+            s_rl_liftm[k][0] = R[0] * d0 + R[3] * d1 + R[6] * d2;
+            s_rl_liftm[k][1] = R[1] * d0 + R[4] * d1 + R[7] * d2;
+            s_rl_liftm[k][2] = R[2] * d0 + R[5] * d1 + R[8] * d2;
+            if (room_tag && k == pass_bk &&                   /* подъём с прошлой сборки не тот: пара тела ведёт не туда - пар нет */
+                fabsf(TRcur[0] - room_tN[0]) + fabsf(TRcur[1] - room_tN[1]) + fabsf(TRcur[2] - room_tN[2]) > 6.0f) {
+                extern int g_dc_dma_pass;
+                dc_pair_veto(g_dc_dma_pass);
+            }
+        }
         float TR[3];
         /* room body or a placed thing? needed before the substitution below */
         float dtr0 = fabsf(TRcur[0]-cT[0]) + fabsf(TRcur[1]-cT[1]) + fabsf(TRcur[2]-cT[2]);
@@ -10713,6 +10955,13 @@ static void rl_emit_walk_body(void) {
                      fabsf(R[4]-passRc[4]) + fabsf(R[5]-passRc[5]) + fabsf(R[6]-passRc[6]) + fabsf(R[7]-passRc[7]) +
                      fabsf(R[8]-passRc[8]) < 0.02f;
           const int hist_old2 = strobe_pass && body_like && have[slot] && (s_rl_passno - s_rl_prevseen[slot]) >= 2;
+          /* 28.10: новый кусок тела, которому пара прохода не годится (её кусок со своим поворотом или его нет), - записью таблицы прошлой
+           * сборки (pass_rec выше), только вместо пути fillm */
+          const int body_rec = !body_like && pass_rec && mprev && s_rl_target == 1 && !own_place && hide_on &&
+                     s_rl_fresh_left[ci4] == 0 && s_fillprev_ok[1] &&
+                     fabsf(R[0]-recRc[0]) + fabsf(R[1]-recRc[1]) + fabsf(R[2]-recRc[2]) + fabsf(R[3]-recRc[3]) +
+                     fabsf(R[4]-recRc[4]) + fabsf(R[5]-recRc[5]) + fabsf(R[6]-recRc[6]) + fabsf(R[7]-recRc[7]) +
+                     fabsf(R[8]-recRc[8]) < 0.02f;
           /* ⭐ 01.10.2026 — КУСОК СО СВОИМ РАЗМЕЩЕНИЕМ, ЗАПИСЬ ТАБЛИЦЫ НЕ СВЕЖАЯ (игрок, слот 17, ST606: «лазеры смещаются при беге
            * Регины, надо, чтобы оставались на месте»). Лазерная решётка у склада — две секции (слоты 10/11, тип 4), игра включает их
            * через кадр (+48: 3/1) и в кадр «выкл» матрицу записи не пересчитывает. Обход рисует кусок историей слота (запись прохода
@@ -10825,6 +11074,32 @@ static void rl_emit_walk_body(void) {
               for (int q = 0; q < 9; q++) prevR[slot][q] = Rc[q];
               for (int q = 0; q < 3; q++) prevTR[slot][q] = TRcur[q];
               have[slot] = 1;
+          } else if (body_rec) {
+              /* 28.10 (DC_ROOM_SPAWN_REC, pass_rec выше): новый кусок тела на проходе смены - парой тела прошлой сборки, обычным путём */
+              msrc = "seedr";
+              if (s_rl_mtxlog_left[ci4] > 0) {                           /* замер: на сколько сдвинулся бы путь fillm этого прохода */
+                  uint32_t t0 = rrm_u32(ram, gp + 0) & 0x1FFFFFFFu, q0 = rrm_u32(ram, gp + 4) & 0x1FFFFFFFu;
+                  uint32_t r0 = (rrm_u16(ram, gp + 8) > 0) ? t0 : q0;
+                  if (r0 >= 0x100000u && r0 + 8u < 0x200000u) {
+                      float m3[3] = { (float)rrm_s16(ram, r0), (float)rrm_s16(ram, r0 + 2), (float)rrm_s16(ram, r0 + 4) }, pn[3], po[3], fT0[3];
+                      for (int q = 0; q < 3; q++)
+                          fT0[q] = s_fillprev_T[1][q] - (s_fillprev_R[1][q * 3] * s_fillprev_P[1][0] + s_fillprev_R[1][q * 3 + 1] * s_fillprev_P[1][1] +
+                                                         s_fillprev_R[1][q * 3 + 2] * s_fillprev_P[1][2]);
+                      rl_dbg_xf(m3, recR, recT, D, T, pn);
+                      rl_dbg_xf(m3, s_fillprev_R[1], fT0, D, T, po);
+                      extern uint64_t gpu_flip_seq(void);
+                      if (pn[2] > 1.f && po[2] > 1.f)
+                          fprintf(stderr, "spawnrec: f=%llu gp=%06X new body piece drawn with the previous build's record of grp %06X (T=%.0f,%.0f,%.0f); "
+                                          "the fillm way would put it %.1f,%.1f px off (of 320x240; depth %.0f) (DC_ROOM_SPAWN_REC=0 off)%c",
+                                  (unsigned long long)gpu_flip_seq(), gp & 0xFFFFFFu, rec_from & 0xFFFFFFu, recT[0], recT[1], recT[2],
+                                  (po[0] / po[2] - pn[0] / pn[2]) * h, (po[1] / po[2] - pn[1] / pn[2]) * h, pn[2], 10);
+                  } }
+              float Rc[9]; for (int q = 0; q < 9; q++) Rc[q] = R[q];
+              for (int q = 0; q < 9; q++) R[q] = recR[q];
+              for (int q = 0; q < 3; q++) TR[q] = recT[q];
+              for (int q = 0; q < 9; q++) prevR[slot][q] = Rc[q];
+              for (int q = 0; q < 3; q++) prevTR[slot][q] = TRcur[q];
+              have[slot] = 1;
           } else if (hide_on && mprev && s_rl_target == 1 && s_rl_fresh_left[ci4] == 0 &&
                      s_fillprev_ok[1] && !own_place) {   /* 15.09: fillm — только тело комнаты */
               /* THE FIRST BUILD OF A NEW PIECE STANDS WHERE ITS STANDING COPY
@@ -10921,6 +11196,13 @@ static void rl_emit_walk_body(void) {
           }
           if (s_rl_target == 1) { s_rl_prevgp[slot] = gp;
                                   s_rl_prevseen[slot] = s_rl_passno; }
+          if (room_tag) {                                   /* 26.10.2026: чьей парой кусок едет между тактами (rl_ptag_of) */
+              if (!strcmp(msrc, "hist"))                    /* кадр A - история, следующий такт - запись сейчас */
+                  s_rl_ptag = rl_moves_with(roomQ, roomC, R, TR, prevR[slot], prevTR[slot])
+                              ? room_tag : rl_ptag_of(slot, 0x53454354u, gp, R, TR, prevR[slot], prevTR[slot]);
+              else if (!strcmp(msrc, "ownrel") || !strcmp(msrc, "seedp") || !strcmp(msrc, "strobep") || !strcmp(msrc, "seedr"))
+                  s_rl_ptag = room_tag;                     /* нарисован парой прохода - едет с телом */
+          }
           /* forensics: which matrix each piece was REALLY drawn with, for a
            * few passes around every cut (bounded; silent outside the window) */
           { int ci2 = (s_rl_target >= 0 && s_rl_target <= 2) ? s_rl_target : 0;
@@ -11046,6 +11328,7 @@ static void rl_emit_walk_body(void) {
                 ob->n_tri = n_tri; ob->n_quad = n_quad;
                 ob->plate = 0; ob->dim = piece_dim;
                 ob->ot_mode = s_rl_ot_mode; ob->ot_slot = s_rl_ot_slot; ob->ot_order = s_rl_ot_order; ob->live_k = s_rl_live_k;
+                ob->ptag = s_rl_ptag;
                 ob->glint = (ram[e + 46u] == 2) ? 1 : 0;   /* 12.10: предмет - блеск (rl_glint_*) */
             }
             pieces++;
@@ -11077,6 +11360,7 @@ static void rl_emit_walk_body(void) {
                 ob->n_tri = n_tri; ob->n_quad = n_quad;
                 ob->plate = 1; ob->dim = piece_dim;
                 ob->ot_mode = s_rl_ot_mode; ob->ot_slot = s_rl_ot_slot; ob->ot_order = s_rl_ot_order; ob->live_k = s_rl_live_k;
+                ob->ptag = s_rl_ptag;
                 ob->glint = 0;
                 pieces++;
                 continue;
@@ -11092,6 +11376,7 @@ static void rl_emit_walk_body(void) {
         pieces++;
     }
     s_rl_live_k = -1;
+    s_rl_ptag = 0;
 
     /* ===== THE REST OF THE ROOM, DRAWN BY US =====================
      * The game keeps only the current shot up: its script destroys slots 0..20
@@ -11296,6 +11581,7 @@ static void rl_emit_walk_body(void) {
                     ob->n_tri = n_tri; ob->n_quad = n_quad;
                     ob->plate = 1; ob->dim = 1.f;
                     ob->ot_mode = s_rl_ot_mode; ob->ot_slot = s_rl_ot_slot; ob->ot_order = s_rl_ot_order; ob->live_k = s_rl_live_k;
+                    ob->ptag = 0u;
                     ob->glint = 0;
                     if (seen_n < 64) seen_gp[seen_n++] = gp;
                     drew++; pieces++;
@@ -11492,6 +11778,7 @@ static void rl_emit_walk_body(void) {
         s_rl_piece_npoly = ob->n_tri + ob->n_quad;
         s_rl_dim = (ob->dim > 0.f) ? ob->dim : 1.f;
         s_rl_ot_mode = ob->ot_mode; s_rl_ot_slot = ob->ot_slot; s_rl_ot_order = ob->ot_order; s_rl_live_k = ob->live_k;
+        s_rl_ptag = ob->ptag;
         s_rl_glint = (ob->glint && rl_glint_frame_on())                          /* 12.10: блеск предмета (rl_glint_*) */
                      ? rl_glint_setup(ram, ob->tri, ob->n_tri, ob->quad, ob->n_quad, ob->R, ob->TR, ob->Dm, ob->Dt) : 0;
         for (int i = 0; i < ob->n_tri; i++)
@@ -11502,6 +11789,7 @@ static void rl_emit_walk_body(void) {
         s_rl_dim = 1.f;
       } }
     s_rl_live_k = -1;
+    s_rl_ptag = 0;
     mt_flush(ram);                          /* 14.09 вечер: отложенные решётки */
     if (s_rl_target == 1) f8_lists_merge(); /* 15.09: снимок списков F8 без мигания */
     if (s_rl_target == 1) {                 /* 15.09 ночь: сколько двойников ушло за победителя консоли */
@@ -11594,7 +11882,7 @@ static void rl_emit_walk_body(void) {
 
     /* and finally what is see-through, over the finished opaque room */
     for (int si = 0; si < s_rl_semi_n; si++)
-        dcvk_push_tri(s_rl_semi_v[si], s_rl_semi_m[si], 1);
+        rl_push_tagged(s_rl_semi_v[si], s_rl_semi_m[si], s_rl_semi_tag[si]);
     /* count this frame's votes: which exported room we are in */
     { static int dbg2 = -1; static long n2 = 0;
       if (dbg2 < 0) { const char *e4 = getenv("DC_RL_DBG"); dbg2 = (e4 && *e4 == '1') ? 1 : 0; }
@@ -12208,17 +12496,24 @@ void dc_impact_spawn(void) {
  * трассой от последней позиции по направлению полёта (только если поверхность ближе 600 ед. — попадание в
  * существо декали не даёт). DC_GRENADE=0 — выключить (старое поведение: декаль от триггера выстрела). */
 static struct { uint32_t entry; uint64_t frame; int active, overridden, has_hit, cls; float hit[3], nrm[3], dir[3]; int16_t last[3]; int creature, forced, passive, turning;
-                int victim, struck; float voff[3]; } s_gl;   /* 15.10: цель под перекрестием, кого граната достала касанием, точка прицела от места цели */
+                int victim, struck; float voff[3];
+                int tset; } s_gl;   /* 15.10: цель под перекрестием, кого граната достала касанием, точка прицела от места цели; 27.10: касание записано */
 static uint32_t s_gl_same[4]; static int s_gl_nsame = 0; static uint64_t s_gl_same_f = 0;   /* 13.10 ночь: записи одного выстрела */
 static int s_gl_en = -1;
 static int dc_grenade_enabled(void) { if (s_gl_en < 0) { const char *e = getenv("DC_GRENADE"); s_gl_en = (e && *e == '0') ? 0 : 1; } return s_gl_en; }
 void dc_grenade_note_alloc(uint32_t entry, uint32_t ra) {
+    { extern int dc_bloodprobe_on(void); extern uint64_t s_frame_count;     /* 27.10.2026: кто берёт записи эффектов после выстрела */
+      static long n = 0; const uint32_t ep = entry & 0x1FFFFFu;
+      if (entry && dc_bloodprobe_on() && s_gl.frame && s_frame_count - s_gl.frame < 300 && ++n <= 300)
+          fprintf(stderr, "bloodprobe: effect entry 0x%05X (pool index %d) taken by %08X, frame %llu (+%llu after the launcher's shot)%c", ep,
+                  ep >= 0xBD81Cu && ep < 0xBD81Cu + 124u * 100u && (ep - 0xBD81Cu) % 124u == 0u ? (int)((ep - 0xBD81Cu) / 124u) : -1, ra,
+                  (unsigned long long)s_frame_count, (unsigned long long)(s_frame_count - s_gl.frame), 10); }
     if (!dc_grenade_enabled() || !entry) return;
     uint32_t rp = ra & 0x1FFFFFu; if (rp < 0x160000u || rp >= 0x180000u) return;     /* только из кода оверлея оружия */
     const uint8_t *ram = memory_get_ram_ptr(); if (!ram || (ram[0xB94CC] & 0xF0) != 0x30) return;
     extern uint64_t s_frame_count;
     s_gl.entry = entry & 0x1FFFFFu; s_gl.frame = s_frame_count; s_gl.active = 1; s_gl.overridden = 0; s_gl.has_hit = 0; s_gl.creature = 0; s_gl.forced = 0; s_gl.passive = 0;
-    s_gl.victim = -1; s_gl.struck = -1;
+    s_gl.victim = -1; s_gl.struck = -1; s_gl.tset = 0;
     { extern int dc_aim_turning(float *err_deg); s_gl.turning = dc_aim_turning(NULL); }   /* 09.10: в момент выстрела */
     /* 13.10 ночь: заряд, который пускает несколько снарядов за выстрел (три записи в одном кадре), - все из дула */
     if (s_gl_same_f != s_frame_count) { s_gl_same_f = s_frame_count; s_gl_nsame = 0; }
@@ -12276,6 +12571,31 @@ static void gl_others_to_muzzle(uint8_t *ram, uint32_t main_e) {
  * точке прицела на её теле (точка едет вместе с существом) или ближе DC_GRENADE_CONTACT_BODY (650) к его середине (на 600 выше
  * места) - взрыв в этой точке, и существо получает попадание гранаты игры (+286 |= 0x80, +416 = 0x0830 - урон и реакция её
  * кодом) целиком. Те же отсевы цели, что у игры; попала игра сама - ничего не делаем. Обе дальности 0 - только столкновение игры. */
+/* 27.10.2026: точка, где граната коснулась своей цели (кровь на ней - dc_grenade_touch_point). Снаряд летит по лучу прицела в
+ * точку на теле цели (луч по её полигонам в кадр выстрела, точка едет вместе с ней) и там встречает меш: касание - эта точка,
+ * если снаряд в этот миг не дальше DC_GL_TOUCH_AIM (1500) от неё, иначе (цель ушла или развернулась) - где был снаряд.
+ * Запись - по слоту существа: следующий выстрел её не стирает, брызги игры идут ещё ~35 кадров после касания. */
+static struct { float pt[3]; uint64_t vb; } s_gl_touch[10];
+static void gl_touch_at(const uint8_t *ram, const int16_t p[3], const char *how) {
+    extern uint64_t s_frame_count;
+    static float near_aim = -1.f;
+    if (near_aim < 0.f) near_aim = gl_env_f("DC_GL_TOUCH_AIM", 1500.f);
+    float t[3] = { (float)p[0], (float)p[1], (float)p[2] }, da = -1.f;
+    const int v = s_gl.victim;
+    if (v >= 0 && v < 10) {
+        const uint32_t a = 0xB7ACCu + (uint32_t)v * 608u;
+        const float q[3] = { (float)gl_i16(ram, a + 32) + s_gl.voff[0], (float)gl_i16(ram, a + 34) + s_gl.voff[1], (float)gl_i16(ram, a + 36) + s_gl.voff[2] };
+        da = sqrtf((q[0] - t[0]) * (q[0] - t[0]) + (q[1] - t[1]) * (q[1] - t[1]) + (q[2] - t[2]) * (q[2] - t[2]));
+        if (da <= near_aim) for (int i = 0; i < 3; i++) t[i] = q[i];
+        for (int i = 0; i < 3; i++) s_gl_touch[v].pt[i] = t[i];
+        s_gl_touch[v].vb = s_frame_count ? s_frame_count : 1;
+    }
+    s_gl.tset = 1;
+    static long n = 0;
+    if (++n <= 60) fprintf(stderr, "grenade: touched its target slot %d at %.0f,%.0f,%.0f (%s; %s - the projectile at %d,%d,%d, %.0f from the aim point)%c",
+                           v, (double)t[0], (double)t[1], (double)t[2], how, da >= 0.f && da <= near_aim ? "the aim point on its body" : "where the projectile was",
+                           p[0], p[1], p[2], (double)da, 10);
+}
 static void gl_contact(uint8_t *ram, uint32_t e, const int16_t pos[3]) {
     static float rp = -1.f, rb = 0.f;
     if (rp < 0.f) { rp = gl_env_f("DC_GRENADE_CONTACT", 450.f); rb = gl_env_f("DC_GRENADE_CONTACT_BODY", 650.f); }
@@ -12283,7 +12603,7 @@ static void gl_contact(uint8_t *ram, uint32_t e, const int16_t pos[3]) {
     const uint32_t a = 0xB7ACCu + (uint32_t)s_gl.victim * 608u;
     const uint32_t al = (uint32_t)ram[a + 48] | ((uint32_t)ram[a + 49] << 8);
     if (!(al & 1u) || gl_i16(ram, a + 280) <= 0 || (ram[a + 286] & 0x40) || (ram[a + 373] & 0x80)) return;   /* отсевы цели игры */
-    if (ram[a + 286] & 0x80) { s_gl.struck = s_gl.victim; return; }                   /* попала игра сама */
+    if (ram[a + 286] & 0x80) { s_gl.struck = s_gl.victim; if (!s_gl.tset) gl_touch_at(ram, pos, "the game's collision, in flight"); return; }   /* попала игра сама */
     const float ax = (float)gl_i16(ram, a + 32), ay = (float)gl_i16(ram, a + 34), az = (float)gl_i16(ram, a + 36);
     const float p0[3] = { (float)s_gl.last[0], (float)s_gl.last[1], (float)s_gl.last[2] };
     const float p1[3] = { (float)pos[0], (float)pos[1], (float)pos[2] };
@@ -12301,21 +12621,46 @@ static void gl_contact(uint8_t *ram, uint32_t e, const int16_t pos[3]) {
     }
     if (which < 0) return;
     extern void dc_grenade_defer_explode(uint32_t obj, const int16_t pos[3]);
-    extern void dc_blast_victim(int slot, float k);
+    extern void dc_grenade_contact_victim(int slot);
     int16_t ep[3]; for (int i = 0; i < 3; i++) ep[i] = (int16_t)lroundf(bp[i]);
     dc_grenade_defer_explode(e, ep);
     ram[a + 286] |= 0x80; gl_w16(ram, a + 416, 0x0830);
-    dc_blast_victim(s_gl.victim, 1.0f);                       /* гейт промаха пропускает, множитель 1 */
+    dc_grenade_contact_victim(s_gl.victim);                   /* гейт промаха пропускает; 27.10: множитель прицела его */
     s_gl.forced = 1; s_gl.struck = s_gl.victim;
     static long n = 0;
     if (++n <= 60) fprintf(stderr, "grenade: reached its target slot %d (%s, %.0f inside the reach) - explodes at %d,%d,%d, the full hit%c",
                            s_gl.victim, which == 0 ? "the aim point on its body" : "its body centre", (double)-best, ep[0], ep[1], ep[2], 10);
+    gl_touch_at(ram, ep, "our contact, the blast point");
+}
+/* ⭐ 27.10.2026 - КРОВЬ ТИРАНОЗАВРА ОТ ГРАНАТЫ - ТАМ, ГДЕ ОНА ЕГО КОСНУЛАСЬ (игрок: «у тиранозавра не спавнится кровь там, где
+ * снаряд его касается; у всех остальных всё нормально»). Его брызги на попадание гранаты ставит код этапа через проигрыватель
+ * заскриптованных эффектов игры - каждую на смещении от кости, где бы граната его ни задела; memory.c dc_seq_blood_place
+ * переносит их сюда: где снаряд коснулся той, в кого целились (gl_touch_at: наше касание или столкновение игры - снаряд ещё
+ * в своей записи, иначе последняя точка полёта). 1 - точка есть (actor - адрес актёра), 0 - граната его не касалась или
+ * дольше 90 кадров назад. */
+int dc_grenade_touch_point(uint32_t actor, float out[3]) {
+    extern uint64_t s_frame_count;
+    uint8_t *ram = memory_get_ram_ptr();
+    if (!ram || !dc_grenade_enabled()) return 0;
+    const uint32_t a = actor & 0x1FFFFFu;
+    if (a < 0xB7ACCu || a >= 0xB7ACCu + 10u * 608u || (a - 0xB7ACCu) % 608u != 0u) return 0;
+    const int slot = (int)((a - 0xB7ACCu) / 608u);
+    if (slot == s_gl.victim && !s_gl.passive && !s_gl.tset && s_gl.active && (ram[a + 286] & 0x80)) {   /* столкновение игры в этом же такте, до нашего тика */
+        const uint32_t e = s_gl.entry;
+        if (e + 124 <= 0x200000u && ram[e + 39] == s_gl.cls) {
+            const int16_t p[3] = { gl_i16(ram, e + 32), gl_i16(ram, e + 34), gl_i16(ram, e + 36) };
+            gl_touch_at(ram, p, "the game's collision, this tick");
+        } else gl_touch_at(ram, s_gl.last, "the game's collision, its last flight point");
+    }
+    if (!s_gl_touch[slot].vb || s_frame_count - s_gl_touch[slot].vb > 90) return 0;
+    for (int i = 0; i < 3; i++) out[i] = s_gl_touch[slot].pt[i];
+    return 1;
 }
 void dc_grenade_tick(void) {
     /* 18.10.2026 (разбор кода): быстрая загрузка подменила память - снаряд прежнего мира забыт. Иначе его запись пула
      * в загруженной памяти (чужой эффект или граната с сейва) получала нашу копоть от прежней позиции или наши углы. */
     { extern int g_savestate_loads; static int ld = 0;
-      if (ld != g_savestate_loads) { ld = g_savestate_loads; s_gl.active = 0; s_gl_nsame = 0; } }
+      if (ld != g_savestate_loads) { ld = g_savestate_loads; s_gl.active = 0; s_gl_nsame = 0; memset(s_gl_touch, 0, sizeof s_gl_touch); } }
     if (!s_gl.active) return;
     uint8_t *ram = memory_get_ram_ptr(); if (!ram) { s_gl.active = 0; return; }
     extern uint64_t s_frame_count;
@@ -12427,6 +12772,14 @@ void dc_grenade_tick(void) {
       for (int i = 0; i < 3; i++) fp[i] = ok ? hit[i] + n[i] * 250.f : lp[i];
       dc_flash_boom(fp); }
     { static long n2 = 0; if (++n2 <= 60) fprintf(stderr, "grenade: end cls %d st %d pos %d,%d,%d last %d,%d,%d -> decal %s %.0f,%.0f,%.0f%c", cls, state, pos[0], pos[1], pos[2], s_gl.last[0], s_gl.last[1], s_gl.last[2], ok ? "yes" : "no", hit[0], hit[1], hit[2], 10); }
+    /* 27.10.2026: её встретило столкновение игры - точка касания для крови (dc_grenade_touch_point), до взрыва по соседям */
+    if (!s_gl.passive && s_gl.victim >= 0 && !s_gl.tset) {
+        const uint32_t va = 0xB7ACCu + (uint32_t)s_gl.victim * 608u;
+        if ((ram[va + 286] & 0x80) || s_gl.struck == s_gl.victim) {
+            if (cls == s_gl.cls) gl_touch_at(ram, pos, "the game's collision, where the projectile ended");
+            else gl_touch_at(ram, s_gl.last, "the game's collision, its last flight point");
+        }
+    }
     /* 06.10.2026 (player: "the grenade - damage by radius; the dinosaurs must react - if the code has it, good, if not, add
      * it"): the game's grenade hurts only the creature it struck (actor+286 |= 0x80, +416 = 0x0830 - the hit the projectile
      * writes); the blast hurts nobody. Every other living creature within DC_GRENADE_RADIUS (2200) of the blast now gets
@@ -15017,6 +15370,227 @@ static void tlamp_refresh(void) {
     }
 }
 
+/* ===== СВЕТИЛЬНИКИ ДЛЯ СВЕТА ОТ СВЕТЯЩИХСЯ ТЕКСТУР (27.10.2026) ===========================================================
+ * Игрок (слот 1): «свечение от ламп нужно сделать, чтобы оно все-таки было привязано к их источникам ... это свечение, оно
+ * остается на месте, а там уже этой лампы, так сказать, нету источника. То есть такие вот, как это, остаточный след
+ * остается». Свет (gpu_vk_raster.cpp «СВЕТ ОТ СВЕТЯЩИХСЯ ТЕКСТУР») собирал ВИДИМЫЕ треугольники «светится» в группы: ближе
+ * 800 ед. к центру первой подходящей. Состав групп зависел от того, что видно, и в каком порядке: в ST107 (потолочное кольцо
+ * ламп) при простом повороте камеры центры групп уезжали на 1000-1700 ед., а прежний след держался секунду там, где лампы
+ * нет. Теперь светильники - из меша комнаты (как лампы-текстуры для теней): связные треугольники «светится»; шире 1600 ед. -
+ * на равные плитки по своей рамке. У светильника неподвижный центр по площади, площадь и рамка в координатах комнаты; растр
+ * относит к нему видимый треугольник по рамке, и точка света стоит на светильнике, что бы ни было видно.
+ * DC_GLOW_LIGHT_FIX=0 - группы видимого, как было. */
+/* GLF_MAX, GLF_TILE - выше, у отметок обхода (glfix_drawn) */
+static float    s_glf_c[GLF_MAX][4];        /* центр (комната) и площадь */
+static float    s_glf_b[GLF_MAX][6];        /* рамка вершин: min xyz, max xyz */
+static unsigned s_glf_key[GLF_MAX];         /* по центру (сетка 32 ед.): тот же светильник после пересборки - тот же ключ */
+static int      s_glf_n = 0;
+/* 28.10: треугольники светильников - треугольник меша, его светильник, площадь (растр берёт по ним цвет и размер лампы) */
+static int      s_glf_tt[GLF_TRI];
+static int16_t  s_glf_tf[GLF_TRI];
+static float    s_glf_ta[GLF_TRI];
+static int      s_glf_tn = 0;
+static unsigned s_glf_gen = 0;              /* растёт с каждой пересборкой светильников */
+static int glroom_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DC_GLOW_LIGHT_ROOM"); v = (e && *e == '0') ? 0 : 1; }
+    return v;
+}
+static void glfix_clear(void) { s_glf_n = 0; s_glf_tn = 0; s_glh_sig = 0; s_glf_gen++; }
+static void glfix_refresh(void) {
+    extern int dc_tex_class(uint16_t tpage, uint16_t clut_x, uint16_t clut_y, const int *u, const int *v, int n);
+    extern unsigned dc_tex_class_gen(void);
+    static uint32_t sig = 0; static unsigned gen = 0; static long tick = 0;
+    static uint8_t *mark = NULL; static int mcap = 0, nmark = 0, grouped = -1;
+    if (rrm_refresh() <= 0 || !s_rrm_v || !s_rrm_uv) { if (s_glf_n || s_glh_sig) glfix_clear(); sig = 0; return; }
+    const unsigned g = dc_tex_class_gen();
+    int fresh = 0;
+    if (sig != s_rrm_sig || gen != g || mcap < s_rrm_n) {
+        if (mcap < s_rrm_n) {
+            free(mark); mcap = s_rrm_n + 1024; mark = (uint8_t *)calloc((size_t)mcap, 1);
+            if (!mark) { mcap = 0; glfix_clear(); return; }
+        } else memset(mark, 0, (size_t)mcap);
+        sig = s_rrm_sig; gen = g; nmark = 0; grouped = -1; fresh = 1;
+    }
+    if (!fresh && (++tick % 60) != 0) return;                        /* досбор - раз в ~секунду (экраны анимированы) */
+    for (int t = 0; t < s_rrm_n; t++) {
+        if (mark[t]) continue;
+        const int16_t *uv = &s_rrm_uv[t * 6];
+        const int u[3] = { uv[0], uv[2], uv[4] }, v[3] = { uv[1], uv[3], uv[5] };
+        if (dc_tex_class(s_rrm_tp[t], s_rrm_cx[t], s_rrm_cy[t], u, v, 3) & 4) { mark[t] = 1; nmark++; }
+    }
+    if (grouped == nmark) return;                                    /* набор тот же - светильники те же */
+    grouped = nmark;
+    /* связность - как у ламп-текстур: центры ближе суммы размахов + 30 ед. */
+    enum { GFN = 2048 };
+    static int ti[GFN], par[GFN], lab[GFN]; static float cen[GFN][3], ar[GFN], ext[GFN];
+    int ng = 0;
+    for (int t = 0; t < s_rrm_n && ng < GFN; t++) {
+        if (!mark[t]) continue;
+        const int16_t *m = &s_rrm_v[t * 9];
+        float p[3][3];
+        for (int k = 0; k < 3; k++) for (int q = 0; q < 3; q++) p[k][q] = (float)m[k * 3 + q];
+        const float e1[3] = { p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2] };
+        const float e2[3] = { p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2] };
+        const float cx = e1[1] * e2[2] - e1[2] * e2[1], cy = e1[2] * e2[0] - e1[0] * e2[2], cz = e1[0] * e2[1] - e1[1] * e2[0];
+        const float a = 0.5f * sqrtf(cx * cx + cy * cy + cz * cz);
+        if (a < 0.5f) continue;
+        ti[ng] = t; par[ng] = ng; ar[ng] = a;
+        for (int q = 0; q < 3; q++) cen[ng][q] = (p[0][q] + p[1][q] + p[2][q]) / 3.f;
+        float mx = 0.f;
+        for (int k = 0; k < 3; k++) {
+            const float dx = p[k][0] - cen[ng][0], dy = p[k][1] - cen[ng][1], dz = p[k][2] - cen[ng][2];
+            const float d = sqrtf(dx * dx + dy * dy + dz * dz); if (d > mx) mx = d;
+        }
+        ext[ng] = mx; ng++;
+    }
+    for (int i = 0; i < ng; i++)
+        for (int j = i + 1; j < ng; j++) {
+            const float dx = cen[i][0] - cen[j][0], dy = cen[i][1] - cen[j][1], dz = cen[i][2] - cen[j][2];
+            const float lim = ext[i] + ext[j] + 30.f;
+            if (dx * dx + dy * dy + dz * dz < lim * lim) { const int a = tl_find(par, i), b = tl_find(par, j); if (a != b) par[b] = a; }
+        }
+    /* рамка каждой связной группы; шире GLF_TILE по оси - равные плитки по этой оси (до 8), треугольник - в плитку по центру */
+    static float rb[GFN][6];
+    for (int i = 0; i < ng; i++) if (tl_find(par, i) == i) { for (int q = 0; q < 3; q++) { rb[i][q] = 1e30f; rb[i][3 + q] = -1e30f; } }
+    for (int i = 0; i < ng; i++) {
+        const int r = tl_find(par, i);
+        const int16_t *m = &s_rrm_v[ti[i] * 9];
+        for (int k = 0; k < 3; k++) for (int q = 0; q < 3; q++) {
+            const float x = (float)m[k * 3 + q];
+            if (x < rb[r][q]) rb[r][q] = x;
+            if (x > rb[r][3 + q]) rb[r][3 + q] = x;
+        }
+    }
+    for (int i = 0; i < ng; i++) {
+        const int r = tl_find(par, i);
+        int ix[3];
+        for (int q = 0; q < 3; q++) {
+            const float e = rb[r][3 + q] - rb[r][q];
+            int nt = (int)ceilf(e / (float)GLF_TILE); if (nt < 1) nt = 1; if (nt > 8) nt = 8;
+            int k = (int)((cen[i][q] - rb[r][q]) / (e > 1e-3f ? e : 1.f) * (float)nt);
+            if (k < 0) k = 0; if (k > nt - 1) k = nt - 1;
+            ix[q] = k;
+        }
+        lab[i] = (r << 9) | (ix[0] << 6) | (ix[1] << 3) | ix[2];
+    }
+    /* светильники: площадь, центр по площади, рамка вершин */
+    static int fl[GFN], gfi[GFN], f2n[GFN]; static float fa[GFN], fc[GFN][3], fb[GFN][6];
+    int nf = 0;
+    for (int i = 0; i < ng; i++) {
+        int f = 0; while (f < nf && fl[f] != lab[i]) f++;
+        if (f == nf) { fl[nf] = lab[i]; fa[nf] = 0.f; for (int q = 0; q < 3; q++) { fc[nf][q] = 0.f; fb[nf][q] = 1e30f; fb[nf][3 + q] = -1e30f; } nf++; }
+        gfi[i] = f;
+        fa[f] += ar[i];
+        for (int q = 0; q < 3; q++) fc[f][q] += cen[i][q] * ar[i];
+        const int16_t *m = &s_rrm_v[ti[i] * 9];
+        for (int k = 0; k < 3; k++) for (int q = 0; q < 3; q++) {
+            const float x = (float)m[k * 3 + q];
+            if (x < fb[f][q]) fb[f][q] = x;
+            if (x > fb[f][3 + q]) fb[f][3 + q] = x;
+        }
+    }
+    /* больше GLF_MAX - самые крупные */
+    int ord[GFN]; for (int f = 0; f < nf; f++) ord[f] = f;
+    for (int a = 1; a < nf; a++) { const int k = ord[a]; int b = a - 1; while (b >= 0 && fa[ord[b]] < fa[k]) { ord[b + 1] = ord[b]; b--; } ord[b + 1] = k; }
+    for (int f = 0; f < nf; f++) f2n[f] = -1;
+    int n = 0;
+    for (int oi = 0; oi < nf && n < GLF_MAX; oi++) {
+        const int f = ord[oi];
+        if (fa[f] < 1.f) continue;
+        for (int q = 0; q < 3; q++) s_glf_c[n][q] = fc[f][q] / fa[f];
+        s_glf_c[n][3] = fa[f];
+        for (int q = 0; q < 6; q++) s_glf_b[n][q] = fb[f][q];
+        const int qx = (int)floorf(s_glf_c[n][0] / 32.f), qy = (int)floorf(s_glf_c[n][1] / 32.f), qz = (int)floorf(s_glf_c[n][2] / 32.f);
+        s_glf_key[n] = (((unsigned)qx * 73856093u) ^ ((unsigned)qy * 19349663u) ^ ((unsigned)qz * 83492791u)) | 1u;
+        f2n[f] = n;
+        n++;
+    }
+    s_glf_n = n;
+    /* 28.10: треугольники светильников и таблица «адрес записи -> треугольник меша» для отметок обхода; отметки - по
+     * треугольникам меша, пересборка светильников того же меша их не теряет */
+    s_glf_tn = 0; s_glh_sig = 0; s_glf_gen++;
+    memset(s_glh_rec, 0, sizeof s_glh_rec);
+    if (glroom_on() && !s_rrm_tws) s_rrm_tws = (long *)calloc((size_t)RRM_MAX, sizeof(long));
+    { static uint32_t tws_sig = 0;
+      if (s_rrm_tws && tws_sig != s_rrm_sig) { memset(s_rrm_tws, 0, sizeof(long) * RRM_MAX); tws_sig = s_rrm_sig; } }
+    for (int i = 0; i < ng && s_glf_tn < GLF_TRI; i++) {
+        const int fo = f2n[gfi[i]];
+        if (fo < 0) continue;
+        const int t = ti[i];
+        s_glf_tt[s_glf_tn] = t; s_glf_tf[s_glf_tn] = (int16_t)fo; s_glf_ta[s_glf_tn] = ar[i]; s_glf_tn++;
+        const uint32_t r = s_rrm_rec ? s_rrm_rec[t] : 0u;
+        if (!r) continue;
+        unsigned h = glh_slot(r);
+        for (int k = 0; k < GLH_N; k++, h = (h + 1) & (GLH_N - 1)) {
+            if (!s_glh_rec[h]) { s_glh_rec[h] = r; s_glh_t[h] = t; break; }
+            if (s_glh_rec[h] == r) break;                      /* вторая половина того же четырёхугольника */
+        }
+    }
+    if (s_glf_tn > 0 && s_rrm_tws && glroom_on()) s_glh_sig = s_rrm_sig;
+    int nroot = 0; for (int i = 0; i < ng; i++) nroot += tl_find(par, i) == i;
+    fprintf(stderr, "glowfix: %d light fixtures from %d 'glows' triangles of the room mesh (%d connected groups); %d triangles %s%c",
+            n, nmark, nroot, s_glf_tn, s_glh_sig ? "watched on the walk (DC_GLOW_LIGHT_ROOM)" : "not watched", 10);
+    for (int i = 0; i < n && i < 24; i++)
+        fprintf(stderr, "  F%02d center %.0f,%.0f,%.0f area %.0f box %.0f..%.0f x %.0f..%.0f x %.0f..%.0f%c", i,
+                s_glf_c[i][0], s_glf_c[i][1], s_glf_c[i][2], s_glf_c[i][3], s_glf_b[i][0], s_glf_b[i][3],
+                s_glf_b[i][1], s_glf_b[i][4], s_glf_b[i][2], s_glf_b[i][5], 10);
+}
+/* для растра (gpu_vk_raster.cpp gl_lights_build, кадр A - тот же поток, что и разбор комнаты): светильники комнаты;
+ * 0 - их нет или правило выключено */
+int dc_glow_fixtures(const float **cen4, const float **box6, const unsigned **key) {
+    static int en = -1;
+    if (en < 0) { const char *e = getenv("DC_GLOW_LIGHT_FIX"); en = (e && *e == '0') ? 0 : 1;
+        fprintf(stderr, "glowfix: light of 'glows' textures - %s (DC_GLOW_LIGHT_FIX)%c",
+                en ? "at the room's fixed light fixtures, held only for blinking lamps" : "groups of what is visible (as before)", 10); }
+    if (!en || !dc_room_live_on()) return 0;
+    glfix_refresh();
+    *cen4 = &s_glf_c[0][0]; *box6 = &s_glf_b[0][0]; *key = s_glf_key;
+    return s_glf_n;
+}
+/* 28.10: для растра (после dc_glow_fixtures того же кадра): что из светильников нарисовал обход в одном из 3 последних обходов
+ * растра, рисовавших комнату (в кадре это или нет): pres[f] - светильник f, td[i] - i-й треугольник светильников (как у
+ * dc_glow_fixture_tri); *walk_seq - счёт таких обходов (стоит - комнату рисует игра: судить по потоку); *gen - номер сборки
+ * светильников (сменился - цвет и площадь по мешу заново). Возврат - число светильников, 0 - правило выключено или таблицы нет */
+int dc_glow_fixture_present(unsigned char *pres, int cap, unsigned char *td, int tcap, long *walk_seq, unsigned *gen) {
+    *walk_seq = s_glf_dseq;
+    *gen = s_glf_gen;
+    if (!s_glh_sig || s_glh_sig != s_rrm_sig || !s_rrm_tws) return 0;
+    const int n = s_glf_n < cap ? s_glf_n : cap;
+    for (int f = 0; f < n; f++) pres[f] = 0;
+    for (int i = 0; i < s_glf_tn; i++) {
+        const long w = s_rrm_tws[s_glf_tt[i]];
+        const int d = w != 0 && w + 2 >= s_glf_dseq;
+        if (i < tcap) td[i] = (unsigned char)d;
+        if (d && s_glf_tf[i] < n) pres[s_glf_tf[i]] = 1;
+    }
+    return n;
+}
+/* 28.10: i-й треугольник светильников (цвет текстуры и площадь лампы по мешу комнаты): светильник, страница (9 бит, как у
+ * потока), CLUT (точка видеопамяти), UV, цвета вершин, код команды GPU (бит 1 - полупрозрачный, бит 0 - без смешения с цветом),
+ * площадь, вершины в координатах комнаты, *two - обход не режет его изнанку (полупрозрачный или с прозрачными текселями:
+ * окно UV - по обеим половинам четырёхугольника, как у обхода); 0 - больше нет */
+int dc_glow_fixture_tri(int i, int *fix, int *tp, int *cx, int *cy, int uv[6], int rgb[9], int *code, float *area, float v9[9], int *two) {
+    if (i < 0 || i >= s_glf_tn || !s_rrm_uv || !s_rrm_rgb || !s_rrm_v) return 0;
+    const int t = s_glf_tt[i];
+    if (t >= s_rrm_n) return 0;
+    *fix = s_glf_tf[i]; *tp = s_rrm_tp[t] & 0x1FF; *cx = s_rrm_cx[t]; *cy = s_rrm_cy[t];
+    for (int k = 0; k < 6; k++) uv[k] = s_rrm_uv[t * 6 + k];
+    for (int k = 0; k < 9; k++) { rgb[k] = s_rrm_rgb[t * 9 + k]; v9[k] = (float)s_rrm_v[t * 9 + k]; }
+    *code = s_rrm_code ? s_rrm_code[t] : 0;
+    *area = s_glf_ta[i];
+    *two = (*code & 2) != 0;
+    if (!*two) {
+        int u[6], v[6], n = 0;
+        for (int k = 0; k < 3; k++) { u[n] = s_rrm_uv[t * 6 + k * 2]; v[n] = s_rrm_uv[t * 6 + k * 2 + 1]; n++; }
+        const uint32_t r = s_rrm_rec ? s_rrm_rec[t] : 0u;
+        const int o = (r && t + 1 < s_rrm_n && s_rrm_rec[t + 1] == r) ? t + 1 : (r && t > 0 && s_rrm_rec[t - 1] == r) ? t - 1 : -1;
+        if (o >= 0) for (int k = 0; k < 3; k++) { u[n] = s_rrm_uv[o * 6 + k * 2]; v[n] = s_rrm_uv[o * 6 + k * 2 + 1]; n++; }
+        *two = dc_tex_has_alpha_pub(s_rrm_tp[t], (uint16_t)(((unsigned)s_rrm_cx[t] / 16u) | ((unsigned)s_rrm_cy[t] << 6)), u, v, n);
+    }
+    return 1;
+}
+
 /* 27.09: слои карты теней этого кадра — габарит группы ламп (координаты комнаты) на слой; по нему объёмный свет
  * (dc_vol_frame) узнаёт, у какой лампы есть тень персонажей для дымки */
 static float s_shcl_min[4][3], s_shcl_max[4][3];
@@ -15160,6 +15734,224 @@ static void sh_down_frustum(const float L[3], float rad, float fade, float tan_m
     *znear = 60.f;
     *zfar = sqrtf(h * h * (1.f + t * t)) * 1.15f + 300.f;
     *th = t;
+}
+/* ===== КАРТА ЛАМПЫ ПО ТЕЛАМ (26.10) ===== Игрок: «тени бывают обрезаны, по какому принципу - не очень понятно ... в самом
+ * начале (слот 8), у Гейла в первой сцене на движке». Тень лежит на луче лампа -> тело: если направление на часть тела вне
+ * карты лампы, тень этой части срезана краем карты (на стене - прямой линией). Карта вниз (sh_down_frustum) вмещает углы только
+ * до круга тени на полу: в слоте 8 лампа G08 ниже голов (верх тела над её плоскостью - тень на стене срезало на высоте лампы),
+ * в первой сцене G01 на 250 выше головы Гейла и в 755 вбок (голова на 72° от низа, карта - до 62°). Теперь углы габаритов
+ * заслонивших (s_ocl) у лампы (ближняя точка не дальше её радиуса x DC_SHADOW_FIT_REACH) проверяются по карте вниз:
+ *   - влезают (не дальше 0.94 от середины, дальше край гаснет) - карта как была, бит в бит;
+ *   - не влезают - карта конусом: наименьший охватывающий конус углов и кольца прежней карты (круг тени на полу; не влезло в
+ *     80° - углов и дальних групп до радиуса тени, нет - только углов; нет и так - карта вниз), с запасом 5°. Конус держится,
+ *     пока все в нём (тень стоящего не меняется от каждого шага Регины), назад вниз - когда влезут в неё с запасом (0.85) и
+ *     продержатся так 0.5 с (габариты групп от кадра к кадру шумят).
+ * ⛔ Пробовал сперва ту же карту вниз, шире ступенями x1.25 (ось стоит): в первой сцене нужное раскрытие ходило 4.9..6.1 около
+ * предела 5.67, и карта металась между «шире вниз» и конусом каждые 10-20 кадров; конус с кольцом к тому же уже (4.8).
+ * DC_SHADOW_FIT=0 - как до 26.10. Части тел вне кадра в s_ocl не попадают - для них карта прежняя. */
+static int sh_fit_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DC_SHADOW_FIT"); v = (e && *e == '0') ? 0 : 1; }
+    return v;
+}
+static float sh_fit_reach(void) {
+    static float v = -1.f;
+    if (v < 0.f) { const char *e = getenv("DC_SHADOW_FIT_REACH"); v = (e && *e) ? (float)atof(e) : 1.f; if (!(v >= 0.f)) v = 1.f; }
+    return v;
+}
+static int sh_fit_dbg(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DC_SHCAM_DBG"); v = (e && *e == '1') ? 1 : 0; }
+    return v;
+}
+#define SH_FIT_NP   (OCC_CL * 8)
+/* слой: s_fit_md 0 - карта вниз как была, 1 - конус (ось, раскрытие, предел угла от оси; с кольцом прежней карты или без, с
+ * дальними группами или без); s_fit_t0 - с какого кадра тела влезают вниз с запасом (0 - не влезают) */
+static int      s_fit_md[4], s_fit_ring[4], s_fit_far[4];
+static float    s_fit_ax[4][3], s_fit_th[4], s_fit_lim[4];
+static uint64_t s_fit_t0[4];
+static long     s_fit_nl = 0;
+static void sh_fit_reset(int L) { if (L >= 0 && L < 4) { s_fit_md[L] = 0; s_fit_t0[L] = 0; } }
+/* углы габаритов групп заслонивших - направления от лампы: N - группы, чья ближняя к лампе точка не дальше reach, F - дальше, но
+ * не дальше R (туда ещё доходит её тень). Всё тело группы - в выпуклой оболочке углов: что вмещает углы, вмещает и его. Углы
+ * ближе 250 к лампе - мимо */
+static void sh_fit_corners(const float L[3], float reach, float R, float N[][3], int *nn, float F[][3], int *nf, int *ng) {
+    *nn = 0; *nf = 0; *ng = 0;
+    for (int c = 0; c < s_ocl_cnt && c < OCC_CL; c++) {
+        float dd = 0.f;
+        for (int k = 0; k < 3; k++) {
+            const float v = L[k] < s_ocl_lo[c][k] ? s_ocl_lo[c][k] - L[k] : (L[k] > s_ocl_hi[c][k] ? L[k] - s_ocl_hi[c][k] : 0.f);
+            dd += v * v;
+        }
+        if (dd > R * R) continue;
+        const int nearg = dd <= reach * reach;
+        if (nearg) (*ng)++;
+        for (int m = 0; m < 8; m++) {
+            const float d[3] = { ((m & 1) ? s_ocl_hi[c][0] : s_ocl_lo[c][0]) - L[0], ((m & 2) ? s_ocl_hi[c][1] : s_ocl_lo[c][1]) - L[1],
+                                 ((m & 4) ? s_ocl_hi[c][2] : s_ocl_lo[c][2]) - L[2] };
+            const float dl = sqrtf(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+            if (dl < 250.f) continue;
+            float *o = nearg ? N[(*nn)++] : F[(*nf)++];
+            o[0] = d[0] / dl; o[1] = d[1] / dl; o[2] = d[2] / dl;
+        }
+    }
+}
+/* какое раскрытие нужно карте вниз, чтобы направления P легли не дальше 0.94 от середины (x карты = -dx, y = dz, глубина = dy);
+ * у плоскости лампы и выше - 1e9 */
+static float sh_fit_tneed(const float P[][3], int n) {
+    float t = 0.f;
+    for (int i = 0; i < n; i++) {
+        if (P[i][1] < 1e-3f) return 1e9f;
+        const float ax = fabsf(P[i][0]), az = fabsf(P[i][2]);
+        const float q = (ax > az ? ax : az) / (P[i][1] * 0.94f);
+        if (q > t) t = q;
+    }
+    return t;
+}
+/* кольцо прежней карты вниз: 16 направлений на её раскрытии вокруг низа (круг тени на полу) */
+static int sh_fit_ring_dirs(float tdn, float U[][3]) {
+    const float a = atanf(tdn), sa = sinf(a), ca = cosf(a);
+    for (int k = 0; k < 16; k++) {
+        const float ph = (float)k * 0.39269908f;
+        U[k][0] = sa * cosf(ph); U[k][1] = ca; U[k][2] = sa * sinf(ph);
+    }
+    return 16;
+}
+static int sh_fit_in(const float a[3], const float ax[3], float c) { return a[0]*ax[0] + a[1]*ax[1] + a[2]*ax[2] >= c - 1e-6f; }
+/* наименьший конус на два и на три направления (ось ax, вернуть cos половины раскрытия) */
+static float sh_fit_cap2(const float a[3], const float b[3], float ax[3]) {
+    const float s[3] = { a[0] + b[0], a[1] + b[1], a[2] + b[2] };
+    const float l = sqrtf(s[0]*s[0] + s[1]*s[1] + s[2]*s[2]);
+    if (l < 1e-6f) { ax[0] = a[0]; ax[1] = a[1]; ax[2] = a[2]; return -1.f; }   /* противоположные - не вместить */
+    ax[0] = s[0] / l; ax[1] = s[1] / l; ax[2] = s[2] / l;
+    return a[0]*ax[0] + a[1]*ax[1] + a[2]*ax[2];
+}
+static float sh_fit_cap3(const float a[3], const float b[3], const float c[3], float ax[3]) {
+    const float u[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] }, v[3] = { c[0] - a[0], c[1] - a[1], c[2] - a[2] };
+    float n[3] = { u[1]*v[2] - u[2]*v[1], u[2]*v[0] - u[0]*v[2], u[0]*v[1] - u[1]*v[0] };
+    const float l = sqrtf(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+    if (l < 1e-7f) {                                     /* два совпали - пара самых далёких */
+        float t1[3], t2[3], t3[3];
+        const float c1 = sh_fit_cap2(a, b, t1), c2 = sh_fit_cap2(a, c, t2), c3 = sh_fit_cap2(b, c, t3);
+        const float *bt = t1; float bc = c1;
+        if (c2 < bc) { bt = t2; bc = c2; }
+        if (c3 < bc) { bt = t3; bc = c3; }
+        ax[0] = bt[0]; ax[1] = bt[1]; ax[2] = bt[2];
+        return bc;
+    }
+    n[0] /= l; n[1] /= l; n[2] /= l;
+    float d = n[0]*a[0] + n[1]*a[1] + n[2]*a[2];
+    if (d < 0.f) { n[0] = -n[0]; n[1] = -n[1]; n[2] = -n[2]; d = -d; }
+    ax[0] = n[0]; ax[1] = n[1]; ax[2] = n[2];
+    return d;                                            /* на большом круге - 0 (полусфера, не влезет) */
+}
+/* наименьший конус, вмещающий направления U (как наименьший круг на плоскости: тройной перебор, точки в одной полусфере);
+ * вернуть точный cos половины раскрытия по всем */
+static float sh_fit_cap(const float U[][3], int n, float ax[3]) {
+    ax[0] = 0.f; ax[1] = 1.f; ax[2] = 0.f;
+    if (n <= 0) return 1.f;
+    ax[0] = U[0][0]; ax[1] = U[0][1]; ax[2] = U[0][2];
+    float c = 1.f;
+    for (int i = 1; i < n; i++) {
+        if (sh_fit_in(U[i], ax, c)) continue;
+        ax[0] = U[i][0]; ax[1] = U[i][1]; ax[2] = U[i][2]; c = 1.f;
+        for (int j = 0; j < i; j++) {
+            if (sh_fit_in(U[j], ax, c)) continue;
+            c = sh_fit_cap2(U[i], U[j], ax);
+            for (int k = 0; k < j; k++) {
+                if (sh_fit_in(U[k], ax, c)) continue;
+                c = sh_fit_cap3(U[i], U[j], U[k], ax);
+            }
+        }
+    }
+    float mc = 1.f;
+    for (int i = 0; i < n; i++) { const float d = U[i][0]*ax[0] + U[i][1]*ax[1] + U[i][2]*ax[2]; if (d < mc) mc = d; }
+    return mc;
+}
+/* карта слоя L (stable): sh_down_frustum, а если тела у лампы в неё не влезают - конусом на них (см. выше); axo - ось карты
+ * (для строк журнала) */
+static void sh_fit_frustum(int L, int hd, const float Lr[3], float rad, float fade, float tan_min,
+                           const float *cx, const float *cy, const float *cz, int nch,
+                           float aim[3], float *znear, float *zfar, float *th, float axo[3]) {
+    sh_down_frustum(Lr, rad, fade, tan_min, cx, cy, cz, nch, aim, znear, zfar, th);
+    axo[0] = 0.f; axo[1] = 1.f; axo[2] = 0.f;
+    if (L < 0 || L >= 4) return;
+    if (!sh_fit_on()) { s_fit_md[L] = 0; s_fit_t0[L] = 0; return; }
+    extern uint64_t s_frame_count;
+    const float R = rad * fade, tdn = *th, tmax = tanf(1.396f), hlim = atanf(0.94f * tmax), zf2 = R * 1.15f + 300.f;
+    float N[SH_FIT_NP][3], F[SH_FIT_NP][3]; int nn = 0, nf = 0, ng = 0;
+    const uint64_t age = s_frame_count - s_occ_frame;          /* группы старше 0.5 с (в кадр давно никто не попадал) - мимо */
+    if (s_occ_frame != ~0ull && age < 30u) sh_fit_corners(Lr, rad * sh_fit_reach(), R, N, &nn, F, &nf, &ng);
+    const float tn = sh_fit_tneed(N, nn);
+    const int md0 = s_fit_md[L];
+    if (md0 == 0) {
+        if (tn <= tdn) return;                                 /* все в карте вниз - она и остаётся */
+    } else {
+        /* влезли вниз с запасом (0.85) и держатся так 0.5 с - назад вниз */
+        if (tn * (0.94f / 0.85f) <= tdn) {
+            if (!s_fit_t0[L]) s_fit_t0[L] = s_frame_count;
+            if (s_frame_count - s_fit_t0[L] >= 30u) {
+                s_fit_md[L] = 0; s_fit_t0[L] = 0;
+                if (sh_fit_dbg() && s_fit_nl < 400) {
+                    s_fit_nl++;
+                    fprintf(stderr, "shfit: f=%llu layer %d lamp %02d R %.0f down t %.2f need %.2f -> the down map as before | near corners %d groups %d, ocl age %llu%c",
+                            (unsigned long long)s_frame_count, L, hd, R, tdn, tn, nn, ng, (unsigned long long)age, 10);
+                }
+                return;
+            }
+        } else s_fit_t0[L] = 0;
+        /* конус держится, пока у лампы (и кольцо, и дальние, если брались) не дальше предела от оси */
+        const float cl = cosf(s_fit_lim[L]);
+        int ok = 1;
+        for (int i = 0; i < nn && ok; i++) ok = sh_fit_in(N[i], s_fit_ax[L], cl);
+        if (ok && s_fit_far[L]) for (int i = 0; i < nf && ok; i++) ok = sh_fit_in(F[i], s_fit_ax[L], cl);
+        if (ok && s_fit_ring[L]) {
+            float Q[16][3]; sh_fit_ring_dirs(tdn, Q);
+            for (int i = 0; i < 16 && ok; i++) ok = sh_fit_in(Q[i], s_fit_ax[L], cl);
+        }
+        if (ok) {
+            for (int q = 0; q < 3; q++) { aim[q] = Lr[q] + s_fit_ax[L][q] * 1000.f; axo[q] = s_fit_ax[L][q]; }
+            *znear = 60.f; if (*zfar < zf2) *zfar = zf2; *th = s_fit_th[L];
+            return;
+        }
+    }
+    /* новый конус: углы у лампы + кольцо прежней карты; не влезло в 80° - + дальние группы; нет - только у лампы */
+    float U[SH_FIT_NP * 2 + 16][3], ax[3] = { 0.f, 1.f, 0.f }, half = 9.f;
+    int ok = 0, ring = 0, wfar = 0;
+    for (int tr = 0; tr < 3 && !ok; tr++) {
+        if (tr == 1 && nf == 0) continue;
+        int nu = 0;
+        for (int i = 0; i < nn; i++) { U[nu][0] = N[i][0]; U[nu][1] = N[i][1]; U[nu][2] = N[i][2]; nu++; }
+        if (tr == 0) nu += sh_fit_ring_dirs(tdn, &U[nu]);
+        if (tr == 1) for (int i = 0; i < nf; i++) { U[nu][0] = F[i][0]; U[nu][1] = F[i][1]; U[nu][2] = F[i][2]; nu++; }
+        const float mc = sh_fit_cap(U, nu, ax);
+        half = mc >= 1.f ? 0.f : (mc <= -1.f ? 3.1416f : acosf(mc));
+        if (half + (tr < 2 ? 0.087f : 0.f) <= hlim) { ok = 1; ring = (tr == 0); wfar = (tr == 1); }
+    }
+    if (!ok) {                                                 /* конус не влез (лампа в габарите тела) - карта как была */
+        s_fit_md[L] = 0; s_fit_t0[L] = 0;
+        static long nfail = 0;
+        if (sh_fit_dbg() && s_fit_nl < 400 && (md0 != 0 || (nfail++ % 300) == 0)) {
+            s_fit_nl++;
+            fprintf(stderr, "shfit: f=%llu layer %d lamp %02d R %.0f down t %.2f need %.2f -> no cone fits (half %.1f), the down map as before | near corners %d groups %d%c",
+                    (unsigned long long)s_frame_count, L, hd, R, tdn, tn, half * 57.2958f, nn, ng, 10);
+        }
+        return;
+    }
+    float hm = half + 0.087f; if (hm > hlim) hm = hlim;
+    float t = tanf(hm) / 0.94f;
+    if (t < tan_min) t = tan_min;
+    if (t > tmax) t = tmax;
+    float lim = atanf(0.94f * t); if (lim < half + 0.02f) lim = half + 0.02f;
+    s_fit_md[L] = 1; s_fit_th[L] = t; s_fit_lim[L] = lim; s_fit_ring[L] = ring; s_fit_far[L] = wfar;
+    for (int q = 0; q < 3; q++) { s_fit_ax[L][q] = ax[q]; aim[q] = Lr[q] + ax[q] * 1000.f; axo[q] = ax[q]; }
+    *znear = 60.f; if (*zfar < zf2) *zfar = zf2; *th = t;
+    if (sh_fit_dbg() && s_fit_nl < 400) {
+        s_fit_nl++;
+        fprintf(stderr, "shfit: f=%llu layer %d lamp %02d R %.0f down t %.2f need %.2f -> cone ax %.2f,%.2f,%.2f half %.1f t %.2f ring %d far %d | near corners %d groups %d, far corners %d, ocl age %llu%c",
+                (unsigned long long)s_frame_count, L, hd, R, tdn, tn, ax[0], ax[1], ax[2], half * 57.2958f, t, ring, wfar,
+                nn, ng, nf, (unsigned long long)age, 10);
+    }
 }
 /* персонаж, ради которого группа k в кадре (наибольший вес); prev - прежний (номер слота), держится, пока его вес не меньше
  * 2/3 наибольшего */
@@ -15577,6 +16369,7 @@ void dc_shadow_draw(void) {
             for (int q = 0; q < 3; q++) { s_v2p[fl][q] = clp[k][q]; s_v2mn[fl][q] = clmin[k][q]; s_v2mx[fl][q] = clmax[k][q]; }
             s_v2r[fl] = clrad[k]; s_v2w[fl] = clpow[k]; s_v2hd[fl] = idx[k]; s_v2nm[fl] = clnm[k];
             shadow_reach_reset(GLAMP_MAX + fl);             /* ось и раскрытие карты слоя — с этой лампы заново */
+            sh_fit_reset(fl);                               /* 26.10: и карта по телам */
         }
         n = 0;
         for (int L = 0; L < nlay; L++) if (s_v2on[L]) n = L + 1;
@@ -15612,9 +16405,11 @@ void dc_shadow_draw(void) {
             float znear = dist * 0.2f; if (znear < 60.f) znear = 60.f;
             float zfar = dist + rad, th = tanhalf;
             float aim[3] = { tgt[0], tgt[1], tgt[2] };
-            if (stable) {                                   /* 23.10: строго вниз на весь круг тени (sh_down_frustum) */
-                sh_down_frustum(Lr, rad, fade, tanhalf, chx, chy, chz, nch, aim, &znear, &zfar, &th);
-                s_rf_half[GLAMP_MAX + L] = atanf(th); s_rf_ax[GLAMP_MAX + L][0] = 0.f; s_rf_ax[GLAMP_MAX + L][1] = 1.f; s_rf_ax[GLAMP_MAX + L][2] = 0.f;
+            if (stable) {                                   /* 23.10: строго вниз на весь круг тени (sh_down_frustum); 26.10: тела у лампы
+                                                             * в неё не влезают - конусом на них (sh_fit_frustum) */
+                float fax[3];
+                sh_fit_frustum(L, s_v2hd[L], Lr, rad, fade, tanhalf, chx, chy, chz, nch, aim, &znear, &zfar, &th, fax);
+                s_rf_half[GLAMP_MAX + L] = atanf(th); s_rf_ax[GLAMP_MAX + L][0] = fax[0]; s_rf_ax[GLAMP_MAX + L][1] = fax[1]; s_rf_ax[GLAMP_MAX + L][2] = fax[2];
                 s_rf_seen[GLAMP_MAX + L] = 0;                   /* к прежней карте (stable=0) - с нуля */
             } else
             if (reach) shadow_reach_frustum(GLAMP_MAX + L, Lr, rad, radk, fade, tanhalf, chx, chy, chz, chh, nch, aim, &znear, &zfar, &th);
@@ -16355,7 +17150,18 @@ void dc_refl_frame(void) {
     float D[9], T[3], R[9], TR[3]; int gc = 0;
     if (!ram || !dc_room_live_on() || !dcvk_enabled() || !sh_camera(ram, 0, D, T, R, TR, &gc)) { dcvk_refl_plane(0, 0.f, 0); return; }
     float fx = (float)rrm_s16(ram, 0xB92ACu), fy = (float)rrm_s16(ram, 0xB92AEu), fz = (float)rrm_s16(ram, 0xB92B0u);
-    if (gc != 0 && s_ocl_cnt > 0) { fx = s_ocl_c[0][0]; fy = s_ocl_hi[0][1]; fz = s_ocl_c[0][2]; }
+    /* 27.10.2026: в оригинальном режиме (O) камера кадра - игры (gc = 1) и в обычной игре, и плоскость вставала на «ноги
+     * группы»: самую низкую вершину Регины, пересчитанную в комнату матрицей ПРОШЛОГО кадра. Пока камера игры едет за идущей
+     * Региной, эта точка ниже пола на 1-16 единиц и скачет с шагом; ниже на 10 и больше пол уже не отсекается проходом
+     * отражения (dc_raster.frag: v_rfd < 3), и перевёрнутый пол закрывает всё отражение (игрок, слот 1: «с включенными
+     * материалами отражения в оригинальном режиме дрожат и мигают все постоянно»). В игре в режиме O - позиция игрока, как в
+     * обычном режиме; «ноги группы» - только в сценах. DC_REFL_ORIG_PLAYER=0 - как было. */
+    static int orig_pl = -1;
+    if (orig_pl < 0) { const char *e = getenv("DC_REFL_ORIG_PLAYER"); orig_pl = (e && *e == '0') ? 0 : 1; }
+    extern int g_dc_orig_mode; extern int dc_scripted_now(void); extern int dc_scene_flag_on(void); extern int dc_cut_camera(void);
+    const int orig_world = orig_pl && g_dc_orig_mode && !(dc_scripted_now() || dc_scene_flag_on() || dc_cut_camera());
+    const int grp = gc != 0 && s_ocl_cnt > 0 && !orig_world;
+    if (grp) { fx = s_ocl_c[0][0]; fy = s_ocl_hi[0][1]; fz = s_ocl_c[0][2]; }
     const float up[3] = { -R[1], -R[4], -R[7] };                         /* R·(0,-1,0): «вверх» комнаты */
     float n[3] = { D[0]*up[0] + D[1]*up[1] + D[2]*up[2], D[3]*up[0] + D[4]*up[1] + D[5]*up[2], D[6]*up[0] + D[7]*up[1] + D[8]*up[2] };
     const float nl = sqrtf(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
@@ -16369,9 +17175,18 @@ void dc_refl_frame(void) {
     if (d > 0.f) { n[0] = -n[0]; n[1] = -n[1]; n[2] = -n[2]; d = -d; }   /* камера (начало вида) — со стороны нормали */
     dcvk_refl_plane(n, d, 1);
     { static int dbg = -1; static long k = 0;
-      if (dbg < 0) { const char *e = getenv("DC_FX_LOG"); dbg = (e && *e == '1') ? 1 : 0; }
-      if (dbg && (++k % 120) == 1)
-          fprintf(stderr, "refl: floor y=%.0f (%s) - in view n=%.2f,%.2f,%.2f d=%.0f%c", fy, gc ? "scene" : "player", n[0], n[1], n[2], d, 10); }
+      if (dbg < 0) { const char *e = getenv("DC_FX_LOG"); dbg = e ? atoi(e) : 0; }
+      if (dbg == 1 && (++k % 120) == 1)
+          fprintf(stderr, "refl: floor y=%.0f (%s) - in view n=%.2f,%.2f,%.2f d=%.0f%c", fy, grp ? "scene" : "player", n[0], n[1], n[2], d, 10);
+      if (dbg >= 2) {               /* 27.10: каждый кадр - та же плоскость через позицию игрока (сверка с ногами группы) */
+          extern uint64_t s_frame_count;
+          const float qx = (float)rrm_s16(ram, 0xB92ACu), qy = (float)rrm_s16(ram, 0xB92AEu), qz = (float)rrm_s16(ram, 0xB92B0u);
+          const float wx = R[0]*qx + R[1]*qy + R[2]*qz + TR[0], wy = R[3]*qx + R[4]*qy + R[5]*qz + TR[1], wz = R[6]*qx + R[7]*qy + R[8]*qz + TR[2];
+          const float q[3] = { D[0]*wx + D[1]*wy + D[2]*wz + T[0], D[3]*wx + D[4]*wy + D[5]*wz + T[1], D[6]*wx + D[7]*wy + D[8]*wz + T[2] };
+          fprintf(stderr, "refl: f=%llu gc %d groups %d use %s floor %.0f,%.0f,%.0f (player %.0f,%.0f,%.0f) n=%.3f,%.3f,%.3f d=%.1f player d=%.1f%c",
+                  (unsigned long long)s_frame_count, gc, s_ocl_cnt, grp ? "group" : "player", fx, fy, fz, qx, qy, qz, n[0], n[1], n[2], d,
+                  n[0]*q[0] + n[1]*q[1] + n[2]*q[2], 10);
+      } }
 }
 
 void dc_room_emit_live(void) {
@@ -19606,6 +20421,7 @@ static uint32_t s_vz_hash[VZ_HASHN];
 static int      s_vz_n = 0;
 static long     s_vz_skipped = 0;
 static uint32_t s_vz_sig = 0, s_vz_fsig = 0; static int s_vz_live = 0;
+static uint32_t s_vz_g[64]; static uint8_t s_vz_gv[64]; static int s_vz_gn = 0;   /* 27.10: группы разбора и есть ли у них грани-версии */
 /* начало обхода: снимок решений годен только для той же комнаты и тех же флагов (адреса групп у всех комнат одни) */
 static void vz_frame_check(const uint8_t *ram) {
     s_vz_live = (s_vz_n > 0 && s_build_n > 0 && s_vz_sig == rrm_signature(ram) && s_vz_fsig == s_build_flagsig) ? 1 : 0;
@@ -19637,6 +20453,14 @@ static int vz_has(uint32_t rec) {                   /* запись выброш
         if (!s_vz_hash[i]) return 0;
     }
     return 0;
+}
+/* 27.10: группа по последнему разбору этой комнаты - вариант места (у неё есть грани, которые покрывает кусок чужого ракурса, 1),
+ * единственный кусок (0); разбора нет или он не для этой комнаты и флагов (-1) */
+static int vz_group_kind(const uint8_t *ram, uint32_t gp) {
+    if (s_vz_gn <= 0 || s_build_n <= 0 || s_vz_sig != rrm_signature(ram) || s_vz_fsig != s_build_flagsig) return -1;
+    gp &= 0x1FFFFFu;
+    for (int g = 0; g < s_vz_gn; g++) if (s_vz_g[g] == gp) return s_vz_gv[g];
+    return -1;
 }
 static int vz_skip_poly(uint32_t rec) {
     if (s_vz_n <= 0 || !s_vz_live) return 0;
@@ -19758,7 +20582,7 @@ static int vz_softpush(const uint8_t *ram, int ng) {
  * Те же входы, что у одной из прошлых сборок, - берём её результат (таблица выброшенных записей), пересчёта нет.
  * DC_VZ_MEMO=0 - как было. */
 #define VZ_MEMO_N 4
-typedef struct { uint64_t key; int valid, n, ndrop, nhome, nkept; unsigned age; uint32_t hash[VZ_HASHN]; } VzMemo;
+typedef struct { uint64_t key; int valid, n, ndrop, nhome, nkept; unsigned age; uint32_t hash[VZ_HASHN]; uint32_t g[64]; uint8_t gv[64]; int gn; } VzMemo;
 static VzMemo s_vz_memo[VZ_MEMO_N]; static unsigned s_vz_memo_clock = 0;
 static int vz_memo_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DC_VZ_MEMO"); v = (e && *e == '0') ? 0 : 1; } return v; }
 static uint64_t vz_h64(uint64_t h, const void *p, size_t n) { const uint8_t *b = (const uint8_t *)p; for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ull; } return h; }
@@ -19772,9 +20596,10 @@ static void vz_memo_put(uint64_t key, int ndrop, int nhome, int nkept) {
     VzMemo *m = &s_vz_memo[w];
     m->key = key; m->valid = 1; m->n = s_vz_n; m->ndrop = ndrop; m->nhome = nhome; m->nkept = nkept; m->age = ++s_vz_memo_clock;
     memcpy(m->hash, s_vz_hash, sizeof m->hash);
+    memcpy(m->g, s_vz_g, sizeof m->g); memcpy(m->gv, s_vz_gv, sizeof m->gv); m->gn = s_vz_gn;   /* 27.10 */
 }
 static void vz_build(const uint8_t *ram, uint32_t cams, uint32_t scr, uint32_t ncam) {
-    memset(s_vz_hash, 0, sizeof s_vz_hash); s_vz_n = 0; s_vz_live = 0; s_vz_sig = rrm_signature(ram); s_vz_fsig = s_build_flagsig;
+    memset(s_vz_hash, 0, sizeof s_vz_hash); s_vz_n = 0; s_vz_live = 0; s_vz_sig = rrm_signature(ram); s_vz_fsig = s_build_flagsig; s_vz_gn = 0;
     extern unsigned int SDL_GetTicks(void);
     unsigned vz_t0 = SDL_GetTicks();
     if (!vz_env() || s_build_n <= 0 || ncam == 0u || ncam > 64u) return;
@@ -19856,6 +20681,7 @@ static void vz_build(const uint8_t *ram, uint32_t cams, uint32_t scr, uint32_t n
         VzMemo *m = vz_memo_get(vzk);
         if (m) {
             memcpy(s_vz_hash, m->hash, sizeof s_vz_hash); s_vz_n = m->n;
+            memcpy(s_vz_g, m->g, sizeof s_vz_g); memcpy(s_vz_gv, m->gv, sizeof s_vz_gv); s_vz_gn = m->gn;   /* 27.10 */
             int soft_n = vz_softpush(ram, ng);
             s_vz_live = (s_vz_n > 0);
             fprintf(stderr, "versions: place look from its shot zone - same inputs as an earlier build of this room, result reused: polygons at home %d, "
@@ -20001,6 +20827,8 @@ static void vz_build(const uint8_t *ram, uint32_t cams, uint32_t scr, uint32_t n
             char gl[600]; int gn = 0; gl[0] = 0;
             for (int g = 0; g < ng && gn < 560; g++) if (byg[g]) gn += snprintf(gl + gn, sizeof gl - (size_t)gn, " %06X:%d", s_build_gp[g] & 0x1FFFFFu, byg[g]);
             s_vz_live = (s_vz_n > 0);
+            for (int g = 0; g < ng; g++) { s_vz_g[g] = s_build_gp[g] & 0x1FFFFFu; s_vz_gv[g] = byg[g] > 0; }   /* 27.10: для op_build */
+            s_vz_gn = ng;
             fprintf(stderr, "versions: place look from its shot zone - %d shots with their own group sets, world groups %d; polygons at home %d, "
                             "other-shot versions not drawn %d (%s ), not covered kept %d; faces whose pushed-back copy is the only one left "
                             "(soft push) %d; %u ms (DC_VARIANT_ZONE=0 off)%c",
@@ -20285,6 +21113,54 @@ static int s_showall_forced = 0;
  * экрана: ловец в main.cpp печатает это в момент, когда картинка пропала. */
 int dc_showall_last_forced(void) { return s_showall_forced; }
 
+/* ⭐ 27.10.2026 - КУСОК КОМНАТЫ, КОТОРЫЙ ЗАБЫЛ РАКУРС СЦЕНЫ (игрок, слот 43: «катсцена ... И опять же в одном ракурсе нет куска
+ * того забора, сетки»). ST10D, сцена с рацией после двери: последний облёт (камера поворачивается от киоска к бассейну с оранжевой
+ * лампой) ставит гейты 1011000101001110 и оставляет выключенной запись 8 - забор с сеткой, группа 101770 (тот же забор, что в
+ * слоте 0: тип 0, 2+91 полигон). Так рисует и сама игра: в кадре консоли (DC_ORIG_NATIVE_DRAW=1) за киоском тоже бассейн без
+ * забора - промах ракурса оригинала; бит, включённый через порт, возвращает забор и нам, и консоли. В сценах дожигание стоит
+ * (сцены прячут куски нарочно, двери перестраивают таблицу), поэтому здесь только список «комната:группа:полигонов»: в сцене
+ * (режим 4) в этой комнате запись с этой группой (тип 0, матрица камеры +64 == 0, полигонов столько же) держится видимой, если
+ * запись стоит в таблице хотя бы DC_SCENE_KEEP_SETTLE тактов. Её бит снимают смены ракурсов сцены, а возвращаем мы - признак
+ * «переключает игра» (animated) такой записи в сцене не ставится.
+ * DC_SCENE_KEEP_PIECES=0 - как было; формат 10D:101770:93[,...] (комната ST, группа, полигонов; 0 полигонов - не сверять). */
+static struct { int st; uint32_t grp; int np; } s_sk[8];
+static int s_sk_n = -1;
+static uint32_t s_sk_seen[36];
+static uint16_t s_sk_age[36];
+static int scene_keep_listed(const uint8_t *ram, uint32_t gpa) {
+    if (s_sk_n < 0) {
+        s_sk_n = 0;
+        const char *e = getenv("DC_SCENE_KEEP_PIECES");
+        const char *p = e ? e : "10D:101770:93";
+        if (!(p[0] == '0' && p[1] == 0)) {
+            while (*p && s_sk_n < 8) {
+                char *q;
+                const unsigned long st = strtoul(p, &q, 16);
+                if (*q != ':') break;
+                const unsigned long g = strtoul(q + 1, &q, 16);
+                long np = 0;
+                if (*q == ':') np = strtol(q + 1, &q, 10);
+                s_sk[s_sk_n].st = (int)st; s_sk[s_sk_n].grp = (uint32_t)g & 0x1FFFFFu; s_sk[s_sk_n].np = (int)np; s_sk_n++;
+                while (*q && *q != ',') q++;
+                p = (*q == ',') ? q + 1 : q;
+            }
+        }
+        fprintf(stderr, "scene keep: %d listed room pieces stay on in scenes (DC_SCENE_KEEP_PIECES=0 off)%c", s_sk_n, 10);
+    }
+    if (!s_sk_n) return 0;
+    const int stc = dc_room_stcode();
+    const uint32_t a = gpa & 0x1FFFFFu;
+    for (int j = 0; j < s_sk_n; j++) {
+        if (s_sk[j].st != stc || s_sk[j].grp != a) continue;
+        if (s_sk[j].np > 0) {
+            if (a + 12u >= 0x200000u) continue;
+            if ((int)rrm_u16(ram, a + 8) + (int)rrm_u16(ram, a + 10) != s_sk[j].np) continue;
+        }
+        return 1;
+    }
+    return 0;
+}
+
 void dc_room_showall_tick(void) {
     /* O key: original mode — do not force room portions on (2026-08-30);
      * 15.09 вечер: только при DC_ORIG_NATIVE_DRAW=1 — по умолчанию оригинальный режим дожигает куски, как современный */
@@ -20377,6 +21253,15 @@ void dc_room_showall_tick(void) {
         { static int t0 = -1;
           if (t0 < 0) { const char *et = getenv("DC_SHOWALL_TYPE0"); t0 = (et && *et == '0') ? 0 : 1; }
           if (t0 && (int8_t)ram[e + 46] != 0) continue; }
+        /* 27.10: запись из списка сцен (scene_keep_listed выше) - в сцене держится видимой */
+        int skeep = 0;
+        if (i < 36) {
+            static int settle = -1;
+            if (settle < 0) { const char *es = getenv("DC_SCENE_KEEP_SETTLE"); settle = es ? atoi(es) : 30; if (settle < 0) settle = 0; }
+            if (s_sk_seen[i] != gp) { s_sk_seen[i] = gp; s_sk_age[i] = 0; } else if (s_sk_age[i] < 60000u) s_sk_age[i]++;
+            if (ram[0xB92C8] == 4 && (int8_t)ram[e + 46] == 0 && mx == 0 && s_sk_age[i] >= (uint16_t)settle &&
+                scene_keep_listed(ram, gp & 0x1FFFFFFFu)) skeep = 1;
+        }
         /* LEAVE ANYTHING THE GAME IS ANIMATING ALONE.
          * Telling a static piece from a blinking one by structure was wrong -
          * plenty of room pieces carry an object of their own too, and gating
@@ -20425,10 +21310,25 @@ void dc_room_showall_tick(void) {
               for (int k = 0; k < 9; k++) lastR[k] = R[k]; }
             uint8_t now = (uint8_t)((st & 3u) == 3u);
             if (i < 90) {
-                if (now != prev[i] && f - camchg > 20) animated[i] = 1;
+                if (now != prev[i] && f - camchg > 20 && !skeep) animated[i] = 1;
                 prev[i] = now;
-                if (animated[i]) continue;          /* the game's switch: hands off */
+                if (animated[i] && !skeep) continue;          /* the game's switch: hands off */
             }
+        }
+        if (skeep) {                                /* 27.10: кусок, который забыл ракурс сцены (scene_keep_listed) */
+            if ((st & 3u) == 3u) { on++; continue; }
+            { extern int g_dc_showall_force; if (!g_dc_showall_force) continue; }
+            const uint32_t nv = (st & ~3u) | 3u;
+            if (!s_sa_have[i] || s_sa_grp[i] != (gp & 0x1FFFFFFFu)) { s_sa_saved[i] = st; s_sa_have[i] = 1; s_sa_grp[i] = gp & 0x1FFFFFFFu; }
+            s_sa_wrote[i] = nv;
+            ram[e + 48] = (uint8_t)(nv & 0xFF);        ram[e + 49] = (uint8_t)((nv >> 8) & 0xFF);
+            ram[e + 50] = (uint8_t)((nv >> 16) & 0xFF); ram[e + 51] = (uint8_t)((nv >> 24) & 0xFF);
+            forced++;
+            { static long nk = 0; extern uint64_t s_frame_count_ref(void);
+              if (++nk < 60)
+                  fprintf(stderr, "scene keep: f=%llu ST%03X slot %d grp %06X - the scene's shot left it off, kept on %08X -> %08X%c",
+                          (unsigned long long)s_frame_count_ref(), dc_room_stcode(), i, gp & 0xFFFFFFu, st, nv, 10); }
+            continue;
         }
         /* NEVER FORCE A PLACED OBJECT.
          * The per-shot cull hides pieces of the room's BODY - walls, floors,

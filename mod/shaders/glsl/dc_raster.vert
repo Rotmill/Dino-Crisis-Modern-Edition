@@ -16,6 +16,9 @@ layout(location = 4) in float in_w;       // PGXP w (1.0 = affine)
 // 05.10.2026: текстура PNG из mods (второй буфер вершин, gpu_vk_raster.cpp TEXREP): x — номер в массиве repTex (−1 — нет),
 // yz — место в картинке замены (0..1)
 layout(location = 5) in vec4 in_rep;
+// 26.10.2026: метка куска модели (третий буфер вершин, gpu_vk_raster.cpp s_pvBuf): биты 13.. - проход кадра A & 3, биты 0..12 -
+// номер куска + 1 (gte.cpp pair_note); 0 - метки нет
+layout(location = 6) in uint in_pair;
 
 layout(push_constant) uniform PC {
     vec4 view;        // x0, y0, w, h of the display area in draw space
@@ -58,6 +61,9 @@ layout(binding = 4, std140) uniform ShadowUBO {
     // ячейки 536..663)
     vec4 bq[16];      // кватернион вершин кости в виде кадра A
     vec4 bt[16];      // xyz - перенос, w > 0.5 - есть
+    // 26.10.2026: ПАРЫ КУСКОВ (gpu_vk_raster.cpp pair_pc_make, ячейки 664..): кадры между тактами без нашей камеры (двери)
+    vec4 pq;          // x > 0.5 - пары вместо камеры, y - проход кадра A & 3, z - число кусков
+    vec4 pr[768];     // по три строки на кусок: xyz - строка матрицы на эту долю пути, w - сдвиг
 } sh;
 
 vec3 qrot(vec4 q, vec3 v) { return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v); }
@@ -91,8 +97,18 @@ void main() {
         vec3 p = vec3((in_pos.x - pc.wp.x) * w / pc.wp.w, (in_pos.y - pc.wp.y) * w / pc.wp.z, w);
         bool actor = (int(round(in_info.w)) & 16) != 0;
         const vec3 pa = p;                                          // her point of frame A
-        const bool hturn = actor && sh.hc.w > 0.5 && !(pc.wd.w > 0.5);
-        if (actor && pc.wd.w > 0.5) {
+        const bool pairs = sh.pq.x > 0.5;
+        const bool hturn = !pairs && actor && sh.hc.w > 0.5 && !(pc.wd.w > 0.5);
+        if (pairs) {
+            // 26.10.2026: ПАРЫ КУСКОВ - кусок модели идёт свою долю пути к тому же куску следующего такта (свои строки матрицы);
+            // вершина без метки или кусок без пары стоит, как в кадре A
+            const int idx = int(in_pair & 0x1FFFu) - 1;
+            if (idx >= 0 && int(in_pair >> 13) == int(sh.pq.y + 0.5) && idx < int(sh.pq.z + 0.5)) {
+                const int r = idx * 3;
+                p = vec3(dot(sh.pr[r].xyz, pa) + sh.pr[r].w, dot(sh.pr[r + 1].xyz, pa) + sh.pr[r + 1].w,
+                         dot(sh.pr[r + 2].xyz, pa) + sh.pr[r + 2].w);
+            }
+        } else if (actor && pc.wd.w > 0.5) {
             // 20.09.2026: AIMING - she turns with the camera, so her picture of frame A stays where it is
             // (rotating her with the world made the arm and the gun zigzag every other presented frame)
             // 25.10.2026: her bones still go their share of the way to the next pose, relative to her body
@@ -131,7 +147,8 @@ void main() {
         // НОВОЙ проекции, и внутри крупных полигонов пола значения разъезжались
         // — по кадру шли чёрные квадраты. Фрагментная ступень вернёт её назад
         // тем же кватернионом: карта теней снята в старом пространстве.
-        if (needView) v_view = hturn ? pa : p;   // 19.10: her point of frame A as is (dc_raster.frag shadowViewPoint)
+        if (needView) v_view = (pairs || hturn) ? pa : p;   // 19.10: her point of frame A as is (dc_raster.frag shadowViewPoint)
+                                                             // 26.10: и у пар кусков - камера кадра B единичная
         // 18.09.2026 (вечер): v_view здесь НЕ обнуляется. Кадр B рисует вершины
         // прошлого кадра, и v_view посчитан выше в ЕГО видовом пространстве —
         // ровно там, где снята карта теней. Обнуление гасило тень на каждом

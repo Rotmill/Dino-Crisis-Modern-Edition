@@ -11,3 +11,4 @@ load_address = 0x80018000
 text_size = 0x00099800
 runtime_patch = runtime.dcpatch
 hooks_patch = hooks.dcpatch
+faces = faces

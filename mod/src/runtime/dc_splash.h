@@ -85,6 +85,8 @@ void dc_splash_shader_done(void);
  * правый верх строки копирайта Capcom в логических координатах (0 - не мешает). hit: логическая точка над ссылкой. */
 void dc_splash_feedback_present(struct SDL_Renderer *r, int logical_w, int logical_h, int show, int hover, float kx, float ky);
 int  dc_splash_feedback_hit(float lx, float ly);
+/* 26.10.2026: кадр между тактами - тот же блок, что нарисовал прошлый dc_splash_feedback_present (ничего не считает заново) */
+void dc_splash_feedback_again(struct SDL_Renderer *r, int logical_w, int logical_h);
 
 /* 24.10.2026: счётчик кадров (SCREEN -> FPS Counter): число картинок в секунду в левом верхнем углу окна; fps < 0 - ещё не
  * сосчитано, ничего не рисуется */

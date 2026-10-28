@@ -56,10 +56,12 @@ void dc_menu_init(const DcOpt *opts, int count,
                   const char **pages, int page_count);
 
 /* Язык интерфейса (ui.lang): 0 English (строки таблицы как есть), 1 Русский,
- * 2 Deutsch, 3 Español, 4 Français, 5 Português (Brasil), 6 日本語, 7 简体中文, 8 Italiano (20.10.2026) -
+ * 2 Deutsch, 3 Español, 4 Français, 5 Português (Brasil), 6 日本語, 7 简体中文, 8 Italiano (20.10.2026),
+ * 9 арабский (27.10.2026, справа налево) -
  * тот же набор и порядок, что у установщика мода. dc_tr() переводит строку
  * меню; нет перевода — возвращает английскую. */
-#define DC_LANG_COUNT 9
+#define DC_LANG_COUNT 10
+#define DC_LANG_AR 9   /* 27.10.2026: арабский - справа налево (dc_font.c связывает буквы, dc_splash.cpp - плашка подсказки) */
 extern int g_dc_menu_lang;
 const char *dc_tr(const char *en);
 

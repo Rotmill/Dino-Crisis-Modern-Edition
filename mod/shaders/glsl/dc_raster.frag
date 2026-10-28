@@ -57,6 +57,11 @@ layout(constant_id = 0) const int DC_REP_N = 512;
 layout(constant_id = 1) const bool DC_F_SHADOW = true;   // GRAPHICS -> Shadows: тени ламп и луна (без опции sh.cfg.x = 0)
 layout(constant_id = 2) const bool DC_F_MATER  = true;   // GRAPHICS -> Materials: отражение пола, блики, свет светящихся текстур
                                                          // (без опции rfc.w, spare.y, spare.x/w = 0), рельеф металла
+// 28.10.2026: полная маска выборок конвейера MSAA (2x - 3, 4x - 15, 8x - 255) для одного текселя на пиксель (main,
+// DC_SAMPLE_LOOP). 0 - тексель на каждую выборку, как было (DC_MSAA_FAST=0).
+#ifdef DC_SAMPLE_LOOP
+layout(constant_id = 3) const int DC_MS_FULL = 0;
+#endif
 // 25.10.2026: DC_SAFE - the safe shaders (gpu_vk_raster.cpp s_rasterSafe: the driver did not build the pipelines, or it cannot
 // index a texture array per pixel): no non-uniform indexing, the array has one place, textures from mods are off
 #ifdef DC_SAFE
@@ -135,14 +140,22 @@ layout(binding = 4, std140) uniform ShadowUBO {
     vec4 veilV[4];    // 28.09 (6): пелена игры (dc_vol_common.glsl) — здесь не читается, только ради раскладки блока
     // 12.10.2026: БЛЕСК ПРЕДМЕТОВ — x сила (0 — выкл), y где полоса (0..1 вдоль диагонали предмета), z общий отсвет, w полуширина
     vec4 glint;
-    vec4 rsv460;      // запас (460..463)
+    vec4 rsv460;      // 460..463 - запас
     // 19.10.2026: СВЕТ СВЕТЯЩИХСЯ ТЕКСТУР, источники 9..16 (первые 8 — glp/glc; сколько здесь — spare.w): точка вида кадра A +
-    // радиус и цвет × сила + обтекание, как у glp/glc. Дымка и пыль берут только первые 8.
+    // радиус и цвет × сила + обтекание, как у glp/glc. Пыль берёт только первые 8; дымка - все по своей доле (28.10, ghz).
     vec4 glp2[8];
     vec4 glc2[8];
     vec4 hq;          // 19.10.2026: её доворот в кадрах между тактами (dc_raster.vert); здесь нужен только hc.w
     vec4 hc;
+    vec4 rsv536[801]; // 536..3739: её скелет, пары кусков (dc_raster.vert) - здесь не читается, только ради раскладки
+    // 28.10.2026: источники 17..32 (gpu_vk_raster.cpp gl_room_out, SH_UBO_GL3; сколько всего за первыми 8 - spare.w) и доля
+    // дымки всех 32 мест (dc_vol_common.glsl ghz) - здесь не читается
+    vec4 glp3[16];
+    vec4 glc3[16];
+    vec4 ghz[8];
 } sh;
+vec4 glP(int i) { return (i < 8) ? sh.glp[min(i, 7)] : (i < 16) ? sh.glp2[clamp(i - 8, 0, 7)] : sh.glp3[clamp(i - 16, 0, 15)]; }
+vec4 glC(int i) { return (i < 8) ? sh.glc[min(i, 7)] : (i < 16) ? sh.glc2[clamp(i - 8, 0, 7)] : sh.glc3[clamp(i - 16, 0, 15)]; }
 
 layout(push_constant) uniform PC {
     vec4 view;
@@ -938,17 +951,40 @@ void main() {
 #ifdef DC_SAMPLE_LOOP
     {   // 09.10: тексель в точке каждой покрытой выборки; прозрачные и чужого прохода снимаются маской, свет ниже — один раз
         // по среднему цвету оставшихся (свет линеен по цвету текселя: тень — множитель, луна, вспышки, свет — прибавки)
+        // 28.10.2026: ОДИН ТЕКСЕЛЬ НА ПИКСЕЛЬ. При 3-5x точка текстуры PS1 закрывает несколько пикселей: внутри полигона все
+        // выборки читают один и тот же тексель, и цикл делал одну работу N раз. Покрыты все выборки и у всех одна целая точка
+        // текстуры (как её берёт texelPath) - texelPath один раз: тексель выборки 0, цвет вершин в центре (среднее цвета по
+        // выборкам и есть центр). Края полигона, фильтрация, PNG из mods, шрифт, решётки и купол - по выборкам, как раньше.
+        const int cov = gl_SampleMaskIn[0];
+        bool one = false;
+        if (DC_MS_FULL != 0 && cov == DC_MS_FULL && (flags & F_DITHER) == 0 && v_rep < 0) {
+            const bool twin = (flags & F_TWIN) != 0;
+            if (!twin && (flags & F_TEXTURED) == 0) one = true;            // без текстуры - только цвет вершин
+            else if (twin || ((flags & F_HIFONT) == 0 && (int(pc.params.w + 0.5) & 2) == 0
+                              && !(pc.prevMap.z > 0.5 && ((v_info.x >> 7) & 3) == 2))) {
+                g_uv = interpolateAtSample(v_uv, 0);
+                const ivec2 t0 = ivec2(twin ? g_uv : texelUV());
+                one = true;
+                for (int s = 1; (DC_MS_FULL >> s) != 0; s++) {
+                    g_uv = interpolateAtSample(v_uv, s);
+                    if (ivec2(twin ? g_uv : texelUV()) != t0) { one = false; break; }
+                }
+                g_uv = interpolateAtSample(v_uv, 0);
+            }
+        }
+        // texelPath в шейдере один (два вызова - две копии кода, больше регистров): один тексель - один проход цикла
         vec3 rAcc = vec3(0.0), aAcc = vec3(0.0);
         int nKeep = 0, keep = 0;
-        const int cov = gl_SampleMaskIn[0];
-        for (int s = 0; s < 8; s++) {
-            if ((cov & (1 << s)) == 0) continue;
-            g_uv = interpolateAtSample(v_uv, s);
-            g_col = interpolateAtSample(v_color, s);
-            g_ruv = interpolateAtSample(v_repuv, s);
+        for (int m = one ? 1 : cov; m != 0; m &= m - 1) {                   // 28.10: только покрытые выборки, по порядку
+            const int s = findLSB(m);
+            if (!one) {
+                g_uv = interpolateAtSample(v_uv, s);
+                g_col = interpolateAtSample(v_color, s);
+                g_ruv = interpolateAtSample(v_repuv, s);
+            }
             vec3 r, a; bool bt;
             if (!texelPath(flags, pass_blend, r, a, bt)) continue;
-            rAcc += r; aAcc += a; nKeep++; keep |= 1 << s;
+            rAcc += r; aAcc += a; nKeep++; keep |= one ? cov : 1 << s;
             blend_this = bt;
         }
         if (nKeep == 0) discard;
@@ -1196,17 +1232,18 @@ void main() {
     // треугольников «светится», цвет самой текстуры): альбедо × цвет × (1 − d/R)² × косинус, как у вспышки. Сама
     // светящаяся текстура своим светом не подсвечивается. Только то, у чего есть глубина, и не смешиваемые тексели.
     {
-        const int ngl = int(sh.spare.x + 0.5) + int(sh.spare.w + 0.5);   /* 19.10: и источники 9..16 (glp2/glc2) */
+        const int ngl = int(sh.spare.x + 0.5) + int(sh.spare.w + 0.5);   /* 19.10: и источники 9..16 (glp2/glc2); 28.10: до 32 */
         const bool glowSelf = (flags & F_TEXTURED) != 0 && (flags & F_SUBST) == 0 && ((v_info.x >> 23) & 1) != 0;
         if (DC_F_MATER && ngl > 0 && v_vpt.z > 1.0 && !blend_this && !glowSelf) {
             const bool chr = (flags & (F_ACTOR | F_CHAR)) != 0;
-            for (int i = 0; i < 16; i++) {
+            for (int i = 0; i < 32; i++) {
                 if (i >= ngl) break;
-                const vec4 gP = (i < 8) ? sh.glp[min(i, 7)] : sh.glp2[max(i - 8, 0)];
-                const vec4 gC = (i < 8) ? sh.glc[min(i, 7)] : sh.glc2[max(i - 8, 0)];
+                const vec4 gP = glP(i);
                 vec3 toL = gP.xyz - v_vpt;
-                float d = length(toL);
-                if (d >= gP.w) continue;
+                const float d2 = dot(toL, toL);
+                if (d2 >= gP.w * gP.w) continue;           /* 28.10: мимо шара - без корня (ламп до 32) */
+                const vec4 gC = glC(i);
+                float d = sqrt(d2);
                 float fa = 1.0 - d / gP.w;
                 fa *= fa;
                 // 28.09 (игрок, слот 12: «от дымки света такое же затенение граней, как было от теней»): у персонажа
@@ -1309,15 +1346,16 @@ void main() {
                 float fa = 1.0 - d / sh.spp[i].w;
                 acc += sh.spc[i].rgb * (s * fa * min(1.0, ndl * 4.0));
             }
-            const int ngs = int(sh.spare.x + 0.5) + int(sh.spare.w + 0.5);   /* 19.10: и источники 9..16 */
+            const int ngs = int(sh.spare.x + 0.5) + int(sh.spare.w + 0.5);   /* 19.10: и источники 9..16; 28.10: до 32 */
             if (sh.msp2.w > 0.0) {
-                for (int i = 0; i < 16; i++) {
+                for (int i = 0; i < 32; i++) {
                     if (i >= ngs) break;
-                    const vec4 gP = (i < 8) ? sh.glp[min(i, 7)] : sh.glp2[max(i - 8, 0)];
-                    const vec3 gCol = (i < 8) ? sh.glc[min(i, 7)].rgb : sh.glc2[max(i - 8, 0)].rgb;
+                    const vec4 gP = glP(i);
                     vec3 toL = gP.xyz - v_vpt;
-                    float d = length(toL);
-                    if (d >= gP.w || d < 1e-3) continue;
+                    const float d2 = dot(toL, toL);
+                    if (d2 >= gP.w * gP.w || d2 < 1e-6) continue;
+                    const vec3 gCol = glC(i).rgb;
+                    float d = sqrt(d2);
                     vec3 L = toL / d;
                     float ndl = dot(N, L);
                     if (ndl <= 0.0) continue;

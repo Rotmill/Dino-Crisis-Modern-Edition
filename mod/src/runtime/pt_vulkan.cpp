@@ -248,7 +248,10 @@ extern "C" int ptvk_init(void)
         if ((qprops[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) &&
             (qprops[i].queueFlags & VK_QUEUE_COMPUTE_BIT)) { s_queueFamily = i; found = true; break; }
     }
-    if (!found) { vlog("[VK] no graphics+compute queue\n"); return 0; }
+    if (!found) {
+        snprintf(s_vkErr, sizeof s_vkErr, "the graphics card has no Vulkan graphics queue");   /* 26.10.2026: the window names it */
+        vlog("[VK] no graphics+compute queue\n"); return 0;
+    }
 
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci{ VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
@@ -392,24 +395,41 @@ static VkDeviceMemory s_vramMem = VK_NULL_HANDLE;
 static VkImageView    s_vramView = VK_NULL_HANDLE;
 static VkSampler      s_vramSamp = VK_NULL_HANDLE;
 static bool           s_vramImgReady = false;
+static bool           s_vramImgFailed = false;
 static VkBuf          s_vramStaging;
 
+/* 26.10.2026 (GitHub #9: Intel Iris Xe, the window said only «the renderer could not start»): a step of the VRAM image
+ * that fails names itself in the player's window (ptvk_last_error) and in the game's log, and the image is not tried
+ * again. Before, the results were not looked at: the steps after a failed one went on, and the raster got a set with
+ * an empty view or no upload buffer. */
+static bool vramFail(const char* what, VkResult r) {
+    snprintf(s_vkErr, sizeof s_vkErr, "the PlayStation video memory could not be set up on the graphics card (%s)", what);
+    fprintf(stderr, "render: the PlayStation video memory image - %s failed (VkResult %d)\n", what, (int)r);
+    s_vramImgFailed = true;
+    return false;
+}
 static bool ensureVramImage() {
     if (s_vramImgReady) return true;
-    if (!s_vkReady) return false;
+    if (!s_vkReady || s_vramImgFailed) return false;
     VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
     ici.imageType = VK_IMAGE_TYPE_2D; ici.format = VK_FORMAT_R16_UINT;
     ici.extent = { (uint32_t)VRAM_W, (uint32_t)VRAM_H, 1 }; ici.mipLevels = 1; ici.arrayLayers = 1;
     ici.samples = VK_SAMPLE_COUNT_1_BIT; ici.tiling = VK_IMAGE_TILING_OPTIMAL;
     ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    if (vkCreateImage(s_device, &ici, nullptr, &s_vramImg) != VK_SUCCESS) return false;
+    VkResult r = vkCreateImage(s_device, &ici, nullptr, &s_vramImg);
+    if (r != VK_SUCCESS) return vramFail("the image", r);
     VkMemoryRequirements mr; vkGetImageMemoryRequirements(s_device, s_vramImg, &mr);
     VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
     mai.allocationSize = mr.size; mai.memoryTypeIndex = findMemType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    vkAllocateMemory(s_device, &mai, nullptr, &s_vramMem);
-    vkBindImageMemory(s_device, s_vramImg, s_vramMem, 0);
-    if (ensureCmd() && !s_vkLost) {
+    if (mai.memoryTypeIndex == ~0u) mai.memoryTypeIndex = findMemType(mr.memoryTypeBits, 0);   /* any type the image takes */
+    if (mai.memoryTypeIndex == ~0u) return vramFail("no memory type for the image", VK_ERROR_FEATURE_NOT_PRESENT);
+    r = vkAllocateMemory(s_device, &mai, nullptr, &s_vramMem);
+    if (r != VK_SUCCESS) return vramFail("the memory of the image", r);
+    r = vkBindImageMemory(s_device, s_vramImg, s_vramMem, 0);
+    if (r != VK_SUCCESS) return vramFail("binding the memory of the image", r);
+    if (!ensureCmd()) return vramFail("the command buffer", VK_ERROR_INITIALIZATION_FAILED);
+    if (!s_vkLost) {
         beginCmd();
         imgBarrier(s_vramImg, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                    0, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);   /* 24.10.2026: RT stage without RT on the device was invalid */
@@ -418,14 +438,17 @@ static bool ensureVramImage() {
     VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
     vci.image = s_vramImg; vci.viewType = VK_IMAGE_VIEW_TYPE_2D; vci.format = VK_FORMAT_R16_UINT;
     vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-    vkCreateImageView(s_device, &vci, nullptr, &s_vramView);
+    r = vkCreateImageView(s_device, &vci, nullptr, &s_vramView);
+    if (r != VK_SUCCESS) return vramFail("the view of the image", r);
     VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
     sci.magFilter = sci.minFilter = VK_FILTER_NEAREST;
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    vkCreateSampler(s_device, &sci, nullptr, &s_vramSamp);
+    r = vkCreateSampler(s_device, &sci, nullptr, &s_vramSamp);
+    if (r != VK_SUCCESS) return vramFail("the sampler", r);
     // Persistent staging buffer (uploads happen every traced frame).
-    createBuf((VkDeviceSize)VRAM_W * VRAM_H * 2, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, s_vramStaging);
+    if (!createBuf((VkDeviceSize)VRAM_W * VRAM_H * 2, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, s_vramStaging) || !s_vramStaging.map)
+        return vramFail("the upload buffer", VK_ERROR_OUT_OF_DEVICE_MEMORY);
     s_vramImgReady = true;
     return true;
 }

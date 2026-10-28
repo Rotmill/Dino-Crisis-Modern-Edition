@@ -1,10 +1,10 @@
 /* Сгенерировано design/controls_layout/render/render.py — руками не править.
  * Прямоугольники на экранах запуска (x, y, w, h) в пикселях кадра 1920x1080.
- * Индекс языка = ui.lang: 0 en, 1 ru, 2 de, 3 es, 4 fr, 5 pt-BR, 6 ja, 7 zh, 8 it. */
+ * Индекс языка = ui.lang: 0 en, 1 ru, 2 de, 3 es, 4 fr, 5 pt-BR, 6 ja, 7 zh, 8 it, 9 ar. */
 #ifndef DC_SPLASH_LAYOUT_H
 #define DC_SPLASH_LAYOUT_H
-#define DC_SPLASH_LANGS 9
-static const char *const k_splash_lang_code[DC_SPLASH_LANGS] = { "en", "ru", "de", "es", "fr", "pt", "ja", "zh", "it" };
+#define DC_SPLASH_LANGS 10
+static const char *const k_splash_lang_code[DC_SPLASH_LANGS] = { "en", "ru", "de", "es", "fr", "pt", "ja", "zh", "it", "ar" };
 /* вкладки [язык][0 геймпад, 1 клавиатура] — для мыши */
 static const float k_splash_tab_rect[DC_SPLASH_LANGS][2][4] = {
     { { 776.7f, 47.0f, 133.8f, 47.0f }, { 918.5f, 47.0f, 224.8f, 47.0f } },   /* en */
@@ -16,6 +16,7 @@ static const float k_splash_tab_rect[DC_SPLASH_LANGS][2][4] = {
     { { 732.4f, 47.0f, 189.0f, 56.0f }, { 929.5f, 47.0f, 258.1f, 56.0f } },   /* ja */
     { { 822.6f, 47.0f, 99.4f, 49.0f }, { 930.0f, 47.0f, 167.4f, 49.0f } },   /* zh */
     { { 764.4f, 47.0f, 166.1f, 47.0f }, { 938.5f, 47.0f, 217.1f, 47.0f } },   /* it */
+    { { 754.0f, 47.0f, 156.4f, 50.0f }, { 918.4f, 47.0f, 247.7f, 50.0f } },   /* ar */
 };
 
 /* ---- вкладка «Геймпад»: собирается в игре по input.ini (dc_splash.cpp) --------
@@ -33,6 +34,7 @@ static const float k_splash_box[DC_SPLASH_LANGS][4] = {
     { 350.0f, 276.5f, 1150.0f, 613.0f },   /* ja */
     { 350.0f, 273.0f, 1150.0f, 613.0f },   /* zh */
     { 350.0f, 272.0f, 1150.0f, 613.0f },   /* it */
+    { 350.0f, 273.5f, 1150.0f, 613.0f },   /* ar */
 };
 /* спрайт: ui_ctrl_<код>_tabs.png — вкладки */
 static const float k_splash_tabs[DC_SPLASH_LANGS][4] = {
@@ -45,6 +47,7 @@ static const float k_splash_tabs[DC_SPLASH_LANGS][4] = {
     { 721.0f, 36.0f, 478.0f, 78.0f },   /* ja */
     { 811.0f, 36.0f, 298.0f, 71.0f },   /* zh */
     { 753.0f, 36.0f, 414.0f, 69.0f },   /* it */
+    { 743.0f, 36.0f, 435.0f, 72.0f },   /* ar */
 };
 /* места подписей — из стилей строк ctrl.html: сторона блока ('L' слева, 'R' справа,
  * 'T' сверху, 'B' снизу), доля высоты (L/R) или ширины (T/B) блока, отступ от
@@ -162,22 +165,30 @@ static const float k_splash_lbl[DC_SPLASH_LANGS][DC_SPLASH_LBLS][4] = {
         { 8.00f, 608.00f, 147.83f, 30.00f }, { 8.00f, 658.00f, 125.06f, 30.00f }, { 8.00f, 708.00f, 149.25f, 30.00f }, { 8.00f, 758.00f, 153.17f, 30.00f },
         { 8.00f, 808.00f, 153.17f, 30.00f }, { 8.00f, 858.00f, 19.67f, 30.00f },
     },
+    {   /* ar */
+        { 8.00f, 8.00f, 86.42f, 31.00f }, { 8.00f, 58.00f, 231.38f, 31.00f }, { 8.00f, 108.00f, 106.09f, 31.00f }, { 8.00f, 158.00f, 57.63f, 31.00f },
+        { 8.00f, 208.00f, 55.70f, 31.00f }, { 8.00f, 258.00f, 65.31f, 31.00f }, { 8.00f, 308.00f, 74.91f, 31.00f }, { 8.00f, 358.00f, 208.72f, 31.00f },
+        { 8.00f, 408.00f, 134.16f, 31.00f }, { 8.00f, 458.00f, 48.02f, 31.00f }, { 8.00f, 508.00f, 114.91f, 31.00f }, { 8.00f, 558.00f, 199.06f, 31.00f },
+        { 8.00f, 608.00f, 140.33f, 31.00f }, { 8.00f, 658.00f, 126.75f, 31.00f }, { 8.00f, 708.00f, 159.53f, 31.00f }, { 8.00f, 758.00f, 86.11f, 31.00f },
+        { 8.00f, 808.00f, 86.11f, 31.00f }, { 8.00f, 858.00f, 19.67f, 30.00f },
+    },
 };
 
 /* выбор языка: поле списка, кнопка «Продолжить», строки раскрытого списка */
 static const float k_splash_lang_box[4] = { 740.0f, 432.0f, 440.0f, 60.0f };
 static const float k_splash_lang_go[4]  = { 740.0f, 524.0f, 440.0f, 60.0f };
-static const float k_splash_lang_list[4] = { 740.0f, 498.0f, 440.0f, 442.0f };
+static const float k_splash_lang_list[4] = { 740.0f, 498.0f, 440.0f, 450.0f };
 static const float k_splash_lang_row[DC_SPLASH_LANGS][4] = {
-    { 747.0f, 505.0f, 426.0f, 44.0f },   /* en */
-    { 747.0f, 553.0f, 426.0f, 44.0f },   /* ru */
-    { 747.0f, 601.0f, 426.0f, 44.0f },   /* de */
-    { 747.0f, 649.0f, 426.0f, 44.0f },   /* es */
-    { 747.0f, 697.0f, 426.0f, 44.0f },   /* fr */
-    { 747.0f, 745.0f, 426.0f, 44.0f },   /* pt */
-    { 747.0f, 793.0f, 426.0f, 44.0f },   /* ja */
-    { 747.0f, 841.0f, 426.0f, 44.0f },   /* zh */
-    { 747.0f, 889.0f, 426.0f, 44.0f },   /* it */
+    { 747.0f, 505.0f, 426.0f, 40.0f },   /* en */
+    { 747.0f, 549.0f, 426.0f, 40.0f },   /* ru */
+    { 747.0f, 593.0f, 426.0f, 40.0f },   /* de */
+    { 747.0f, 637.0f, 426.0f, 40.0f },   /* es */
+    { 747.0f, 681.0f, 426.0f, 40.0f },   /* fr */
+    { 747.0f, 725.0f, 426.0f, 40.0f },   /* pt */
+    { 747.0f, 769.0f, 426.0f, 40.0f },   /* ja */
+    { 747.0f, 813.0f, 426.0f, 40.0f },   /* zh */
+    { 747.0f, 857.0f, 426.0f, 40.0f },   /* it */
+    { 747.0f, 901.0f, 426.0f, 40.0f },   /* ar */
 };
 /* 04.10 (7): экран «о моде» (ui_disc_<код>.png) — кнопка «Продолжить» [язык] */
 static const float k_splash_disc_go[DC_SPLASH_LANGS][4] = {
@@ -190,6 +201,7 @@ static const float k_splash_disc_go[DC_SPLASH_LANGS][4] = {
     { 740.0f, 658.2f, 440.0f, 60.0f },   /* ja */
     { 740.0f, 654.2f, 440.0f, 60.0f },   /* zh */
     { 740.0f, 653.2f, 440.0f, 60.0f },   /* it */
+    { 740.0f, 654.7f, 440.0f, 60.0f },   /* ar */
 };
 /* 18.10 (6): то же для русской версии игры (ui_disc_<код>_rumenu.png, пункт «НАСТРОЙКИ МОДА») */
 static const float k_splash_disc_go_rumenu[DC_SPLASH_LANGS][4] = {
@@ -202,6 +214,7 @@ static const float k_splash_disc_go_rumenu[DC_SPLASH_LANGS][4] = {
     { 740.0f, 658.2f, 440.0f, 60.0f },   /* ja */
     { 740.0f, 654.2f, 440.0f, 60.0f },   /* zh */
     { 740.0f, 653.2f, 440.0f, 60.0f },   /* it */
+    { 740.0f, 654.7f, 440.0f, 60.0f },   /* ar */
 };
 #define DC_SPLASH_FOOTER_Y 960.0f   /* полоса ui_ft_* — нижние 120 пикселей кадра */
 #endif

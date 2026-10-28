@@ -98,10 +98,13 @@ void main() {
         }
     }
     if (pc.par.y > 0.0) {
-        int ng = int(sh.spare.x + 0.5);
-        for (int i = 0; i < 8; i++) {
+        int ng = int(sh.spare.x + 0.5) + int(sh.spare.w + 0.5);       // 28.10: все места света (до 32), доля дымки - своя у каждого
+        for (int i = 0; i < 32; i++) {
             if (i >= ng) break;
-            acc += lampHaze(sh.glp[i].xyz, sh.glp[i].w * pc.par.z, sh.glc[i].rgb * pc.par.y, -1, oA, dA, tEnd, jit, max(ns / 2, 3));
+            const float hw = glHazeW(i);
+            if (hw <= 0.0) continue;
+            const vec4 gP = glP(i);
+            acc += lampHaze(gP.xyz, gP.w * pc.par.z, glC(i).rgb * (pc.par.y * hw), -1, oA, dA, tEnd, jit, max(ns / 2, 3));
         }
     }
     out_v = vec4(acc, zs);

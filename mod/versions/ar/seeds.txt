@@ -1,0 +1,13 @@
+
+# ar: entries of the version's own code (tools/make_version.py, spec.SEEDS)
+800C0F20
+800C10F4
+8009A340
+8009A5EC
+800DBB88
+800DAF2C
+800BF538
+800C8D04
+800C8F88
+800C1128
+800C2EF8

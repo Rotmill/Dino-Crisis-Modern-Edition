@@ -30,7 +30,9 @@ try {
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
     Copy-Item (Join-Path $Root 'mod') $stage -Recurse -Force
     New-Item -ItemType Directory -Path (Join-Path $stage 'installer') -Force | Out-Null
-    Copy-Item (Join-Path $PSScriptRoot 'dcme-install.ps1') (Join-Path $stage 'installer') -Force
+    # 27.10.2026: Setup.cs запускает dcme_install.py на Python мода (mod\tools\python); dcme-install.ps1 остаётся
+    # только в _source, для сверки
+    Copy-Item (Join-Path $PSScriptRoot 'dcme_install.py') (Join-Path $stage 'installer') -Force
     Copy-Item (Join-Path $GameOut 'README.txt') $stage -Force
 
     # Кэш Python в поставку не идёт.
@@ -41,7 +43,8 @@ try {
     Get-ChildItem $stage -Recurse -Include '__pycache__','*.pyc' -Force |
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
-    # 11.10.2026: деинсталлятор игры (Uninstall.cs) - в пакет рядом с dcme-install.ps1, тот кладёт его в папку игры
+    # 11.10.2026: деинсталлятор игры (Uninstall.cs) - в пакет рядом со сценарием установки (с 27.10 dcme_install.py), тот
+    # кладёт его в папку игры
     $cscU = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
     $iconU = Join-Path $Root 'mod\project\dc_icon.ico'
     & $cscU /target:winexe /platform:x64 /optimize+ /nologo /r:System.Windows.Forms.dll "/win32icon:$iconU" `

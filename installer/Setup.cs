@@ -7,7 +7,9 @@
 // of its SLUS_009.22 right away, before anything is installed.
 // Everything the mod needs (sources, patches, shaders, configs, camera
 // collision, the room-extraction scripts) is embedded in this exe as a resource
-// and unpacked to a temp folder. installer\dcme-install.ps1 then gets the
+// and unpacked to a temp folder. installer\dcme_install.py, on the Python that
+// comes with the mod (mod\tools\python; 27.10.2026 - before it was
+// installer\dcme-install.ps1 on Windows PowerShell), then gets the
 // recompiler framework (downloads the archive itself, or takes the one the user
 // downloaded by hand), applies the mod patch, pulls the game executable out of
 // THE USER'S OWN disc image, recompiles the game, injects the mod hooks, builds
@@ -43,7 +45,7 @@ public class Setup : Form
     Label buildHelp;                 // «?» у программ сборки: подсказка по наведению
     ToolTip tip;
     // 10.10.2026: список программ сборки под кнопкой Install - строка на программу, значок и состояние (installed / в
-    // составе мода / не установлено / ставится / перезагрузка / не вышло). Состояния шлёт dcme-install.ps1 строками
+    // составе мода / не установлено / ставится / перезагрузка / не вышло). Состояния шлёт dcme_install.py строками
     // «[tool] ключ состояние»; до установки окно узнаёт их само (компилятор - vswhere, остальное - содержимое пакета).
     class ToolRow { public string Key, Status = "checking"; public Label Icon, Name, State; }
     System.Collections.Generic.Dictionary<string, ToolRow> tools = new System.Collections.Generic.Dictionary<string, ToolRow>();
@@ -58,7 +60,9 @@ public class Setup : Form
     Process proc;
     StreamWriter fullLog;
     string workDir;
+    DateTime exeBefore;           // 26.10.2026: время DinoCrisisME.exe в папке установки до запуска сценария (GameBuilt)
     int lang = 0;                 // индекс в LANGS; 0 - английский по умолчанию
+    readonly bool oldWin = OldWindows();   // 27.10.2026: Windows 7 или 8 - в строке состояния и на Install одна фраза
 
     // The framework is pinned to one commit: the mod's patch is built against
     // exactly this tree and will refuse to apply to any other.
@@ -96,6 +100,28 @@ public class Setup : Form
     const string MSVC_RU = "Компилятор C++ (Microsoft Visual Studio Build Tools)";
     const string REBOOT_EN = "Restart the PC to finish installing {0}.";
     const string REBOOT_RU = "Перезагрузи компьютер, чтобы закончить установку {0}.";
+    // 27.10.2026: setup runs on the Python that comes with it, and that Python did not start (an antivirus blocks it or
+    // took it away while setup unpacked)
+    const string NOPY_EN =
+        "Setup could not start the Python that comes with it.\n\n" +
+        "Check that an antivirus does not block it, then run setup again.";
+    const string NOPY_RU =
+        "Установщик не смог запустить Python, который идёт вместе с ним.\n\n" +
+        "Проверь, что его не блокирует антивирус, и запусти установку снова.";
+    // 27.10.2026 (the player: "Windows 7 is not needed, just say Windows 10 or 11"): Windows 7 got an empty install folder
+    // and not a word
+    const string OLDWIN_EN = "Dino Crisis ME needs Windows 10 or 11 (64-bit).";
+    const string OLDWIN_RU = "Для Dino Crisis ME нужна 64-битная Windows 10 или 11.";
+    // 26.10.2026: under Wine (Proton, Winlator) setup could not build at all (its PowerShell is a stub); 27.10: on Python
+    // it can, and when it fails there anyway, the error box also gives the way around
+    const string WINE_EN =
+        "Under Wine (Proton, Winlator) you can also install Dino Crisis ME on a Windows PC and copy the install folder " +
+        "and your disc image to this device. On the first start the game asks for the disc image.";
+    const string WINE_RU =
+        "Под Wine (Proton, Winlator) можно и так: установи Dino Crisis ME на компьютере с Windows, затем перенеси папку " +
+        "установки и образ диска на это устройство. При первом запуске игра спросит, где образ.";
+    const string NOGAME_EN = "Setup ended without building the game (DinoCrisisME.exe).";
+    const string NOGAME_RU = "Установка закончилась, а игра не собрана (DinoCrisisME.exe).";
 
     static readonly Color BG    = Color.FromArgb(28, 28, 30);
     static readonly Color FG    = Color.Gainsboro;
@@ -115,7 +141,7 @@ public class Setup : Form
     // остаётся английской - вместо пустоты в окне.
     static readonly string[] LANGS = {
         "English", "Русский", "Deutsch", "Español", "Français",
-        "Português (BR)", "日本語", "中文 (简体)", "Italiano"
+        "Português (BR)", "日本語", "中文 (简体)", "Italiano", "العربية"
     };
 
     string S(string en, string rus)
@@ -124,22 +150,44 @@ public class Setup : Form
         if (lang == 1) return rus;
         string[] v;
         if (TR.TryGetValue(en, out v) && lang - 2 < v.Length && !string.IsNullOrEmpty(v[lang - 2]))
-            return v[lang - 2];
+            return lang == LANG_AR ? Rtl(v[lang - 2]) : v[lang - 2];
         return en;
     }
 
-    // Порядок в каждой строке: de, es, fr, pt, ja, zh, it (20.10.2026).
+    // 27.10.2026: арабский читается справа налево. Подписи окна стоят на своих местах (их задаёт фон), поэтому каждая
+    // строка перевода обёрнута в RLE ... PDF: внутри неё порядок справа налево, латиница и числа читаются как надо.
+    // Обёртка действует до конца строки, отсюда - по строке на обёртку.
+    const int LANG_AR = 9;
+    static string Rtl(string s)
+    {
+        string[] parts = s.Split('\n');
+        for (int i = 0; i < parts.Length; i++)
+            if (parts[i].Length > 0) parts[i] = "\u202B" + parts[i] + "\u202C";
+        return string.Join("\n", parts);
+    }
+
+    // Окно сообщения: на арабском - справа налево и по правому краю.
+    DialogResult Msg(IWin32Window owner, string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon)
+    {
+        MessageBoxOptions o = lang == LANG_AR ? (MessageBoxOptions.RtlReading | MessageBoxOptions.RightAlign) : (MessageBoxOptions)0;
+        if (owner != null) return MessageBox.Show(owner, text, caption, buttons, icon, MessageBoxDefaultButton.Button1, o);
+        return MessageBox.Show(text, caption, buttons, icon, MessageBoxDefaultButton.Button1, o);
+    }
+
+    // Порядок в каждой строке: de, es, fr, pt, ja, zh, it (20.10.2026), ar (27.10.2026).
     static readonly System.Collections.Generic.Dictionary<string, string[]> TR =
         new System.Collections.Generic.Dictionary<string, string[]> {
 { "Dino Crisis ME - mod setup", new[]{
   "Dino Crisis ME - Mod-Installation", "Dino Crisis ME - instalación del mod",
   "Dino Crisis ME - installation du mod", "Dino Crisis ME - instalação do mod",
-  "Dino Crisis ME - MOD インストーラー", "Dino Crisis ME - 模组安装程序", "Dino Crisis ME - installazione della mod" } },
+  "Dino Crisis ME - MOD インストーラー", "Dino Crisis ME - 模组安装程序", "Dino Crisis ME - installazione della mod",
+  "Dino Crisis ME - تثبيت التعديل" } },
 { "Game disc image:", new[]{
-  "Spielabbild:", "Imagen del disco:", "Image du disque :", "Imagem do disco:", "ディスクイメージ:", "游戏镜像：", "Immagine del disco:" } },
+  "Spielabbild:", "Imagen del disco:", "Image du disque :", "Imagem do disco:", "ディスクイメージ:", "游戏镜像：", "Immagine del disco:",
+  "صورة قرص اللعبة:" } },
 { "Build tools", new[]{
   "Build-Werkzeuge", "Herramientas de compilación", "Outils de compilation", "Ferramentas de compilação",
-  "ビルドツール", "构建工具", "Strumenti di compilazione" } },
+  "ビルドツール", "构建工具", "Strumenti di compilazione", "أدوات البناء" } },
 { HELP_EN, new[]{
   "Das Spiel wird auf deinem PC aus deiner eigenen Disc kompiliert, dafür braucht es den C++-Compiler.\n" +
   "Microsoft erlaubt nicht, ihn mit Mods weiterzugeben, er kommt also von Microsoft:\n" +
@@ -182,40 +230,50 @@ public class Setup : Form
   "automaticamente tramite winget, oppure installalo tu dall'indirizzo nella finestra\n" +
   "(carico di lavoro \"Sviluppo di applicazioni desktop con C++\").\n" +
   "Spuntare \"Installa automaticamente\" significa accettare la licenza Microsoft.\n" +
-  "Il gioco finito non ne ha bisogno." } },
+  "Il gioco finito non ne ha bisogno.",
+  "تبنى اللعبة على حاسوبك من قرصك الخاص، ولهذا تحتاج إلى مترجم C++\u200E.\n" +
+  "لا تسمح Microsoft بتوزيعه مع التعديلات، لذلك يأتي من Microsoft:\n" +
+  "تلقائيا عبر winget، أو ثبته بنفسك من العنوان في النافذة\n" +
+  "(حزمة العمل \"Desktop development with C++\u200E\").\n" +
+  "وضع علامة على \"التثبيت تلقائيا\" يعني أنك تقبل ترخيص Microsoft.\n" +
+  "اللعبة الجاهزة لا تحتاج إليه." } },
 { MSVC_EN, new[]{
   "C++-Compiler (Microsoft Visual Studio Build Tools)", "Compilador C++ (Microsoft Visual Studio Build Tools)",
   "Compilateur C++ (Microsoft Visual Studio Build Tools)", "Compilador C++ (Microsoft Visual Studio Build Tools)",
   "C++ コンパイラ (Microsoft Visual Studio Build Tools)", "C++ 编译器 (Microsoft Visual Studio Build Tools)",
-  "Compilatore C++ (Microsoft Visual Studio Build Tools)" } },
+  "Compilatore C++ (Microsoft Visual Studio Build Tools)", "مترجم C++ (Microsoft Visual Studio Build Tools)" } },
 { AUTO_EN, new[]{
   "Automatisch installieren (ca. 3 GB) und die Microsoft-Lizenz annehmen",
   "Instalar automáticamente (unos 3 GB) y aceptar la licencia de Microsoft",
   "Installer automatiquement (environ 3 Go) et accepter la licence Microsoft",
   "Instalar automaticamente (cerca de 3 GB) e aceitar a licença da Microsoft",
   "自動でインストールする (約 3 GB、Microsoft のライセンスに同意)",
-  "自动安装（约 3 GB）并接受 Microsoft 许可协议", "Installa automaticamente (circa 3 GB) accettando la licenza Microsoft" } },
+  "自动安装（约 3 GB）并接受 Microsoft 许可协议", "Installa automaticamente (circa 3 GB) accettando la licenza Microsoft",
+  "التثبيت تلقائيا (نحو 3 GB) مع قبول ترخيص Microsoft" } },
 { "checking...", new[]{ "wird geprüft…", "comprobando…", "vérification…", "verificando…", "確認中…", "正在检查…",
-  "verifica in corso…" } },
-{ "installed", new[]{ "installiert", "instalado", "installé", "instalado", "インストール済み", "已安装", "installato" } },
+  "verifica in corso…", "جار التحقق..." } },
+{ "installed", new[]{ "installiert", "instalado", "installé", "instalado", "インストール済み", "已安装", "installato", "مثبت" } },
 { "not installed - setup will install it", new[]{
   "nicht installiert - das Setup installiert ihn", "no instalado: el instalador lo instalará",
   "non installé - l'installateur l'installera", "não instalado - o instalador vai instalá-lo",
-  "未インストール - インストーラーが導入します", "未安装 - 安装程序会安装它", "non installato: lo installerà il setup" } },
+  "未インストール - インストーラーが導入します", "未安装 - 安装程序会安装它", "non installato: lo installerà il setup", "غير مثبت - سيثبته برنامج الإعداد" } },
 { "not installed - install it from the address below", new[]{
   "nicht installiert - über die Adresse unten installieren", "no instalado: instálalo desde la dirección de abajo",
   "non installé - installe-le depuis l'adresse ci-dessous", "não instalado - instale pelo endereço abaixo",
-  "未インストール - 下のアドレスからインストールしてください", "未安装 - 请从下方地址安装", "non installato: installalo dall'indirizzo qui sotto" } },
+  "未インストール - 下のアドレスからインストールしてください", "未安装 - 请从下方地址安装", "non installato: installalo dall'indirizzo qui sotto",
+  "غير مثبت - ثبته من العنوان أدناه" } },
 { "installing... (10-30 minutes)", new[]{
   "wird installiert… (10-30 Minuten)", "instalando… (10-30 minutos)", "installation… (10-30 minutes)",
-  "instalando… (10-30 minutos)", "インストール中… (10-30 分)", "正在安装…（10-30 分钟）", "installazione in corso… (10-30 minuti)" } },
+  "instalando… (10-30 minutos)", "インストール中… (10-30 分)", "正在安装…（10-30 分钟）", "installazione in corso… (10-30 minuti)",
+  "جار التثبيت... (10-30 دقيقة)" } },
 { "installed - restart the PC after setup", new[]{
   "installiert - nach dem Setup den PC neu starten", "instalado: reinicia el PC al terminar",
   "installé - redémarre le PC après l'installation", "instalado - reinicie o PC depois da instalação",
-  "インストール済み - 完了後に PC を再起動してください", "已安装 - 安装完成后请重启电脑", "installato: riavvia il PC al termine" } },
+  "インストール済み - 完了後に PC を再起動してください", "已安装 - 安装完成后请重启电脑", "installato: riavvia il PC al termine",
+  "مثبت - أعد تشغيل الحاسوب بعد الإعداد" } },
 { "could not install", new[]{
   "Installation fehlgeschlagen", "no se pudo instalar", "échec de l'installation", "não foi possível instalar",
-  "インストールできませんでした", "无法安装", "installazione non riuscita" } },
+  "インストールできませんでした", "无法安装", "installazione non riuscita", "تعذر التثبيت" } },
 { NOMSVC_EN, new[]{
   "Der C++-Compiler ist noch nicht installiert.\n\nInstalliere ihn über die Adresse im Fenster (Workload \"Desktopentwicklung mit C++\") oder setze den Haken \"Automatisch installieren\".",
   "El compilador C++ aún no está instalado.\n\nInstálalo desde la dirección de la ventana (carga de trabajo \"Desarrollo para el escritorio con C++\") o marca \"Instalar automáticamente\".",
@@ -224,44 +282,47 @@ public class Setup : Form
   "C++ コンパイラがまだインストールされていません。\n\nウィンドウのアドレスからインストールするか (ワークロード「C++ によるデスクトップ開発」)、「自動でインストールする」にチェックを入れてください。",
   "C++ 编译器尚未安装。\n\n请按窗口中的地址安装（工作负载“使用 C++ 的桌面开发”），或勾选“自动安装”。",
   "Il compilatore C++ non è ancora installato.\n\n" +
-  "Installalo dall'indirizzo nella finestra (carico di lavoro \"Sviluppo di applicazioni desktop con C++\") oppure spunta \"Installa automaticamente\"." } },
+  "Installalo dall'indirizzo nella finestra (carico di lavoro \"Sviluppo di applicazioni desktop con C++\") oppure spunta \"Installa automaticamente\".",
+  "مترجم C++\u200E غير مثبت بعد.\n\n" +
+  "ثبته من العنوان في النافذة (حزمة العمل \"Desktop development with C++\u200E\")، أو ضع علامة على \"التثبيت تلقائيا\"." } },
 { "Installation complete", new[]{
   "Installation abgeschlossen", "Instalación completada", "Installation terminée", "Instalação concluída",
-  "インストール完了", "安装完成", "Installazione completata" } },
+  "インストール完了", "安装完成", "Installazione completata", "اكتمل التثبيت" } },
 { REBOOT_EN, new[]{
   "Starte den PC neu, um die Installation von {0} abzuschließen.",
   "Reinicia el PC para terminar de instalar {0}.",
   "Redémarre le PC pour terminer l'installation de {0}.",
   "Reinicie o PC para concluir a instalação de {0}.",
   "{0} のインストールを完了するには PC を再起動してください。",
-  "请重启电脑以完成 {0} 的安装。", "Riavvia il PC per completare l'installazione di {0}." } },
-{ "Play", new[]{ "Spielen", "Jugar", "Jouer", "Jogar", "プレイ", "开始游戏", "Gioca" } },
+  "请重启电脑以完成 {0} 的安装。", "Riavvia il PC per completare l'installazione di {0}.", "أعد تشغيل الحاسوب لإكمال تثبيت {0}." } },
+{ "Play", new[]{ "Spielen", "Jugar", "Jouer", "Jogar", "プレイ", "开始游戏", "Gioca", "العب" } },
 { "Open folder", new[]{ "Ordner öffnen", "Abrir carpeta", "Ouvrir le dossier", "Abrir pasta", "フォルダーを開く", "打开文件夹",
-  "Apri cartella" } },
+  "Apri cartella", "فتح المجلد" } },
 { "Install to:", new[]{ "Installieren nach:", "Instalar en:", "Installer dans :", "Instalar em:", "インストール先:", "安装到：",
-  "Installa in:" } },
-{ "Browse...", new[]{ "Durchsuchen…", "Examinar…", "Parcourir…", "Procurar…", "参照…", "浏览…", "Sfoglia…" } },
-{ "Copy", new[]{ "Kopieren", "Copiar", "Copier", "Copiar", "コピー", "复制", "Copia" } },
+  "Installa in:", "التثبيت في:" } },
+{ "Browse...", new[]{ "Durchsuchen…", "Examinar…", "Parcourir…", "Procurar…", "参照…", "浏览…", "Sfoglia…", "استعراض..." } },
+{ "Copy", new[]{ "Kopieren", "Copiar", "Copier", "Copiar", "コピー", "复制", "Copia", "نسخ" } },
 { "Downloaded .zip:", new[]{
   "Geladene .zip:", "Archivo .zip descargado:", "Fichier .zip téléchargé :",
-  "Arquivo .zip baixado:", "ダウンロード済みの .zip:", "已下载的 .zip：", "File .zip scaricato:" } },
+  "Arquivo .zip baixado:", "ダウンロード済みの .zip:", "已下载的 .zip：", "File .zip scaricato:", "ملف zip الذي قمت بتنزيله:" } },
 { "Download the recompiler framework from the address below", new[]{
   "Recompiler-Gerüst von der Adresse unten laden",
   "Descargar el recompilador de la dirección de abajo",
   "Télécharger le recompilateur à l'adresse ci-dessous",
   "Baixar o recompilador do endereço abaixo",
   "リコンパイラを下のアドレスからダウンロード",
-  "从下方地址下载重编译框架", "Scarica il ricompilatore dall'indirizzo qui sotto" } },
+  "从下方地址下载重编译框架", "Scarica il ricompilatore dall'indirizzo qui sotto", "قم بتنزيل إطار إعادة الترجمة من العنوان أدناه" } },
 { "Needs the disc's subchannel file next to the image: {0}", new[]{
   "Benötigt die Subchannel-Datei der Disc neben dem Abbild: {0}",
   "Necesita el archivo de subcanal del disco junto a la imagen: {0}",
   "Il faut le fichier de sous-canal du disque à côté de l'image : {0}",
   "Precisa do arquivo de subcanal do disco ao lado da imagem: {0}",
   "イメージと同じフォルダーにディスクのサブチャンネルファイルが必要です: {0}",
-  "需要将光盘的子通道文件放在镜像旁边：{0}", "Serve il file del sottocanale del disco accanto all'immagine: {0}" } },
+  "需要将光盘的子通道文件放在镜像旁边：{0}", "Serve il file del sottocanale del disco accanto all'immagine: {0}",
+  "يحتاج إلى ملف القناة الفرعية للقرص بجانب الصورة: {0}" } },
 { "Subchannel file: {0}", new[]{
   "Subchannel-Datei: {0}", "Archivo de subcanal: {0}", "Fichier de sous-canal : {0}", "Arquivo de subcanal: {0}",
-  "サブチャンネルファイル: {0}", "子通道文件：{0}", "File del sottocanale: {0}" } },
+  "サブチャンネルファイル: {0}", "子通道文件：{0}", "File del sottocanale: {0}", "ملف القناة الفرعية: {0}" } },
 { "This disc is protected by LibCrypt: the game checks data kept in the disc's subchannel, and a .bin image does not hold it.\n\nPut the subchannel file of this disc next to the image:\n{0}\n\nIt is the .sbi file of the disc dump, the same one the DuckStation emulator uses.", new[]{
   "Diese Disc ist mit LibCrypt geschützt: Das Spiel prüft Daten im Subchannel der Disc, und ein .bin-Abbild enthält sie nicht.\n\nLege die Subchannel-Datei dieser Disc neben das Abbild:\n{0}\n\nDas ist die .sbi-Datei des Disc-Dumps, dieselbe, die der Emulator DuckStation verwendet.",
   "Este disco está protegido con LibCrypt: el juego comprueba datos del subcanal del disco, y una imagen .bin no los contiene.\n\nPon el archivo de subcanal de este disco junto a la imagen:\n{0}\n\nEs el archivo .sbi del volcado del disco, el mismo que usa el emulador DuckStation.",
@@ -272,15 +333,20 @@ public class Setup : Form
   "Questo disco è protetto da LibCrypt: il gioco controlla dati conservati nel sottocanale del disco, e un'immagine .bin non li contiene.\n\n" +
   "Metti il file del sottocanale di questo disco accanto all'immagine:\n" +
   "{0}\n\n" +
-  "È il file .sbi del dump del disco, lo stesso che usa l'emulatore DuckStation." } },
+  "È il file .sbi del dump del disco, lo stesso che usa l'emulatore DuckStation.",
+  "هذا القرص محمي بنظام LibCrypt: تتحقق اللعبة من بيانات محفوظة في القناة الفرعية للقرص، وصورة bin لا تحتويها.\n\n" +
+  "ضع ملف القناة الفرعية لهذا القرص بجانب الصورة:\n" +
+  "{0}\n\n" +
+  "إنه ملف sbi من نسخة القرص، وهو نفسه الذي يستخدمه محاكي DuckStation." } },
 { "Recognised: {0}", new[]{
-  "Erkannt: {0}", "Reconocida: {0}", "Reconnue : {0}", "Reconhecida: {0}", "認識しました: {0}", "已识别：{0}", "Riconosciuta: {0}" } },
+  "Erkannt: {0}", "Reconocida: {0}", "Reconnue : {0}", "Reconhecida: {0}", "認識しました: {0}", "已识别：{0}", "Riconosciuta: {0}",
+  "تم التعرف: {0}" } },
 { "Unknown disc image", new[]{
   "Unbekanntes Abbild", "Imagen desconocida", "Image inconnue", "Imagem desconhecida",
-  "不明なディスクイメージです", "未知的光盘镜像", "Immagine sconosciuta" } },
+  "不明なディスクイメージです", "未知的光盘镜像", "Immagine sconosciuta", "صورة قرص غير معروفة" } },
 { "Unknown disc image.", new[]{
   "Unbekanntes Abbild.", "Imagen desconocida.", "Image inconnue.", "Imagem desconhecida.",
-  "不明なディスクイメージです。", "未知的光盘镜像。", "Immagine sconosciuta." } },
+  "不明なディスクイメージです。", "未知的光盘镜像。", "Immagine sconosciuta.", "صورة قرص غير معروفة." } },
 { "Fan mod, not made or endorsed by Capcom. Dino Crisis belongs to Capcom: you need your own disc image.", new[]{
   "Fan-Mod, nicht von Capcom erstellt oder unterstützt. Dino Crisis gehört Capcom: du brauchst dein eigenes Abbild.",
   "Mod de fans, no creado ni respaldado por Capcom. Dino Crisis pertenece a Capcom: necesitas tu propia imagen.",
@@ -288,49 +354,53 @@ public class Setup : Form
   "Mod de fãs, não criado nem endossado pela Capcom. Dino Crisis pertence à Capcom: você precisa da sua imagem.",
   "ファン制作の MOD で、Capcom による制作・承認ではありません。Dino Crisis は Capcom の作品です。ディスクイメージはご自身でご用意ください。",
   "粉丝制作的模组，并非 Capcom 制作或认可。Dino Crisis 归 Capcom 所有，需要你自己的光盘镜像。",
-  "Mod di fan, non realizzata né approvata da Capcom. Dino Crisis appartiene a Capcom: ti serve la tua immagine del disco." } },
-{ "Install", new[]{ "Installieren", "Instalar", "Installer", "Instalar", "インストール", "安装", "Installa" } },
+  "Mod di fan, non realizzata né approvata da Capcom. Dino Crisis appartiene a Capcom: ti serve la tua immagine del disco.",
+  "تعديل من صنع المعجبين، لم تصنعه Capcom ولم تعتمده. Dino Crisis ملك لشركة Capcom: تحتاج إلى صورة قرصك الخاصة." } },
+{ "Install", new[]{ "Installieren", "Instalar", "Installer", "Instalar", "インストール", "安装", "Installa", "تثبيت" } },
 { "Installing...", new[]{ "Installiere…", "Instalando…", "Installation…", "Instalando…", "インストール中…", "正在安装…",
-  "Installazione…" } },
-{ "Close", new[]{ "Schließen", "Cerrar", "Fermer", "Fechar", "閉じる", "关闭", "Chiudi" } },
+  "Installazione…", "جار التثبيت..." } },
+{ "Close", new[]{ "Schließen", "Cerrar", "Fermer", "Fechar", "閉じる", "关闭", "Chiudi", "إغلاق" } },
 { "Ready to install.", new[]{
   "Bereit zur Installation.", "Listo para instalar.", "Prêt à installer.",
-  "Pronto para instalar.", "準備完了。", "准备就绪。", "Pronto per l'installazione." } },
-{ "Starting...", new[]{ "Starte…", "Iniciando…", "Démarrage…", "Iniciando…", "開始中…", "正在启动…", "Avvio…" } },
+  "Pronto para instalar.", "準備完了。", "准备就绪。", "Pronto per l'installazione.", "جاهز للتثبيت." } },
+{ "Starting...", new[]{ "Starte…", "Iniciando…", "Démarrage…", "Iniciando…", "開始中…", "正在启动…", "Avvio…", "جار البدء..." } },
 { "Unpacking installer contents...", new[]{
   "Entpacke Inhalt…", "Descomprimiendo el contenido…", "Décompression du contenu…",
-  "Descompactando o conteúdo…", "内容を展開中…", "正在解压内容…", "Estrazione dei contenuti…" } },
+  "Descompactando o conteúdo…", "内容を展開中…", "正在解压内容…", "Estrazione dei contenuti…", "جار فك محتويات المثبت..." } },
 { "Mod contents unpacked", new[]{
   "Inhalt entpackt", "Contenido descomprimido", "Contenu décompressé",
-  "Conteúdo descompactado", "内容を展開しました", "内容已解压", "Contenuti estratti" } },
+  "Conteúdo descompactado", "内容を展開しました", "内容已解压", "Contenuti estratti", "تم فك محتويات التعديل" } },
 { "Link copied.", new[]{
   "Adresse kopiert.", "Enlace copiado.", "Lien copié.", "Link copiado.",
-  "リンクをコピーしました。", "链接已复制。", "Link copiato." } },
+  "リンクをコピーしました。", "链接已复制。", "Link copiato.", "تم نسخ الرابط." } },
 { "Setup finished.", new[]{
   "Installation abgeschlossen.", "Instalación terminada.", "Installation terminée.",
-  "Instalação concluída.", "インストールが完了しました。", "安装完成。", "Installazione terminata." } },
+  "Instalação concluída.", "インストールが完了しました。", "安装完成。", "Installazione terminata.", "انتهى الإعداد." } },
 { "Setup failed - see the last lines of the log.", new[]{
   "Fehlgeschlagen - siehe die letzten Zeilen des Protokolls.",
   "Ha fallado: mira las últimas líneas del registro.",
   "Échec - vois les dernières lignes du journal.",
   "Falhou - veja as últimas linhas do registro.",
   "失敗しました。ログの最後の行を確認してください。",
-  "安装失败 - 请看日志最后几行。", "Installazione non riuscita: guarda le ultime righe del registro." } },
+  "安装失败 - 请看日志最后几行。", "Installazione non riuscita: guarda le ultime righe del registro.",
+  "فشل الإعداد - انظر آخر أسطر السجل." } },
 { "Setup is still running. Abort?", new[]{
   "Die Installation läuft noch. Abbrechen?", "La instalación sigue en marcha. ¿Cancelar?",
   "L'installation est en cours. Interrompre ?", "A instalação ainda está rodando. Cancelar?",
-  "インストールがまだ実行中です。中止しますか？", "安装仍在进行。要中止吗？", "L'installazione è ancora in corso. Annullare?" } },
-{ "Error", new[]{ "Fehler", "Error", "Erreur", "Erro", "エラー", "错误", "Errore" } },
+  "インストールがまだ実行中です。中止しますか？", "安装仍在进行。要中止吗？", "L'installazione è ancora in corso. Annullare?",
+  "الإعداد ما زال يعمل. هل تريد الإيقاف؟" } },
+{ "Error", new[]{ "Fehler", "Error", "Erreur", "Erro", "エラー", "错误", "Errore", "خطأ" } },
 { "Point at the game disc image (the Track 1 .bin file).", new[]{
   "Wähle das Spielabbild (die .bin-Datei von Track 1).",
   "Indica la imagen del juego (el archivo .bin de la pista 1).",
   "Indique l'image du jeu (le fichier .bin de la piste 1).",
   "Aponte para a imagem do jogo (o arquivo .bin da faixa 1).",
   "ゲームのディスクイメージ（トラック 1 の .bin）を指定してください。",
-  "请指定游戏镜像（第 1 轨的 .bin 文件）。", "Indica l'immagine del gioco (il file .bin della traccia 1)." } },
+  "请指定游戏镜像（第 1 轨的 .bin 文件）。", "Indica l'immagine del gioco (il file .bin della traccia 1).",
+  "حدد صورة قرص اللعبة (ملف Track 1 بصيغة bin)." } },
 { "Choose where to install.", new[]{
   "Wähle das Installationsziel.", "Elige dónde instalar.", "Choisis où installer.",
-  "Escolha onde instalar.", "インストール先を選んでください。", "请选择安装位置。", "Scegli dove installare." } },
+  "Escolha onde instalar.", "インストール先を選んでください。", "请选择安装位置。", "Scegli dove installare.", "اختر مكان التثبيت." } },
 { "The install folder path is too long for the build tools (over 95 characters).\nChoose a shorter one, for example C:\\Games\\DinoCrisisME.", new[]{
   "Der Pfad des Installationsordners ist für die Build-Werkzeuge zu lang (über 95 Zeichen).\nWähle einen kürzeren, zum Beispiel C:\\Games\\DinoCrisisME.",
   "La ruta de la carpeta de instalación es demasiado larga para las herramientas de compilación (más de 95 caracteres).\nElige una más corta, por ejemplo C:\\Games\\DinoCrisisME.",
@@ -339,7 +409,9 @@ public class Setup : Form
   "インストール先のパスがビルドツールには長すぎます（95 文字超）。\nC:\\Games\\DinoCrisisME など短いパスを選んでください。",
   "安装文件夹路径对构建工具来说太长（超过 95 个字符）。\n请选择更短的路径，例如 C:\\Games\\DinoCrisisME。",
   "Il percorso della cartella di installazione è troppo lungo per gli strumenti di compilazione (più di 95 caratteri).\n" +
-  "Scegline uno più corto, per esempio C:\\Games\\DinoCrisisME." } },
+  "Scegline uno più corto, per esempio C:\\Games\\DinoCrisisME.",
+  "مسار مجلد التثبيت طويل جدا على أدوات البناء (أكثر من 95 حرفا).\n" +
+  "اختر مسارا أقصر، مثلا: C:\\Games\\DinoCrisisME" } },
 { "Point at the psxrecomp archive you downloaded, or tick the box above to let setup download it.", new[]{
   "Wähle das geladene psxrecomp-Archiv - oder setze oben den Haken, dann wird es geladen.",
   "Indica el archivo psxrecomp que descargaste, o marca la casilla de arriba para descargarlo.",
@@ -347,34 +419,37 @@ public class Setup : Form
   "Aponte para o arquivo psxrecomp que você baixou, ou marque a caixa acima para baixá-lo.",
   "ダウンロードした psxrecomp のアーカイブを指定するか、上のチェックを入れてください。",
   "请指定你下载的 psxrecomp 压缩包，或勾选上面的选项让程序自行下载。",
-  "Indica l'archivio psxrecomp che hai scaricato, oppure spunta la casella qui sopra per scaricarlo." } },
+  "Indica l'archivio psxrecomp che hai scaricato, oppure spunta la casella qui sopra per scaricarlo.",
+  "حدد أرشيف psxrecomp الذي قمت بتنزيله، أو ضع علامة في المربع أعلاه ليقوم الإعداد بتنزيله." } },
 { "The psxrecomp archive you downloaded", new[]{
   "Das geladene psxrecomp-Archiv", "El archivo psxrecomp que descargaste",
   "L'archive psxrecomp téléchargée", "O arquivo psxrecomp que você baixou",
-  "ダウンロードした psxrecomp アーカイブ", "你下载的 psxrecomp 压缩包", "L'archivio psxrecomp che hai scaricato" } },
+  "ダウンロードした psxrecomp アーカイブ", "你下载的 psxrecomp 压缩包", "L'archivio psxrecomp che hai scaricato",
+  "أرشيف psxrecomp الذي قمت بتنزيله" } },
 { "Where to install Dino Crisis ME", new[]{
   "Wohin Dino Crisis ME installiert wird", "Dónde instalar Dino Crisis ME",
   "Où installer Dino Crisis ME", "Onde instalar o Dino Crisis ME",
-  "Dino Crisis ME のインストール先", "Dino Crisis ME 的安装位置", "Dove installare Dino Crisis ME" } },
+  "Dino Crisis ME のインストール先", "Dino Crisis ME 的安装位置", "Dove installare Dino Crisis ME", "أين تريد تثبيت Dino Crisis ME" } },
 { "Dino Crisis disc image - Track 1 (.bin) or its .cue", new[]{
   "Dino Crisis Abbild - Track 1 (.bin) oder die .cue", "Imagen de Dino Crisis - pista 1 (.bin) o su .cue",
   "Image de Dino Crisis - piste 1 (.bin) ou son .cue", "Imagem de Dino Crisis - faixa 1 (.bin) ou seu .cue",
   "Dino Crisis のイメージ - トラック 1 (.bin) または .cue", "Dino Crisis 镜像 - 第 1 轨 (.bin) 或其 .cue",
-  "Immagine di Dino Crisis - traccia 1 (.bin) o il suo .cue" } },
+  "Immagine di Dino Crisis - traccia 1 (.bin) o il suo .cue", "صورة قرص Dino Crisis - Track 1 (bin) أو ملف cue الخاص بها" } },
 { "This installer carries no mod payload.", new[]{
   "Dieser Installer enthält keine Mod-Daten.", "Este instalador no lleva los datos del mod.",
   "Cet installateur ne contient pas les données du mod.", "Este instalador não traz os dados do mod.",
-  "このインストーラーに MOD 本体が入っていません。", "此安装程序中没有模组内容。", "Questo programma di installazione non contiene i dati della mod." } },
+  "このインストーラーに MOD 本体が入っていません。", "此安装程序中没有模组内容。", "Questo programma di installazione non contiene i dati della mod.",
+  "لا يحتوي هذا المثبت على بيانات التعديل." } },
 { "Installer language", new[]{
   "Sprache des Installers", "Idioma del instalador", "Langue de l'installateur",
-  "Idioma do instalador", "インストーラーの言語", "安装程序语言", "Lingua dell'installer" } },
+  "Idioma do instalador", "インストーラーの言語", "安装程序语言", "Lingua dell'installer", "لغة المثبت" } },
 { "Create a desktop shortcut", new[]{
   "Verknüpfung auf dem Desktop anlegen",
   "Crear un acceso directo en el escritorio",
   "Créer un raccourci sur le bureau",
   "Criar um atalho na área de trabalho",
   "デスクトップにショートカットを作成する",
-  "在桌面创建快捷方式", "Crea un collegamento sul desktop" } },
+  "在桌面创建快捷方式", "Crea un collegamento sul desktop", "إنشاء اختصار على سطح المكتب" } },
 { "Setup was interrupted.\n\nThe reason is in the last lines of the log.\nFull log: install-log.txt in the install folder.", new[]{
   "Die Installation wurde abgebrochen.\n\nDer Grund steht in den letzten Zeilen des Protokolls.\nVollständig: install-log.txt im Zielordner.",
   "La instalación se interrumpió.\n\nEl motivo está en las últimas líneas del registro.\nRegistro completo: install-log.txt en la carpeta de destino.",
@@ -384,7 +459,57 @@ public class Setup : Form
   "安装已中断。\n\n原因见日志最后几行。\n完整日志：安装目录下的 install-log.txt。",
   "L'installazione si è interrotta.\n\n" +
   "Il motivo è nelle ultime righe del registro.\n" +
-  "Registro completo: install-log.txt nella cartella di installazione." } },
+  "Registro completo: install-log.txt nella cartella di installazione.",
+  "توقف الإعداد.\n\n" +
+  "السبب في آخر أسطر السجل.\n" +
+  "السجل الكامل: install-log.txt في مجلد التثبيت." } },
+{ NOPY_EN, new[]{
+  "Das Setup konnte das mitgelieferte Python nicht starten.\n\n" +
+  "Prüfe, ob ein Virenschutz es blockiert, und starte das Setup erneut.",
+  "El instalador no pudo iniciar el Python que trae consigo.\n\n" +
+  "Comprueba que ningún antivirus lo bloquee y vuelve a ejecutar el instalador.",
+  "L'installateur n'a pas pu lancer le Python qu'il contient.\n\n" +
+  "Vérifie qu'aucun antivirus ne le bloque, puis relance l'installation.",
+  "O instalador não conseguiu iniciar o Python que vem com ele.\n\n" +
+  "Verifique se nenhum antivírus o está bloqueando e execute o instalador de novo.",
+  "インストーラーに同梱の Python を起動できませんでした。\n\n" +
+  "ウイルス対策ソフトにブロックされていないか確認し、もう一度インストーラーを実行してください。",
+  "安装程序无法启动其自带的 Python。\n\n" +
+  "请检查它是否被杀毒软件拦截，然后重新运行安装程序。",
+  "Il programma di installazione non è riuscito ad avviare il Python incluso.\n\n" +
+  "Controlla che un antivirus non lo blocchi, poi avvia di nuovo l'installazione.",
+  "تعذر على الإعداد تشغيل Python المرفق به.\n\n" +
+  "تأكد من أن برنامج مكافحة الفيروسات لا يحظره، ثم شغل الإعداد مجددا." } },
+{ OLDWIN_EN, new[]{
+  "Dino Crisis ME benötigt Windows 10 oder 11 (64-Bit).", "Dino Crisis ME necesita Windows 10 u 11 (64 bits).",
+  "Dino Crisis ME nécessite Windows 10 ou 11 (64 bits).", "O Dino Crisis ME precisa do Windows 10 ou 11 (64 bits).",
+  "Dino Crisis ME には Windows 10 または 11 (64 ビット) が必要です。", "Dino Crisis ME 需要 Windows 10 或 11（64 位）。",
+  "Dino Crisis ME richiede Windows 10 o 11 (64 bit).", "يحتاج Dino Crisis ME إلى Windows 10 أو 11 (64 بت)." } },
+{ WINE_EN, new[]{
+  "Unter Wine (Proton, Winlator) kannst du Dino Crisis ME auch auf einem Windows-PC installieren und dann den " +
+  "Installationsordner und dein Abbild auf dieses Gerät kopieren. Beim ersten Start fragt das Spiel nach dem Abbild.",
+  "Con Wine (Proton, Winlator) también puedes instalar Dino Crisis ME en un PC con Windows y luego copiar la carpeta de " +
+  "instalación y tu imagen del disco a este dispositivo. La primera vez que se inicia, el juego pide la imagen del disco.",
+  "Sous Wine (Proton, Winlator), tu peux aussi installer Dino Crisis ME sur un PC Windows, puis copier le dossier " +
+  "d'installation et ton image du disque sur cet appareil. Au premier lancement, le jeu demande l'image du disque.",
+  "No Wine (Proton, Winlator) você também pode instalar o Dino Crisis ME em um PC com Windows e depois copiar a pasta de " +
+  "instalação e a sua imagem do disco para este aparelho. Na primeira vez que abrir, o jogo pede a imagem do disco.",
+  "Wine (Proton、Winlator) では、Windows PC に Dino Crisis ME をインストールし、インストール先フォルダーと" +
+  "ディスクイメージをこのデバイスにコピーする方法もあります。初回起動時にゲームがディスクイメージの場所を尋ねます。",
+  "在 Wine（Proton、Winlator）下，也可以先在 Windows 电脑上安装 Dino Crisis ME，然后把安装文件夹和你的光盘镜像" +
+  "复制到此设备。首次启动时游戏会询问光盘镜像的位置。",
+  "Con Wine (Proton, Winlator) puoi anche installare Dino Crisis ME su un PC Windows e poi copiare la cartella di " +
+  "installazione e la tua immagine del disco su questo dispositivo. Al primo avvio il gioco chiede l'immagine del disco.",
+  "عند استخدام Wine (Proton أو Winlator) يمكنك أيضا تثبيت Dino Crisis ME على حاسوب Windows ونسخ مجلد التثبيت وصورة قرصك إلى هذا الجهاز. عند التشغيل الأول تطلب اللعبة صورة القرص." } },
+{ NOGAME_EN, new[]{
+  "Die Installation ist beendet, aber das Spiel wurde nicht kompiliert (DinoCrisisME.exe).",
+  "La instalación terminó sin compilar el juego (DinoCrisisME.exe).",
+  "L'installation s'est terminée sans compiler le jeu (DinoCrisisME.exe).",
+  "A instalação terminou sem compilar o jogo (DinoCrisisME.exe).",
+  "インストールは終了しましたが、ゲームはコンパイルされていません (DinoCrisisME.exe)。",
+  "安装已结束，但游戏没有编译出来（DinoCrisisME.exe）。",
+  "L'installazione è terminata senza compilare il gioco (DinoCrisisME.exe).",
+  "انتهى الإعداد دون بناء اللعبة (DinoCrisisME.exe)." } },
         };
 
     [STAThread]
@@ -480,7 +605,7 @@ public class Setup : Form
         };
 
         // 10.10.2026 (player): the "uninstall the build tools afterwards" box is gone - what setup carries is deleted with
-        // its temp folder by itself, and the C++ compiler is the player's to keep or remove (dcme-install.ps1 -RemoveTools
+        // its temp folder by itself, and the C++ compiler is the player's to keep or remove (dcme_install.py -RemoveTools
         // still does it from the command line)
         lnkBox  = MakeCheck(20, 306, 700, true);
 
@@ -552,6 +677,7 @@ public class Setup : Form
         Controls.Add(log);
 
         status = MakeLabel("", 20, 630, 700, 18, true);
+        if (oldWin) status.ForeColor = WARNC;
         // 08.10.2026 (licence audit): a fan mod - Capcom has nothing to do with it
         noteLbl = MakeLabel("", 20, 650, 700, 30, true);
         noteLbl.Font = new Font("Segoe UI", 8.25f);
@@ -559,7 +685,7 @@ public class Setup : Form
         // 10.10.2026 (player: "let us try the free compiler, so nobody downloads Visual Studio Build Tools"): when the
         // payload carries the compiler (Clang, mod/tools/llvm) and the recorded build plans (mod/build; then CMake is not
         // needed either) there is nothing to install - the compiler row, its tick, the address and the "?" are not shown
-        // at all, and the log moves up into their place. The same test as Find-BundledLlvm of dcme-install.ps1.
+        // at all, and the log moves up into their place. The same test as find_bundled_llvm of dcme_install.py.
         bundledCompiler = PayloadHas("mod/tools/llvm/bin/x86_64-w64-mingw32-clang.exe") && PayloadHas("mod/tools/run_plan.py") &&
                           PayloadHas("mod/build/recompiler.plan.json") && PayloadHas("mod/build/game.plan.json");
         if (bundledCompiler) {
@@ -576,7 +702,7 @@ public class Setup : Form
 
         FormClosing += (s, e) => {
             if (proc != null && !proc.HasExited) {
-                var r = MessageBox.Show(S("Setup is still running. Abort?", "Установка ещё идёт. Прервать?"),
+                var r = Msg(null, S("Setup is still running. Abort?", "Установка ещё идёт. Прервать?"),
                                         "Dino Crisis ME", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
                 if (r == DialogResult.No) { e.Cancel = true; return; }
                 try { proc.Kill(); } catch { }
@@ -608,7 +734,7 @@ public class Setup : Form
         langLbl.Text  = S("Installer language", "Язык установщика");
         goBtn.Text    = S("Install", "Установить");
         closeBtn.Text = S("Close", "Закрыть");
-        if (proc == null) status.Text = S("Ready to install.", "Готов к установке.");
+        if (proc == null) status.Text = oldWin ? S(OLDWIN_EN, OLDWIN_RU) : S("Ready to install.", "Готов к установке.");
         noteLbl.Text = S("Fan mod, not made or endorsed by Capcom. Dino Crisis belongs to Capcom: you need your own disc image.",
                          "Любительский мод: Capcom его не делала и не одобряла. Dino Crisis принадлежит Capcom, нужен свой образ диска.");
         ShowDetect();
@@ -768,7 +894,7 @@ public class Setup : Form
         ShowTools();
     }
 
-    // The C++ compiler as dcme-install.ps1 looks for it (Find-Msvc): a Visual Studio or Build Tools with the C++ tools.
+    // The C++ compiler as dcme_install.py looks for it (find_msvc): a Visual Studio or Build Tools with the C++ tools.
     static string FindMsvc()
     {
         try {
@@ -892,11 +1018,95 @@ public class Setup : Form
         if (fullLog != null) { try { fullLog.Flush(); fullLog.Close(); } catch { } fullLog = null; }
     }
 
+    // ---- 26.10.2026: Wine, the real Windows version, the command line of the Python ----
+    // GitHub (Android tablet, Winlator / DroidDeck): "setup works, the DinoCrisisME folder is empty" - Wine (and Proton,
+    // Winlator) puts a stub powershell.exe exactly where setup looked for it: it runs no script and always returns 0, and
+    // setup took 0 for success. Since then success is a game exe written by this run (GameBuilt); 27.10 setup runs on the
+    // Python that comes with the mod, and PowerShell is not needed at all.
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern IntPtr GetModuleHandle(string name);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Ansi, ExactSpelling = true)]
+    static extern IntPtr GetProcAddress(IntPtr module, string name);
+
+    // Wine, Proton, Winlator: ntdll exports wine_get_version; the registry has Software\Wine
+    static bool IsWine()
+    {
+        try {
+            IntPtr nt = GetModuleHandle("ntdll.dll");
+            if (nt != IntPtr.Zero && GetProcAddress(nt, "wine_get_version") != IntPtr.Zero) return true;
+        } catch { }
+        try {
+            using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey("Software\\Wine")) if (k != null) return true;
+            using (var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey("Software\\Wine")) if (k != null) return true;
+        } catch { }
+        return false;
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential,
+                                                 CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    struct OsVersion
+    {
+        public int Size, Major, Minor, Build, Platform;
+        [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValTStr, SizeConst = 128)]
+        public string ServicePack;
+    }
+    [System.Runtime.InteropServices.DllImport("ntdll.dll")]
+    static extern int RtlGetVersion(ref OsVersion v);
+
+    // 27.10.2026: Windows 7 and 8 - the Python of the package does not start on 7, and the mod is made for 10 and 11.
+    // RtlGetVersion: Environment.OSVersion says 6.2 to a program whose manifest does not list Windows 10. Under Wine the
+    // version is the one Wine imitates (Winlator often says 7) - not checked there.
+    static bool OldWindows()
+    {
+        if (IsWine()) return false;
+        try {
+            var v = new OsVersion();
+            v.Size = System.Runtime.InteropServices.Marshal.SizeOf(typeof(OsVersion));
+            if (RtlGetVersion(ref v) == 0) return v.Major < 10;
+        } catch { }
+        return false;
+    }
+
+    // One argument for the command line of python.exe, by the rules of the C runtime (as CommandLineToArgvW): the
+    // backslashes before a quote and at the end are doubled - "D:\" would otherwise swallow its closing quote.
+    static string Arg(string s)
+    {
+        var b = new StringBuilder("\"");
+        int slashes = 0;
+        foreach (char c in s) {
+            if (c == '\\') { slashes++; continue; }
+            if (c == '"') { b.Append('\\', slashes * 2 + 1).Append('"'); slashes = 0; continue; }
+            b.Append('\\', slashes).Append(c);
+            slashes = 0;
+        }
+        return b.Append('\\', slashes * 2).Append('"').ToString();
+    }
+
+    // the game exe is in the install folder and was written by this run, not left by an earlier install
+    bool GameBuilt()
+    {
+        try {
+            string exe = Path.Combine(pathBox.Text, "DinoCrisisME.exe");
+            return File.Exists(exe) && File.GetLastWriteTimeUtc(exe) != exeBefore;
+        } catch { return false; }
+    }
+
+    // The window as before Install: fields and buttons on, the log file closed, the unpacked payload removed
+    void Unlock()
+    {
+        CloseLog();
+        goBtn.Enabled = true; goBtn.Text = S("Install", "Установить");
+        discBox.Enabled = pathBox.Enabled = discBtn.Enabled = pathBtn.Enabled =
+            autoBox.Enabled = lnkBox.Enabled = langBox.Enabled = fwBox.Enabled = true;
+        UpdateFwRow();
+        try { if (workDir != null && Directory.Exists(workDir)) Directory.Delete(workDir, true); } catch { }
+    }
+
     // ---- 08.10.2026: which game the chosen image is ----------------------------
     // The supported versions come from the payload: mod/versions/<id>/version.txt (rebuild.ps1, step 8b), lines
     // "key = value". The image is recognised by the sha256 of its executable (SLUS_009.22), read straight from the
     // ISO 9660 root of the image: raw 2352-byte sectors (Mode 2 Form 1, user data at 24) or a plain 2048-byte image.
-    class GameVersion { public string Id, Name, NameRu, Exe, Sha, Subchannel; public int Order = 99; }
+    class GameVersion { public string Id, Name, NameRu, Exe, Sha, Subchannel, Voice; public int Order = 99; }
     System.Collections.Generic.List<GameVersion> versions;
     GameVersion detected;            // the version of the chosen image, null - none
     string detectedFor;              // the path it was worked out for
@@ -927,6 +1137,7 @@ public class Setup : Form
                                 else if (k == "exe_sha256") v.Sha = val.ToLowerInvariant();
                                 else if (k == "order") int.TryParse(val, out v.Order);
                                 else if (k == "subchannel") v.Subchannel = val;
+                                else if (k == "voice_print") v.Voice = val;      // 28.10.2026: "STAGE01.XAS A4B95C0D"
                             }
                         }
                         if (v.Id != null && v.Name != null && v.Sha != null) {
@@ -1006,6 +1217,87 @@ public class Setup : Form
                 }
             }
         } catch { }
+        return null;
+    }
+
+    // 28.10.2026: the print of the speech file PSX/DATA_XA/<xa> of the image as the game's faces check it
+    // (dc_faces2.inc): CRC32 of the first 8 sectors of channel 1 - sector lba + 1 + 32*k, the 2048 bytes after the
+    // 24-byte header. Raw images only (a 2048-byte image holds no speech); false - no such file.
+    static bool VoicePrint(string path, string xa, out uint crc)
+    {
+        crc = 0;
+        try {
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) {
+                var head = new byte[16];
+                if (fs.Read(head, 0, 16) != 16) return false;
+                bool raw = head[0] == 0 && head[11] == 0;
+                for (int i = 1; i <= 10 && raw; i++) raw = head[i] == 0xFF;
+                if (!raw) return false;
+                Func<long, int, byte[]> read = (lba, len) => {
+                    var outb = new byte[len];
+                    for (int got = 0; got < len; lba++) {
+                        fs.Seek(lba * 2352 + 24, SeekOrigin.Begin);
+                        int n = Math.Min(2048, len - got), r = 0;
+                        while (r < n) {
+                            int k = fs.Read(outb, got + r, n - r);
+                            if (k <= 0) throw new EndOfStreamException();
+                            r += k;
+                        }
+                        got += n;
+                    }
+                    return outb;
+                };
+                byte[] pvd = read(16, 2048);
+                if (pvd[1] != 'C' || pvd[2] != 'D' || pvd[3] != '0' || pvd[4] != '0' || pvd[5] != '1') return false;
+                long at = BitConverter.ToUInt32(pvd, 156 + 2), size = BitConverter.ToUInt32(pvd, 156 + 10);
+                foreach (string part in new[] { "PSX", "DATA_XA", xa }) {
+                    if (size <= 0 || size > (1 << 20)) return false;
+                    byte[] dir = read(at, (int)size);
+                    bool hit = false;
+                    for (int off = 0; off + 33 < dir.Length; ) {
+                        int rlen = dir[off];
+                        if (rlen == 0) { off = (off / 2048 + 1) * 2048; continue; }
+                        int nl = Math.Min((int)dir[off + 32], dir.Length - off - 33);
+                        string name = Encoding.ASCII.GetString(dir, off + 33, nl);
+                        int semi = name.IndexOf(';');
+                        if (semi >= 0) name = name.Substring(0, semi);
+                        if (string.Equals(name, part, StringComparison.OrdinalIgnoreCase)) {
+                            at = BitConverter.ToUInt32(dir, off + 2);
+                            size = BitConverter.ToUInt32(dir, off + 10);
+                            hit = true;
+                            break;
+                        }
+                        off += rlen;
+                    }
+                    if (!hit) return false;
+                    if (part == xa) break;
+                }
+                uint c = 0xFFFFFFFFu;
+                for (int i = 0; i < 8; i++)
+                    foreach (byte x in read(at + 1 + 32 * i, 2048)) {
+                        c ^= x;
+                        for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
+                    }
+                crc = ~c;
+                return true;
+            }
+        } catch { }
+        return false;
+    }
+
+    // 28.10.2026 (SRU: the Japanese disc with a Russian voice-over, the same exe): of the versions with the image's exe
+    // the one whose voice_print ("STAGE01.XAS A4B95C0D") is the image's print of that speech file, else the one without
+    // a print; null - none of them.
+    static GameVersion PickByVoice(string path, System.Collections.Generic.List<GameVersion> hits)
+    {
+        foreach (var v in hits) {
+            if (v.Voice == null) continue;
+            string[] vp = v.Voice.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            uint want, got;
+            if (vp.Length == 2 && uint.TryParse(vp[1], System.Globalization.NumberStyles.HexNumber, null, out want) &&
+                VoicePrint(path, vp[0], out got) && got == want) return v;
+        }
+        foreach (var v in hits) if (v.Voice == null) return v;
         return null;
     }
 
@@ -1091,6 +1383,7 @@ public class Setup : Form
             detectedFor = p; detected = null;
             if (p.Length > 0 && File.Exists(p)) {
                 var seen = new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var hits = new System.Collections.Generic.List<GameVersion>();
                 foreach (var v in Versions()) {
                     string sha;
                     if (!seen.TryGetValue(v.Exe, out sha)) {
@@ -1098,8 +1391,9 @@ public class Setup : Form
                         sha = exe == null ? "" : Sha256Hex(exe);
                         seen[v.Exe] = sha;
                     }
-                    if (sha == v.Sha) { detected = v; break; }
+                    if (sha == v.Sha) hits.Add(v);
                 }
+                detected = PickByVoice(p, hits);
             }
         }
         ShowDetect();
@@ -1154,8 +1448,12 @@ public class Setup : Form
 
     void OnInstall(object sender, EventArgs e)
     {
+        if (oldWin) {
+            Msg(null, S(OLDWIN_EN, OLDWIN_RU), "Dino Crisis ME", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
         if (!File.Exists(discBox.Text)) {
-            MessageBox.Show(S("Point at the game disc image (the Track 1 .bin file).",
+            Msg(null, S("Point at the game disc image (the Track 1 .bin file).",
                               "Укажи файл образа игры (.bin первой дорожки)."),
                             "Dino Crisis ME", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
@@ -1163,7 +1461,7 @@ public class Setup : Form
         // 08.10.2026: an image of no supported version - say so now, not after half an hour of building
         DetectDisc();
         if (Versions().Count > 0 && detected == null) {
-            MessageBox.Show(S("Unknown disc image.", "Неизвестный образ игры."),
+            Msg(null, S("Unknown disc image.", "Неизвестный образ игры."),
                             "Dino Crisis ME", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
@@ -1171,7 +1469,7 @@ public class Setup : Form
             // 08.10.2026: LibCrypt - without the subchannel file the game stops at its first screen
             string want;
             if (FindSubchannel(discBox.Text.Trim().Trim('"'), detected.Exe, out want) == null) {
-                MessageBox.Show(string.Format(S("This disc is protected by LibCrypt: the game checks data kept in the disc's subchannel, and a .bin image does not hold it.\n\nPut the subchannel file of this disc next to the image:\n{0}\n\nIt is the .sbi file of the disc dump, the same one the DuckStation emulator uses.",
+                Msg(null, string.Format(S("This disc is protected by LibCrypt: the game checks data kept in the disc's subchannel, and a .bin image does not hold it.\n\nPut the subchannel file of this disc next to the image:\n{0}\n\nIt is the .sbi file of the disc dump, the same one the DuckStation emulator uses.",
                                                 "Этот диск защищён LibCrypt: игра сверяет данные служебного канала диска (subchannel), а в образе .bin их нет.\n\nПоложи файл служебного канала этого диска рядом с образом:\n{0}\n\nЭто файл .sbi от дампа диска, тот же, что берёт эмулятор DuckStation."),
                                               want),
                                 "Dino Crisis ME", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -1179,7 +1477,7 @@ public class Setup : Form
             }
         }
         if (pathBox.Text.Trim().Length == 0) {
-            MessageBox.Show(S("Choose where to install.", "Укажи, куда установить."),
+            Msg(null, S("Choose where to install.", "Укажи, куда установить."),
                             "Dino Crisis ME", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
@@ -1188,13 +1486,13 @@ public class Setup : Form
         string full = pathBox.Text.Trim();
         try { full = Path.GetFullPath(full); } catch { }
         if (full.Length > 95) {
-            MessageBox.Show(S("The install folder path is too long for the build tools (over 95 characters).\nChoose a shorter one, for example C:\\Games\\DinoCrisisME.",
+            Msg(null, S("The install folder path is too long for the build tools (over 95 characters).\nChoose a shorter one, for example C:\\Games\\DinoCrisisME.",
                               "Путь папки установки слишком длинный для программ сборки (больше 95 символов).\nВыбери покороче, например C:\\Games\\DinoCrisisME."),
                             "Dino Crisis ME", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
         if (!fwBox.Checked && !File.Exists(fwZipBox.Text.Trim())) {
-            MessageBox.Show(S("Point at the psxrecomp archive you downloaded, or tick the box above to let setup download it.",
+            Msg(null, S("Point at the psxrecomp archive you downloaded, or tick the box above to let setup download it.",
                               "Укажи скачанный архив psxrecomp - или поставь галочку выше, и установщик скачает его сам."),
                             "Dino Crisis ME", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
@@ -1205,10 +1503,11 @@ public class Setup : Form
             string was = tools["msvc"].Status;
             if (was != "installed" && was != "reboot") SetTool("msvc", vs != null ? "ok" : "missing");
             if (vs == null) {
-                MessageBox.Show(S(NOMSVC_EN, NOMSVC_RU), "Dino Crisis ME", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Msg(null, S(NOMSVC_EN, NOMSVC_RU), "Dino Crisis ME", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
         }
+        try { exeBefore = File.GetLastWriteTimeUtc(Path.Combine(pathBox.Text, "DinoCrisisME.exe")); } catch { exeBefore = DateTime.MinValue; }
         rebootFor.Clear();
 
         log.Clear();
@@ -1224,7 +1523,7 @@ public class Setup : Form
         try { workDir = Unpack(); }
         catch (Exception ex) {
             Say("x " + ex.Message, ERRC);
-            goBtn.Enabled = true; goBtn.Text = S("Install", "Установить");
+            Unlock();                    // 26.10.2026: the fields stayed off
             return;
         }
         Say("> " + S("Mod contents unpacked", "Содержимое мода распаковано"), STEPC);
@@ -1235,20 +1534,22 @@ public class Setup : Form
             fullLog.AutoFlush = true;
         } catch { fullLog = null; }
 
-        string script = Path.Combine(workDir, "installer\\dcme-install.ps1");
+        // 27.10.2026 (the player: "switch setup to Python", for Windows and the Steam Deck): the script runs on the Python
+        // that comes with the mod - no PowerShell (under Wine and Proton it is a stub that runs no script). -I: the
+        // player's own Python settings (PYTHONHOME, PYTHONPATH, user packages) do not reach it.
+        string script = Path.Combine(workDir, "installer\\dcme_install.py");
         var args = new StringBuilder();
-        args.Append("-NoProfile -ExecutionPolicy Bypass -File \"").Append(script).Append("\"");
-        args.Append(" -DiscPath \"").Append(discBox.Text).Append("\"");
-        args.Append(" -InstallPath \"").Append(pathBox.Text).Append("\"");
+        args.Append("-I ").Append(Arg(script));
+        args.Append(" -DiscPath ").Append(Arg(discBox.Text));
+        args.Append(" -InstallPath ").Append(Arg(pathBox.Text));
         // Журнал установки существует на двух языках; для остальных - английский.
         args.Append(" -Lang ").Append(lang == 1 ? "ru" : "en");
-        if (!fwBox.Checked) args.Append(" -RecompZip \"").Append(fwZipBox.Text.Trim()).Append("\"");
+        if (!fwBox.Checked) args.Append(" -RecompZip ").Append(Arg(fwZipBox.Text.Trim()));
         if (!autoBox.Checked) args.Append(" -SkipPrereq");
         if (!lnkBox.Checked)  args.Append(" -NoShortcut");
 
         var psi = new ProcessStartInfo();
-        psi.FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
-                                    "WindowsPowerShell\\v1.0\\powershell.exe");
+        psi.FileName = Path.Combine(workDir, "mod\\tools\\python\\python.exe");
         psi.Arguments = args.ToString();
         psi.UseShellExecute = false;
         psi.CreateNoWindow = true;
@@ -1266,7 +1567,19 @@ public class Setup : Form
         proc.Exited += OnExit;
 
         status.Text = S("Starting...", "Запускаю…");
-        proc.Start();
+        try { proc.Start(); }
+        catch (Exception ex) {
+            // 26.10.2026: the program gone or blocked - the window used to hang in "Installing..."; 27.10 it is the Python of
+            // the package (an antivirus may take it away while setup unpacks)
+            if (fullLog != null) { try { fullLog.WriteLine("[x] " + psi.FileName + ": " + ex.Message); } catch { } }
+            proc = null;
+            Say("    x " + ex.Message, ERRC);
+            Unlock();
+            status.Text = S("Setup failed - see the last lines of the log.",
+                            "Установка не удалась - смотри последние строки журнала.");
+            Msg(this, S(NOPY_EN, NOPY_RU), "Dino Crisis ME", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
         proc.BeginOutputReadLine();
         proc.BeginErrorReadLine();
     }
@@ -1418,7 +1731,7 @@ public class Setup : Form
             Process.Start(psi);
             Close();                     // the game is starting - setup has done its job
         } catch (Exception ex) {
-            MessageBox.Show(this, ex.Message, "Dino Crisis ME", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Msg(this, ex.Message, "Dino Crisis ME", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 
@@ -1428,15 +1741,17 @@ public class Setup : Form
         try { code = proc.ExitCode; } catch { }
         BeginInvoke((Action)(() => {
             proc = null;
-            CloseLog();
+            // 26.10.2026: code 0 alone is not success (Wine's stub returns it without running anything): setup said
+            // "Installation complete" over an empty folder and deleted the log
+            if (code == 0 && !GameBuilt()) {
+                Say("    x " + S(NOGAME_EN, NOGAME_RU), ERRC);
+                if (fullLog != null) { try { fullLog.WriteLine("[x] " + (lang == 1 ? NOGAME_RU : NOGAME_EN)); } catch { } }
+                code = 1;
+            }
+            Unlock();
             BringBack();       // the final message must not open behind other windows
-            goBtn.Enabled = true; goBtn.Text = S("Install", "Установить");
-            discBox.Enabled = pathBox.Enabled = discBtn.Enabled = pathBtn.Enabled =
-                autoBox.Enabled = lnkBox.Enabled = langBox.Enabled = fwBox.Enabled = true;
-            UpdateFwRow();
             foreach (var r in tools.Values) if (r.Status == "installing") r.Status = code == 0 ? "installed" : "failed";
             ShowTools();
-            try { if (Directory.Exists(workDir)) Directory.Delete(workDir, true); } catch { }
             if (code == 0) {
                 // The full log is for a failed setup. After a good one nothing
                 // of the installer stays next to the game (17.09.2026).
@@ -1447,9 +1762,10 @@ public class Setup : Form
             } else {
                 status.Text = S("Setup failed - see the last lines of the log.",
                                 "Установка не удалась - смотри последние строки журнала.");
-                MessageBox.Show(this, S("Setup was interrupted.\n\nThe reason is in the last lines of the log.\nFull log: install-log.txt in the install folder.",
-                                  "Установка прервалась.\n\nПричина - в последних строках журнала.\nПолный журнал: install-log.txt в папке установки."),
-                                S("Error", "Ошибка"), MessageBoxButtons.OK, MessageBoxIcon.Error);
+                string why = S("Setup was interrupted.\n\nThe reason is in the last lines of the log.\nFull log: install-log.txt in the install folder.",
+                               "Установка прервалась.\n\nПричина - в последних строках журнала.\nПолный журнал: install-log.txt в папке установки.");
+                if (IsWine()) why += "\n\n" + S(WINE_EN, WINE_RU);
+                Msg(this, why, S("Error", "Ошибка"), MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }));
     }
