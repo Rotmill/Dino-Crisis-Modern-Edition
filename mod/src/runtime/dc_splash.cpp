@@ -909,6 +909,9 @@ static int    s_fb_drawn, s_fb_dhover; /* 26.10.2026: что нарисовал 
 static Uint8  s_fb_da;
 static SDL_FRect s_fb_d;
 
+/* 29.10.2026 (main.cpp, DC_VK_ASYNC): блок виден или ещё гаснет - показ такта синхронный (задание показа его не рисует) */
+extern "C" int dc_splash_feedback_visible(void) { return s_fb_a > 0.0f; }
+
 extern "C" int dc_splash_feedback_hit(float lx, float ly)
 {
     return s_fb_hot_ok && s_fb_a > 0.5f && lx >= s_fb_hot[0] && lx < s_fb_hot[0] + s_fb_hot[2] &&
@@ -1058,7 +1061,7 @@ static int mt_page_ok(int L, const DcMenuRow *rows, int n)
             for (const char *const *c = r.choices; *c; c++)
                 if (mt_find(DC_MT_VAL, *c) < 0) return miss(*c);
         if (r.type == DC_OPT_BIND) {                               /* 04.10 (6): подписи входов и «нажмите…» */
-            for (int k = 0; k < r.bind_n; k++)
+            for (int k = 0; k < r.bind_n - r.bind_fixed; k++)       /* 01.11: неизменных нет в атласе - строка без них */
                 if (!r.bind_lbl[k] || mt_find(DC_MT_VAL, r.bind_lbl[k]) < 0) return miss(r.bind_lbl[k] ? r.bind_lbl[k] : "(bind)");
             static const char *const need[] = { "Not assigned", "Press a key", "Press a button", "/" };
             for (const char *s : need) if (mt_find(DC_MT_VAL, s) < 0) return miss(s);
@@ -1094,27 +1097,33 @@ static void menu_bind_value(SDL_Renderer *r, SDL_Texture *ta, int L, const DcMen
     }
     SDL_Texture *ti = (rw.bind_dev == DCB_PAD) ? tex_get(r, "ui_padicons.png") : nullptr;
     const int isl = mt_find(DC_MT_VAL, "/");
+    const int nb = rw.bind_n - rw.bind_fixed;                 /* 01.11: назначенные, за ними неизменные - приглушённо */
     float x = xr;
+    int drawn = 0;
     for (int k = rw.bind_n - 1; k >= 0; k--) {               /* справа налево */
         const int code = rw.bind_code[k];
         const int icon = ti ? dcb_code_pad_icon(code) : -1;
         const int il = rw.bind_lbl[k] ? mt_find(DC_MT_VAL, rw.bind_lbl[k]) : -1;
-        if (icon >= 0) {
-            if (icon == DCS_DPAD && il >= 0) { x -= k_mt_rect[L][il][2]; put(il, x, vc); x -= 6.0f; }   /* стрелка крестовины */
-            const float *q = pad_icon(icon, 0);
-            x -= q[2];
-            SDL_SetTextureColorMod(ti, 255, 255, 255);
-            SDL_SetTextureAlphaMod(ti, on ? 255 : 215);
-            blit_piece(r, ti, q, x, y + (56.0f - q[3]) * 0.5f, sc, ox, oy);
-        } else if (il >= 0) {
-            x -= k_mt_rect[L][il][2];
-            put(il, x, vc);
-        }
-        if (k > 0 && isl >= 0) {
+        if (icon < 0 && il < 0) continue;                    /* неизменной подписи нет в атласе (render.py не прогнан) */
+        if (drawn && isl >= 0) {
             x -= 12.0f + k_mt_rect[L][isl][2];
             put(isl, x, Rgba{ 242, 245, 246, 110 });
             x -= 12.0f;
         }
+        const int fixed = (k >= nb);
+        const Rgba c = fixed ? Rgba{ 242, 245, 246, 140 } : vc;
+        if (icon >= 0) {
+            if (icon == DCS_DPAD && il >= 0) { x -= k_mt_rect[L][il][2]; put(il, x, c); x -= 6.0f; }   /* стрелка крестовины */
+            const float *q = pad_icon(icon, 0);
+            x -= q[2];
+            SDL_SetTextureColorMod(ti, 255, 255, 255);
+            SDL_SetTextureAlphaMod(ti, fixed ? 140 : on ? 255 : 215);
+            blit_piece(r, ti, q, x, y + (56.0f - q[3]) * 0.5f, sc, ox, oy);
+        } else {
+            x -= k_mt_rect[L][il][2];
+            put(il, x, c);
+        }
+        drawn++;
     }
 }
 
@@ -1156,26 +1165,38 @@ static void kb_custom_present(SDL_Renderer *r, int L, float sc, float ox, float 
         for (int j = 0; j < g.n; j++) {
             const int a = g.acts[j];
             const float rh = 46.0f;
-            const int il = mt_find(DC_MT_LBL, dcb_act_title(a));
+            const int il = mt_find(DC_MT_LBL, dc_bind_title(mode, a));   /* 01.11: Turn Left / Turn Right у танкового движения */
             if (il >= 0) put(il, x + 4.0f, yy + (rh - k_mt_rect[L][il][3]) * 0.5f, C_TEXT);
-            int c[DCB_MAX];
+            int c[DCB_MAX + 2];
             const int nb = dcb_get(mode, DCB_KB, a, c);
+            int nall = nb;
+            {   /* 01.11: неизменные входы (Esc...) - следом, приглушённо, кроме назначенных */
+                int f[2];
+                const int nf = dcb_fixed(DCB_KB, a, f);
+                for (int j = 0; j < nf; j++) {
+                    int dup = 0;
+                    for (int q = 0; q < nb; q++) if (c[q] == f[j]) dup = 1;
+                    if (!dup) c[nall++] = f[j];
+                }
+            }
             float xr = x + colw - 4.0f;
-            if (nb <= 0 && ina >= 0) {
+            if (nall <= 0 && ina >= 0) {
                 xr -= k_mt_rect[L][ina][2];
                 put(ina, xr, yy + (rh - k_mt_rect[L][ina][3]) * 0.5f, Rgba{ 242, 245, 246, 110 });
             }
-            for (int k = nb - 1; k >= 0; k--) {
+            int drawn = 0;
+            for (int k = nall - 1; k >= 0; k--) {
                 const char *lb = dcb_code_label(c[k]);
                 const int iv = lb ? mt_find(DC_MT_VAL, lb) : -1;
                 if (iv < 0) continue;
-                xr -= k_mt_rect[L][iv][2];
-                put(iv, xr, yy + (rh - k_mt_rect[L][iv][3]) * 0.5f, C_ON);
-                if (k > 0 && isl >= 0) {
+                if (drawn && isl >= 0) {
                     xr -= 10.0f + k_mt_rect[L][isl][2];
                     put(isl, xr, yy + (rh - k_mt_rect[L][isl][3]) * 0.5f, Rgba{ 242, 245, 246, 110 });
                     xr -= 10.0f;
                 }
+                xr -= k_mt_rect[L][iv][2];
+                put(iv, xr, yy + (rh - k_mt_rect[L][iv][3]) * 0.5f, k >= nb ? Rgba{ 242, 245, 246, 140 } : C_ON);
+                drawn++;
             }
             yy += rh;
             line(x, yy - 1.0f, colw, Rgba{ 242, 245, 246, 23 });

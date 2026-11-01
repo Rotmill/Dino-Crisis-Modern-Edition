@@ -44,6 +44,10 @@ extern int g_vk_nonuniform_tex; /* pt_vulkan.cpp: 05.10 — массив тек�
 extern int g_vk_d3d11_share;    /* pt_vulkan.cpp: 09.10 — расширения общей с D3D11 текстуры включены */
 const unsigned short* sw_vram_base(void);
 void ptvk_upload_vram(const unsigned short*);
+unsigned dc_dithc_stage(unsigned short* rows, const unsigned short* vram, int force);   /* pt_renderer.c: 31.10.2026 карта решётки */
+int dc_facehd_enabled(void);                     /* gpu.c: 31.10.2026 HD-текстуры из mods при анимации лиц */
+const unsigned short* dc_facehd_orig_vram(void); /* gpu.c: VRAM с исходными глазами и ртами (NULL - лица не писали) */
+int dc_facehd_stage(unsigned short* rows, int force, int* rect);   /* gpu.c: маска лиц - строки 1024..1535 текстуры VRAM */
 int dcvk_scale(void);
 int dcvk_raster_init(void);
 }
@@ -257,6 +261,22 @@ static float*          s_shUboMap = nullptr;
  * «светится» 17..32 (точка вида + радиус), +64.. glc3[16] = цвет × сила + обтекание, +128.. ghz[8] = доля дымки места 0..31
  * (прежние пути: 1 у мест 0..7, 0 у прочих - дымка у первых 8, как было); 143 (spare.w) - сколько источников за первыми 8 (до 24) */
 #define PAIR_MAX 256
+/* 29.10.2026 ВРАГИ И NPC МЕЖДУ ТАКТАМИ (actor_warp_make, dc_raster.vert): 667 (pq.w) = 1 - строки актёров вместо пар (пары в таком
+ * кадре не стоят: pq.x = 0), 668.. по две строки на узел (строка = слот * ACTW_NMAX + узел): кватернион; перенос + (w) есть.
+ * Вершина несёт строку в in_rep.w = -(65 + строка) (цвет-альфа 64 + строка, gpu_sw_renderer.c g_sw_actor_arow3). */
+#define ACTW_SLOTS 10
+#define ACTW_NMAX  24
+#define ACTW_ROWS  (ACTW_SLOTS * ACTW_NMAX)
+static_assert(ACTW_ROWS * 8 <= PAIR_MAX * 12, "actor rows must fit the pairs table of the UBO");
+/* 30.10.2026 КУСКИ ТУННЕЛЯ МЕЖДУ ТАКТАМИ (piece_warp_make, pt_renderer.c s_pw): строки ACTW_ROWS.. по слоту таблицы секций 0..35
+ * сразу за строками актёров (тот же флаг 667 и тот же вид кадра A); вершина куска - in_rep.w = -(65 + 240 + слот) */
+#define PIECEW_ROWS 36
+static_assert((ACTW_ROWS + PIECEW_ROWS) * 8 <= PAIR_MAX * 12, "piece rows must fit the pairs table of the UBO");
+/* 29.10.2026 (разбор 1): слоты 0..9, чьи вершины со строкой легли в поток этого кадра (dcvk_push_tri_raw; сброс - dcvk_frame_reset,
+ * в снимок кадра A - s_wsnap.amask). actor_warp_make берёт только их: актёр без таких вершин (за камерой, сетка из mods, чужой
+ * вид) кадр не меняет, и повтор в Fixed остаётся повтором. s_awLive = 1 - кадр A под DC_HZ: маска его живого потока. */
+static unsigned s_awDrawn = 0;
+static int s_awLive = 0;
 #define SH_UBO_GL3 (668 + PAIR_MAX * 12)
 #define SH_UBO_FLOATS (SH_UBO_GL3 + 160)
 
@@ -416,6 +436,16 @@ static int s_flat_frame = 0;   /* плоский экран (нет 3D): 2D-пр
 static VkImage        s_colImg = VK_NULL_HANDLE;
 static VkDeviceMemory s_colMem = VK_NULL_HANDLE;
 static VkImageView    s_colView = VK_NULL_HANDLE;
+/* ⭐ 29.10.2026: кэши «собрано под эту цель» (MSAA, SSAO, сглаживание, свечение, дымка) сверяли только адрес VkImageView, а
+ * пересозданный объект может получить адрес уничтоженного (пойман на смене MSAA: глубина MSAA, 1 из 32 пересборок) - тогда в
+ * наборах дескрипторов и кадровых буферах оставались уничтоженные цели, и видеокарта вставала в проходе SSAO. Сверка и по
+ * поколению: s_colGen - цель кадра, s_zGen - глубина SSAO, s_msDepGen - глубина MSAA. DC_VK_VIEWGEN=0 - только адрес, как было. */
+static unsigned       s_colGen = 0;
+static int vk_viewgen_on(void) {
+    static int v = -1;
+    if (v < 0) { const char* e = getenv("DC_VK_VIEWGEN"); v = (e && *e == '0') ? 0 : 1; }
+    return v;
+}
 static VkImage        s_depImg = VK_NULL_HANDLE;
 static VkDeviceMemory s_depMem = VK_NULL_HANDLE;
 static VkImageView    s_depView = VK_NULL_HANDLE;
@@ -461,12 +491,15 @@ static const VkSpecializationInfo s_repSpec = { 1, &s_repSpecMap, sizeof(int32_t
  * кадры идут прежним, потом он из кэша. Маска: 1 - Shadows, 2 - Materials. DC_RASTER_FEAT=0 - всё в шейдере, как было. */
 /* 28.10.2026: msFull - константа 3 (DC_MS_FULL): полная маска выборок MSAA «по выборкам» (dc_raster_sl) - внутри полигона
  * тексель читается раз на пиксель, а не на каждую выборку (там все выборки в одной точке текстуры). 0 - как было. */
-struct RasterSpec { int32_t repN; VkBool32 shadow, mater; int32_t msFull; };
-static const VkSpecializationMapEntry s_rspecMap[4] = {
+/* 30.10.2026: flRelief - константа 4 (DC_F_FLASH_RELIEF): VK_FALSE - без рельефа металла у вспышки (бит 4 опций, набор
+ * s_pipesNF ниже, у raster_feat_sync) */
+struct RasterSpec { int32_t repN; VkBool32 shadow, mater; int32_t msFull; VkBool32 flRelief; };
+static const VkSpecializationMapEntry s_rspecMap[5] = {
     { 0, (uint32_t)offsetof(RasterSpec, repN), sizeof(int32_t) },
     { 1, (uint32_t)offsetof(RasterSpec, shadow), sizeof(VkBool32) },
     { 2, (uint32_t)offsetof(RasterSpec, mater), sizeof(VkBool32) },
-    { 3, (uint32_t)offsetof(RasterSpec, msFull), sizeof(int32_t) } };
+    { 3, (uint32_t)offsetof(RasterSpec, msFull), sizeof(int32_t) },
+    { 4, (uint32_t)offsetof(RasterSpec, flRelief), sizeof(VkBool32) } };
 extern "C" int g_dc_gfx_shadows;                       /* pt_renderer.c: GRAPHICS -> Shadows */
 static int raster_feat_want(void) {
     static int on = -1;
@@ -780,7 +813,60 @@ static VkShaderModule loadSpv(const char* name) {
     return makeModule(data.data(), (size_t)n);
 }
 
+/* ⭐ 29.10.2026 - АСИНХРОННАЯ ОТПРАВКА КАДРОВ (DC_VK_ASYNC=1; спецификация и аудит - WORK_2026-10-29_PERF\wf_out\async_spec.txt и
+ * async_audit.txt; игрок: «поднять производительность на AMD, на малых ПК, на слабых ПК»). Было: главный поток после vkQueueSubmit
+ * ждал забор всей работы видеокарты кадра (у Vega 8 - 25 мс из 29 мс кадра A). Теперь кадр A или B, который main.cpp отдаёт
+ * заданием показа (dcvk_async_frame), уходит без ожидания: забор ждёт поток задания, главный поток - только перед следующей записью,
+ * если задание ещё не дошло до копии. В полёте не больше одной отправки (один s_cmd, один s_fence); номер отправки s_subSerial
+ * отличает её от следующей (без него страховка снимала бы ожидание, а не задание, - блокер B1 аудита). Эмуляция следующего такта
+ * не пишет то, что читает кадр в полёте: два набора потоков вершин (s_set, меняется в dcvk_frame_reset после кадра A), тень UBO в
+ * памяти процессора (в отображённый блок - при отправке кадров A и B), атлас шрифта - копия в памяти процессора (в промежуточный
+ * буфер - в dcvk_render, когда кадра в полёте нет). DC_VK_ASYNC=0 - всё как было: один набор, без тени и копии, каждая отправка
+ * ждёт свой забор. ⭐ 30.10.2026: по умолчанию 1 (игрок: «если всё в порядке, то включи её по умолчанию»; проверки - память
+ * dc_async_impl_1029, строка 30.10). */
+static int s_asyncWant = -1;                     /* DC_VK_ASYNC=1: тень UBO, копия шрифта, второй набор потоков */
+static int s_asyncMode = 0;                      /* и второй набор выделен: отправка без ожидания разрешена */
+static int s_asyncFrame = 0;                     /* main.cpp (dcvk_async_frame): ближайший кадр A или B - без ожидания */
+static std::atomic<uint64_t> s_subSerial(0);     /* номер последней отправки s_cmd (пишет главный поток) */
+static std::atomic<uint64_t> s_subDone(0);       /* номер, до которого видеокарта точно дошла (забор дождались) */
+static std::atomic<int> s_fenceWaiters(0);       /* потоков внутри ожидания s_fence: vkResetFences - только без них */
+static std::atomic<uint64_t> s_slowFor(0);       /* test_gpu_slow кадра в полёте уже прошёл (номер отправки) */
+static int s_pendKind = 0;                       /* кадр в полёте ждёт чтения меток (pp_ts_read): 1 A, 2 B, 0 - прочитаны */
+static long s_vkGuardHits = 0;                   /* страховка сработала: запись при отправке в полёте (строка async:) */
+static void (*s_asyncGuardHook)(void) = nullptr; /* main.cpp: снять задание показа до новой записи (блокер B1) */
+static VkBuffer       s_vbufS[2] = {}, s_rvBufS[2] = {}, s_pvBufS[2] = {};
+static VkDeviceMemory s_vmemS[2] = {}, s_rvMemS[2] = {}, s_pvMemS[2] = {};
+static float*         s_vmapS[2] = {};
+static float*         s_rvMapS[2] = {};
+static uint32_t*      s_pvMapS[2] = {};
+static int s_set = 0, s_setSubmitted = 0;        /* набор потоков, который пишет эмуляция; кадр A из него отправлен */
+static float s_shUboShadow[SH_UBO_FLOATS];
+static float* s_shUboGpu = nullptr;              /* с тенью (async или DC_SHUBO_CPU): отображённый блок UBO (s_shUboMap - тень s_shUboShadow) */
+static unsigned char* s_fontCpu = nullptr;       /* с тенью: атлас шрифта в памяти процессора */
+static int s_fontDirty0 = 0, s_fontDirty1 = 0;   /* его строки, ещё не перенесённые в промежуточный буфер */
+static int vk_async_want(void) {
+    if (s_asyncWant < 0) { const char* e = getenv("DC_VK_ASYNC"); s_asyncWant = (e && *e == '0') ? 0 : 1; }   /* 30.10: умолч. 1 */
+    return s_asyncWant;
+}
+/* 30.10.2026 (план скорости, пункт 11): тень блока теней и света - и без async. Отображённый блок - HOST_VISIBLE|HOST_COHERENT
+ * без HOST_CACHED: каждое чтение процессором (gl_slot_p/gl_slot_c, V2R/R2V, матрицы теней, параметры ламп) идёт мимо кэша, на
+ * APU AMD - сотни нс. Все пишут и читают s_shUboShadow, в отображённый блок она уходит одной копией перед отправкой кадра A/B
+ * (cmdSubmitAsync). Прочие отправки (начальные слои, пустая текстура, чтение кадра) блок не читают. DC_SHUBO_CPU=0 - как было */
+static int shubo_cpu_on(void) {
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DC_SHUBO_CPU"); on = (e && *e == '0') ? 0 : 1; }
+    return on;
+}
+static void set_ptrs(int i) {
+    s_vbuf = s_vbufS[i]; s_vmem = s_vmemS[i]; s_vmap = s_vmapS[i];
+    s_rvBuf = s_rvBufS[i]; s_rvMem = s_rvMemS[i]; s_rvMap = s_rvMapS[i];
+    s_pvBuf = s_pvBufS[i]; s_pvMem = s_pvMemS[i]; s_pvMap = s_pvMapS[i];
+}
+static int vk_pending(void) { return s_subDone.load() < s_subSerial.load(); }
+static void async_guard(const char* where);
+
 static void cmdBegin() {
+    if (vk_pending() || s_pendKind) async_guard("cmdBegin");   /* 29.10.2026 (async): страховка - кадр в полёте снимается до записи */
     vkResetCommandBuffer(s_cmd, 0);
     VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -845,11 +931,15 @@ static bool fontHiresInit() {
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                  &s_fontStage, &s_fontStageMem, &s_fontStageMap)) return false;
     uint8_t* p = (uint8_t*)s_fontStageMap;
+    if (vk_async_want()) {   /* 29.10.2026 (async): атлас - в памяти процессора, в промежуточный буфер - font_stage_sync */
+        s_fontCpu = (unsigned char*)malloc((size_t)s_fontW * s_fontH * 4);
+        if (s_fontCpu) { p = s_fontCpu; s_fontDirty0 = 0; s_fontDirty1 = s_fontH; }
+    }
     for (size_t i = 0; i < (size_t)s_fontW * s_fontH; i++) {   /* заглушка: не наша ячейка */
         p[i * 4 + 0] = 0; p[i * 4 + 1] = 0; p[i * 4 + 2] = 255; p[i * 4 + 3] = 0;
     }
     if (s_fontEarly && s_fontEarlyW == s_fontW && s_fontEarlyH == s_fontW) {
-        memcpy(s_fontStageMap, s_fontEarly, (size_t)s_fontW * s_fontW * 4);   /* верхняя страница */
+        memcpy(p, s_fontEarly, (size_t)s_fontW * s_fontW * 4);   /* верхняя страница */
         s_fontReady = 1;
     }
     free(s_fontEarly); s_fontEarly = nullptr;
@@ -858,6 +948,22 @@ static bool fontHiresInit() {
     return true;
 }
 
+/* 29.10.2026 (async): куда писать атлас - в его копию в памяти процессора (кадр в полёте читает промежуточный буфер) или, как
+ * было, прямо в промежуточный буфер; строки y0..y1 копии - в перенос (font_stage_sync) */
+static uint8_t* font_dst(int y0, int y1) {
+    if (!s_fontCpu) return (uint8_t*)s_fontStageMap;
+    if (s_fontDirty1 <= s_fontDirty0) { s_fontDirty0 = y0; s_fontDirty1 = y1; }
+    else { if (y0 < s_fontDirty0) s_fontDirty0 = y0; if (y1 > s_fontDirty1) s_fontDirty1 = y1; }
+    return s_fontCpu;
+}
+/* перед записью заливки атласа (dcvk_render): изменённые строки копии - в промежуточный буфер; кадра в полёте нет */
+static void font_stage_sync(void) {
+    if (!s_fontCpu || !s_fontStageMap || s_fontDirty1 <= s_fontDirty0) return;
+    const size_t row = (size_t)s_fontW * 4;
+    memcpy((uint8_t*)s_fontStageMap + (size_t)s_fontDirty0 * row, s_fontCpu + (size_t)s_fontDirty0 * row,
+           (size_t)(s_fontDirty1 - s_fontDirty0) * row);
+    s_fontDirty0 = s_fontDirty1 = 0;
+}
 extern "C" void dcvk_font_hires_set(const unsigned char* rgba, int w, int h) {
     if (!s_fontStageMap) {                     /* растеризатор ещё не поднят — придержим */
         free(s_fontEarly);
@@ -869,7 +975,7 @@ extern "C" void dcvk_font_hires_set(const unsigned char* rgba, int w, int h) {
         rlog("[VKR] font hires: %dx%d does not match the %dx%d page\n", w, h, s_fontW, s_fontW);
         return;
     }
-    memcpy(s_fontStageMap, rgba, (size_t)w * h * 4);      /* верхняя страница образа */
+    memcpy(font_dst(0, h), rgba, (size_t)w * h * 4);      /* верхняя страница образа */
     s_fontPending = 1;
     s_fontReady = 1;
 }
@@ -882,7 +988,7 @@ extern "C" void dcvk_font_hires_rect_set(int page, int x, int y, int w, int h, c
     const int S = s_fontW / 256;
     const int X = x * S, Y = (page * 256 + y) * S, Wp = w * S, Hp = h * S;
     if (X < 0 || Y < 0 || Wp <= 0 || Hp <= 0 || X + Wp > s_fontW || Y + Hp > s_fontH) return;
-    uint8_t* dst = (uint8_t*)s_fontStageMap;
+    uint8_t* dst = font_dst(Y, Y + Hp);
     for (int r = 0; r < Hp; r++)
         memcpy(dst + ((size_t)(Y + r) * (size_t)s_fontW + (size_t)X) * 4,
                rgba + (size_t)r * (size_t)Wp * 4, (size_t)Wp * 4);
@@ -893,7 +999,7 @@ extern "C" void dcvk_font_hires_rect_clear(int page, int x, int y, int w, int h)
     const int S = s_fontW / 256;
     const int X = x * S, Y = (page * 256 + y) * S, Wp = w * S, Hp = h * S;
     if (X < 0 || Y < 0 || Wp <= 0 || Hp <= 0 || X + Wp > s_fontW || Y + Hp > s_fontH) return;
-    uint8_t* dst = (uint8_t*)s_fontStageMap;
+    uint8_t* dst = font_dst(Y, Y + Hp);
     for (int r = 0; r < Hp; r++) {
         uint8_t* p = dst + ((size_t)(Y + r) * (size_t)s_fontW + (size_t)X) * 4;
         for (int c = 0; c < Wp; c++) { p[c * 4 + 0] = 0; p[c * 4 + 1] = 0; p[c * 4 + 2] = 255; p[c * 4 + 3] = 0; }
@@ -988,6 +1094,8 @@ static bool dx_record(int w, int h) {
 }
 /* 24.10.2026: время отправки и ожидания забора за развёртку - для строки ptrace: (main.cpp, DC_PACE_TRACE); main.cpp обнуляет */
 extern "C" { double g_vk_submit_ms = 0.0, g_vk_wait_ms = 0.0; }
+/* 29.10.2026: ожидание забора ЭТИМ потоком с прошлого dcvk_perf_split_take (строка perf:): у потока показа - своё */
+static thread_local double t_vk_wait_ms;
 /* 25.10.2026 вечер: последняя отправка - разбивка кадра между тактами (main.cpp pt_extra, DC_HZ_DBG): запись команд, отправка,
  * ожидание забора, видеокарта по меткам (основной проход, после него) */
 extern "C" { double g_vk_last_submit_ms = 0.0, g_vk_last_wait_ms = 0.0, g_vk_last_rec_ms = 0.0, g_vk_last_gpu_ms[2] = { 0.0, 0.0 }; }
@@ -1001,21 +1109,91 @@ static std::atomic<int> s_test_slow_n(0);
 static double s_test_slow_ms = 0.0;
 static int s_test_slow_between = 0;
 extern "C" void dcvk_test_slow(double ms, int n, int between) { s_test_slow_ms = ms; s_test_slow_between = between; s_test_slow_n = n; }
-static void test_gpu_slow(int extra) {
+/* 01.11.2026 (dev): DC_TEST_GPU_SLOW_MODE=1 - видеокарта, которой на картинку нужно DC_TEST_GPU_SLOW_MS: картинка готова не раньше
+ * max(отправка, готовность прошлой картинки) + N, время идёт и пока поток задания стоит в показе (как у настоящей медленной
+ * видеокарты, сетка на слабом ноутбуке). 0 - N мс сверху после забора, как было: стояние задания в показе прибавлялось к цене. */
 #ifndef PSX_NO_DEBUG_TOOLS
-    static double ms = -1.0;
-    if (ms < 0.0) { const char* e = getenv("DC_TEST_GPU_SLOW_MS"); ms = e ? atof(e) : 0.0; if (ms < 0.0) ms = 0.0;
-                    if (ms > 0.0) std::fprintf(stderr, "test: every picture waits %.1f ms more (DC_TEST_GPU_SLOW_MS)%c", ms, 10); }
-    double w = ms;
+static double s_test_gpu_ms = -1.0;
+static int s_test_gpu_mode = 0;
+static std::atomic<uint64_t> s_vtSer[4];
+static std::atomic<long long> s_vtDone[4];
+static long long s_vtLast = 0;
+/* 01.11.2026 (dev): DC_TEST_GPU_SLOW_S=N - с MODE 1 видеокарта медленная только первые N с (от первой картинки), дальше быстрая:
+ * как скоро после тяжёлого места (сетка) вернутся кадры между тактами (main.cpp DC_HZ_JOB, бюджеты A/B) */
+static double s_test_gpu_s = 0.0;
+static long long s_vtT0 = 0;
+static int s_vtFast = 0;
+/* 01.11.2026 (dev): DC_TEST_GPU_SLOW_CYCLE=L:H - с MODE 1 видеокарта быстрая L с, потом медленная H с, и так по кругу от первой
+ * картинки: поворот от лёгкого вида к тяжёлому (сетка) и обратно, бюджеты A/B и DC_HZ_JOB на переходах (main.cpp pace_skip_raise_b) */
+static double s_test_gpu_cyc[2] = { 0.0, 0.0 };
+static int s_vtCycSlow = -1;
+static void test_gpu_slow_init(void) {
+    if (s_test_gpu_ms >= 0.0) return;
+    const char* e = getenv("DC_TEST_GPU_SLOW_MODE"); s_test_gpu_mode = (e && *e == '1') ? 1 : 0;
+    e = getenv("DC_TEST_GPU_SLOW_CYCLE");
+    if (!e || std::sscanf(e, "%lf:%lf", &s_test_gpu_cyc[0], &s_test_gpu_cyc[1]) != 2 || s_test_gpu_cyc[0] <= 0.0 || s_test_gpu_cyc[1] <= 0.0)
+        s_test_gpu_cyc[0] = s_test_gpu_cyc[1] = 0.0;
+    e = getenv("DC_TEST_GPU_SLOW_S"); s_test_gpu_s = e ? atof(e) : 0.0;
+    e = getenv("DC_TEST_GPU_SLOW_MS"); double ms = e ? atof(e) : 0.0; if (ms < 0.0) ms = 0.0;
+    if (ms > 0.0) std::fprintf(stderr, s_test_gpu_mode ? "test: the graphics card takes %.1f ms per picture (DC_TEST_GPU_SLOW_MS, MODE 1)%c"
+                                                       : "test: every picture waits %.1f ms more (DC_TEST_GPU_SLOW_MS)%c", ms, 10);
+    s_test_gpu_ms = ms;
+}
+#endif
+static void test_gpu_slow_submit(LONGLONG t, uint64_t ser) {   /* cmdSubmitAsync: отправка картинки ser в миг t */
+#ifndef PSX_NO_DEBUG_TOOLS
+    test_gpu_slow_init();
+    if (!s_test_gpu_mode || s_test_gpu_ms <= 0.0) return;
+    LARGE_INTEGER f; QueryPerformanceFrequency(&f);
+    if (s_test_gpu_s > 0.0) {                    /* DC_TEST_GPU_SLOW_S: новые картинки - без ожидания (номер не записан) */
+        if (!s_vtT0) s_vtT0 = t;
+        if ((double)(t - s_vtT0) > s_test_gpu_s * (double)f.QuadPart) {
+            if (!s_vtFast) { s_vtFast = 1; std::fprintf(stderr, "test: the graphics card is fast again after %.1f s (DC_TEST_GPU_SLOW_S)%c", s_test_gpu_s, 10); }
+            return;
+        }
+    }
+    if (s_test_gpu_cyc[1] > 0.0) {               /* DC_TEST_GPU_SLOW_CYCLE: в быстрой части - без ожидания (номер не записан) */
+        if (!s_vtT0) s_vtT0 = t;
+        const double sec = (double)(t - s_vtT0) / (double)f.QuadPart;
+        const int slow = fmod(sec, s_test_gpu_cyc[0] + s_test_gpu_cyc[1]) >= s_test_gpu_cyc[0];
+        if (slow != s_vtCycSlow) {
+            s_vtCycSlow = slow;
+            std::fprintf(stderr, "test: the graphics card is %s at %.1f s (DC_TEST_GPU_SLOW_CYCLE)%c", slow ? "slow" : "fast", sec, 10);
+        }
+        if (!slow) return;
+    }
+    s_vtLast = (t > s_vtLast ? t : s_vtLast) + (long long)(s_test_gpu_ms * (double)f.QuadPart / 1000.0);
+    s_vtDone[ser & 3] = s_vtLast;
+    s_vtSer[ser & 3] = ser;
+#else
+    (void)t; (void)ser;
+#endif
+}
+static void test_gpu_slow(int extra, uint64_t ser = 0) {
+#ifndef PSX_NO_DEBUG_TOOLS
+    test_gpu_slow_init();
+    double w = s_test_gpu_mode ? 0.0 : s_test_gpu_ms;
+    if (s_test_gpu_mode && s_test_gpu_ms > 0.0) {
+        if (!ser) ser = s_subSerial.load();
+        if (s_vtSer[ser & 3].load() == ser) {
+            const long long d = s_vtDone[ser & 3].load();
+            LARGE_INTEGER t; do { QueryPerformanceCounter(&t); } while (t.QuadPart < d);
+        }
+    }
     if ((extra || !s_test_slow_between) && s_test_slow_n.load() > 0 && s_test_slow_n.fetch_sub(1) > 0) w += s_test_slow_ms;
     if (w <= 0.0) return;
     LARGE_INTEGER f, t0, t; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&t0);
     const LONGLONG n = (LONGLONG)(w * (double)f.QuadPart / 1000.0);
     do { QueryPerformanceCounter(&t); } while (t.QuadPart - t0.QuadPart < n);
+#else
+    (void)extra; (void)ser;
 #endif
 }
-static bool cmdSubmitWait() {
+/* 29.10.2026 (async): отправка s_cmd без ожидания; frame = 1 - кадр A или B: тень UBO - в отображённый блок прямо перед отправкой
+ * (поток показа при 120+ - тоже кадр B). Забор ждёт cmdWaitPending (или поток задания показа, dcvk_fence_wait_serial) */
+static bool cmdSubmitAsync(int frame) {
     vkEndCommandBuffer(s_cmd);
+    while (s_fenceWaiters.load() > 0) YieldProcessor();   /* поток задания ещё в ожидании прошлого забора (он уже пришёл) */
     vkResetFences(C->device, 1, &s_fence);
     VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
     si.commandBufferCount = 1; si.pCommandBuffers = &s_cmd;
@@ -1028,21 +1206,37 @@ static bool cmdSubmitWait() {
         si.pNext = &km;
     }
     s_kmPending = 0;
-    LARGE_INTEGER tq0, tq1, tq2; QueryPerformanceCounter(&tq0);
+    if (frame && s_shUboGpu) memcpy(s_shUboGpu, s_shUboShadow, sizeof s_shUboShadow);   /* 29.10.2026 (async), 30.10 (пункт 11): UBO кадра */
+    LARGE_INTEGER tq0, tq1; QueryPerformanceCounter(&tq0);
     const VkResult sr = vkQueueSubmit(C->queue, 1, &si, s_fence);
     if (sr != VK_SUCCESS) { if (sr == VK_ERROR_DEVICE_LOST) ptvk_mark_lost((int)sr); return false; }
     QueryPerformanceCounter(&tq1);
-    /* 18.10.2026: до конца, не 4 с - буфер команд незаконченной работы снова не пишется (ptvk_wait_fence, pt_vulkan.cpp) */
-    const int ok = ptvk_wait_fence(s_fence) != 0;
-    QueryPerformanceCounter(&tq2);
+    s_subSerial++;
+    if (frame) test_gpu_slow_submit(tq1.QuadPart, s_subSerial.load());   /* 01.11.2026 (dev): DC_TEST_GPU_SLOW_MODE=1 */
     { static double qf = 0.0; if (qf == 0.0) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); qf = (double)f.QuadPart / 1000.0; }
       g_vk_submit_ms += (double)(tq1.QuadPart - tq0.QuadPart) / qf;
-      g_vk_wait_ms += (double)(tq2.QuadPart - tq1.QuadPart) / qf;
       g_vk_last_submit_ms = (double)(tq1.QuadPart - tq0.QuadPart) / qf;
-      g_vk_last_wait_ms = (double)(tq2.QuadPart - tq1.QuadPart) / qf;
       s_vk_last_tq0 = tq0; }
+    return true;
+}
+/* забор последней отправки - этим потоком (синхронный кадр, снятие задания показа, страховка). 0 - видеокарта потеряна */
+static int cmdWaitPending(void) {
+    const uint64_t ser = s_subSerial.load();
+    if (s_subDone.load() >= ser) return 1;
+    LARGE_INTEGER tw0, tw1; QueryPerformanceCounter(&tw0);
+    s_fenceWaiters++;
+    /* 18.10.2026: до конца, не 4 с - буфер команд незаконченной работы снова не пишется (ptvk_wait_fence, pt_vulkan.cpp) */
+    const int ok = s_subDone.load() >= ser ? 1 : (ptvk_wait_fence(s_fence) != 0);
+    s_fenceWaiters--;
+    QueryPerformanceCounter(&tw1);
+    { uint64_t d = s_subDone.load(); while (d < ser && !s_subDone.compare_exchange_weak(d, ser)) {} }   /* потеряна - тоже: ждать нечего */
+    { static double qf = 0.0; if (qf == 0.0) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); qf = (double)f.QuadPart / 1000.0; }
+      g_vk_wait_ms += (double)(tw1.QuadPart - tw0.QuadPart) / qf;
+      t_vk_wait_ms += (double)(tw1.QuadPart - tw0.QuadPart) / qf;   /* 29.10.2026: своё у потока (строка perf:) */
+      g_vk_last_wait_ms = (double)(tw1.QuadPart - tw0.QuadPart) / qf; }
     return ok;
 }
+static bool cmdSubmitWait() { return cmdSubmitAsync(0) && cmdWaitPending(); }
 
 // ===================================================================================================================
 // 25.09.2026 — ЗАТЕНЕНИЕ УГЛОВ (SSAO) И СГЛАЖИВАНИЕ КРАЁВ (MSAA). Игрок: «сделай 2 (ssao) и 6 из списка. все эти новые
@@ -1207,6 +1401,16 @@ static int    s_ppSSok = 1;                 /* устройство умеет s
 static int    s_ppSloop = 1;
 static int    s_ppMsFast = 1;               /* 28.10.2026: и тексель раз на пиксель внутри полигона (RasterSpec msFull), DC_MSAA_FAST=0 - откат */
 static int    s_ppSLfail = 0;               /* вариант со светом на пиксель не собрался — прежний */
+/* 30.10.2026 (GitHub #16, Steam Deck): на Mesa RADV вариант со светом на пиксель (dc_raster_sl) даёт пунктир с чужими цветами по
+ * границам текселей и рёбрам: interpolateAtSample в цикле по выборкам RADV считает через производные квадрата 2x2, а в цикл
+ * заходят не все потоки квадрата. На RADV вместо него прежний «по выборкам» (dc_raster_ss, как DC_MSAA_SLOOP=0): тот же вид,
+ * дороже. DC_MSAA_RADV: нет - только на RADV, 0 - как было везде (откат), 1 - на любой видеокарте (проверка на своей).
+ * Остальные видеокарты - те же шейдеры и те же константы. */
+static int    s_ppRadv = -1;
+extern "C" unsigned ptvk_device_driver_id(void);   /* pt_vulkan.cpp: VkDriverId выбранной видеокарты */
+static int ms_radv_fix(void) {
+    return s_ppRadv >= 0 ? s_ppRadv : ptvk_device_driver_id() == VK_DRIVER_ID_MESA_RADV ? 1 : 0;
+}
 static int    s_ppMsaaFail = 0;             /* сборка MSAA не удалась — дальше без неё, до новой настройки */
 static int    s_ppAoFrame = 0, s_ppMsFrame = 1;   /* что было в последнем кадре (для панели) */
 static double s_gpuMain = 0.0, s_gpuPost = 0.0;   /* мс на GPU: проход кадра и пост-проходы (сглаженные) */
@@ -1230,6 +1434,7 @@ static void pp_defaults(void) {
     { const char* e = getenv("DC_SSAO");        s_ppSsao   = (e && *e == '0') ? 0 : 1; }
     { const char* e = getenv("DC_MSAA_SLOOP");  s_ppSloop  = (e && *e == '0') ? 0 : 1; }
     { const char* e = getenv("DC_MSAA_FAST");   s_ppMsFast = (e && *e == '0') ? 0 : 1; }
+    { const char* e = getenv("DC_MSAA_RADV");   s_ppRadv   = (e && *e) ? (*e == '0' ? 0 : 1) : -1; }
     { const char* e = getenv("DC_POST_AA");     s_ppAA     = e ? atoi(e) : 0; }
 }
 static void pp_clamp(void) {
@@ -1454,8 +1659,52 @@ static int pp_ts_detail(double out[7]) {
     out[6] = (double)((q[12] - q[11]) & m) * k;
     return 1;
 }
-static void pp_ts_read(void) {
+/* 29.10.2026 (скорость на AMD и слабых ПК; DC_PERF_SPLIT=0 - строка perf: как была): этапы этого кадра на видеокарте по тем же
+ * меткам, что у DC_VK_STAGES, - для разбивки в строке perf: (main.cpp perf_split_note копит их по видам кадров). [0] - кадр A:
+ * заливки VRAM, шрифта и текстур модов и тени (3..4), геометрия отражений и свечения (4..0), основной проход (0..1), сглаживание
+ * (1..13), SSAO, свечение и дымка (13..2), копии и чтение кадра (2..5), всё (3..5); [1] - кадр B: геометрия (3..0), основной
+ * проход, сглаживание, после него, копия кадра (2..5), всё (3..5) - метки 3 и 5 кадр B пишет только для этого. */
+/* у каждого потока свои: кадры между тактами потока показа (DC_PRESENT_THREAD) не попадают в разбивку главного потока */
+static thread_local double t_split_ms[2][7];
+static thread_local int    t_split_ok[2];
+static int perf_split_on(void) {
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DC_PERF_SPLIT"); on = (e && *e == '0') ? 0 : 1; }
+    return on;
+}
+static void pp_ts_split(int kind) {
+    if (!s_tqOk || (kind != 1 && kind != 2) || !perf_split_on()) return;
+    uint64_t q[14] = {};
+    if (kind == 1) {      /* кадр A пишет все 14 меток */
+        if (vkGetQueryPoolResults(C->device, s_tq, 0, 14, sizeof q, q, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
+    } else {              /* кадр B - только 0..3, 5 и 13 (SSAO 10..12 - лишь при затенении, 4 и 6..9 - нет) */
+        if (vkGetQueryPoolResults(C->device, s_tq, 0, 4, 4 * sizeof(uint64_t), q, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
+        if (vkGetQueryPoolResults(C->device, s_tq, 5, 1, sizeof(uint64_t), &q[5], sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
+        if (vkGetQueryPoolResults(C->device, s_tq, 13, 1, sizeof(uint64_t), &q[13], sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
+    }
+    const uint64_t m = (s_tsBits >= 64) ? ~0ull : ((1ull << s_tsBits) - 1ull);
+    const double k = (double)s_tsPeriod * 1e-6;
+    auto d = [&](int a, int b) { return (double)((q[b] - q[a]) & m) * k; };
+    double* o = t_split_ms[kind - 1];
+    if (kind == 1) { o[0] = d(3, 4); o[1] = d(4, 0); o[2] = d(0, 1); o[3] = d(1, 13); o[4] = d(13, 2); o[5] = d(2, 5); o[6] = d(3, 5); }
+    else           { o[0] = d(3, 0); o[1] = d(0, 1); o[2] = d(1, 13); o[3] = d(13, 2); o[4] = d(2, 5); o[5] = d(3, 5); o[6] = 0.0; }
+    t_split_ok[kind - 1] = 1;
+}
+/* main.cpp (строка perf:): метка перед рендером кадра такта - ожидание забора и этапы этого потока считаются заново (кадры между
+ * тактами, нарисованные после прошлого показа, не в счёт); сколько этот поток ждал забор с метки; этапы его кадра вида kind
+ * после метки (1 - есть). */
+extern "C" void dcvk_perf_split_mark(void) { t_vk_wait_ms = 0.0; t_split_ok[0] = t_split_ok[1] = 0; }
+extern "C" double dcvk_perf_wait_ms(void) { return t_vk_wait_ms; }
+extern "C" int dcvk_perf_split_get(int kind, double out[7]) {
+    if ((kind != 1 && kind != 2) || !t_split_ok[kind - 1]) return 0;
+    for (int i = 0; i < 7; i++) out[i] = t_split_ms[kind - 1][i];
+    return 1;
+}
+static uint64_t s_tsLastEnd = 0;   /* 29.10.2026 (async): метка 5 последнего прочитанного кадра - для строки render: stuck */
+static void pp_ts_read(int kind) {   /* 29.10.2026: kind 1 - кадр A (dcvk_render), 2 - кадр B (warp) */
+    pp_ts_split(kind);
     if (!s_tqOk) return;
+    if (s_asyncMode) { uint64_t e = 0; if (vkGetQueryPoolResults(C->device, s_tq, 5, 1, sizeof e, &e, sizeof e, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) s_tsLastEnd = e; }
     uint64_t q[3] = { 0, 0, 0 };
     if (vkGetQueryPoolResults(C->device, s_tq, 0, 3, sizeof q, q, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
     const uint64_t m = (s_tsBits >= 64) ? ~0ull : ((1ull << s_tsBits) - 1ull);
@@ -1478,6 +1727,101 @@ static void pp_ts_read(void) {
         std::fprintf(stderr, "post: GPU frame %.3f ms, SSAO %.3f ms (now %.3f / %.3f), MSAA %dx%s, SSAO %s, AA filter %s %.3f ms (now %.3f)%c",
                      s_gpuMain, s_gpuPost, a, b, s_ppMsFrame, s_ppSshade ? " per sample" : "", s_ppAoFrame ? "in the frame" : "no",
                      s_ppAAFrame ? PP_AA_NAME[s_ppAA] : "no", s_gpuAA, c, 10);
+}
+
+/* ===== 29.10.2026: АСИНХРОННАЯ ОТПРАВКА - ВЫЗОВЫ ДЛЯ main.cpp (см. у cmdBegin) ===== */
+static void slow_once(uint64_t ser) {            /* test_gpu_slow кадра в полёте - один раз, кто первый дождался забора */
+    uint64_t p = s_slowFor.load();
+    if (p < ser && s_slowFor.compare_exchange_strong(p, ser)) test_gpu_slow(0, ser);
+}
+/* main.cpp: можно ли отдать кадр заданием показа (DC_VK_STAGES=1 - замер этапов читает метки сразу: всё синхронно) */
+extern "C" int dcvk_async_ok(void) {
+    static int st = -1;
+    if (st < 0) { const char* e = getenv("DC_VK_STAGES"); st = (e && *e == '1') ? 1 : 0; }
+    return s_asyncMode && !st && !ptvk_lost();
+}
+extern "C" void dcvk_async_frame(int on) { s_asyncFrame = (on && s_asyncMode) ? 1 : 0; }   /* ближайший кадр A или B - без ожидания */
+extern "C" int dcvk_pending(void) { return vk_pending(); }                                   /* отправка в полёте */
+extern "C" unsigned long long dcvk_submit_serial(void) { return s_subSerial.load(); }
+extern "C" int dcvk_serial_done(unsigned long long ser) { return s_subDone.load() >= ser; }
+extern "C" long dcvk_async_guard_hits(void) { return s_vkGuardHits; }
+extern "C" void dcvk_async_set_guard(void (*hook)(void)) { s_asyncGuardHook = hook; }
+/* 29.10.2026: долгое ожидание забора (ptvk_wait_fence, 4 с) - что ждёт этот поток; main.cpp дописывает задание показа и замки */
+static void (*s_asyncStuckHook)(void) = nullptr;
+extern "C" void dcvk_async_set_stuck_note(void (*hook)(void)) { s_asyncStuckHook = hook; }
+extern "C" void ptvk_set_wait_note(void (*fn)(VkFence));
+static void raster_wait_note(VkFence f) {
+    std::fprintf(stderr, "render: stuck wait - thread %lu, fence %s, submits %llu, done %llu, waiters %d, frame in flight %d, "
+                 "async %d (this frame %d), keyed mutex pending %d%c", (unsigned long)GetCurrentThreadId(),
+                 f == s_fence ? "of the frame" : "another one", (unsigned long long)s_subSerial.load(), (unsigned long long)s_subDone.load(),
+                 s_fenceWaiters.load(), s_pendKind, s_asyncMode, s_asyncFrame, s_kmPending, 10);
+    if (f == s_fence && s_tqOk) {   /* докуда кадр дошёл на видеокарте: метки по порядку записи, без ожидания */
+        static const int order[14] = { 3, 7, 8, 9, 4, 0, 1, 13, 10, 11, 12, 2, 6, 5 };
+        uint64_t r[14][2] = {};
+        const VkResult qr = vkGetQueryPoolResults(C->device, s_tq, 0, 14, sizeof r, r, sizeof r[0],
+                                                  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        char line[256]; int n = 0;
+        for (int k = 0; k < 14 && n < (int)sizeof line - 8; k++) n += std::snprintf(line + n, sizeof line - (size_t)n, " %d%s", order[k], r[order[k]][1] ? "+" : "-");
+        std::fprintf(stderr, "render: stuck frame on the GPU - timestamps in order (+ written):%s; query %d, fence status %d, "
+                     "end mark %s the last frame read%c", line, (int)qr, (int)vkGetFenceStatus(C->device, s_fence),
+                     (r[5][1] && r[5][0] == s_tsLastEnd) ? "the same as" : "differs from", 10);
+    }
+    if (s_asyncStuckHook) s_asyncStuckHook();
+    std::fflush(stderr);   /* журнал в буфере, сброс - раз за развёртку главного потока: при зависании строки иначе пропадают */
+}
+/* поток задания показа (J1, без замков): дождаться забора отправки ser; ms - сколько ждал. 0 - видеокарта потеряна */
+extern "C" int dcvk_fence_wait_serial(unsigned long long ser, double* ms) {
+    LARGE_INTEGER t0, t1, f; QueryPerformanceCounter(&t0);
+    int ok = 1;
+    s_fenceWaiters++;
+    if (s_subDone.load() < ser && s_subSerial.load() == ser) ok = ptvk_wait_fence(s_fence) != 0;   /* забор - этой отправки */
+    s_fenceWaiters--;
+    if (ok) slow_once(ser);
+    { uint64_t d = s_subDone.load(); while (d < ser && !s_subDone.compare_exchange_weak(d, ser)) {} }
+    QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&f);
+    if (ms) *ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart;
+    return ok;
+}
+/* главный поток: отправка ser закончена - метки времени её кадра (pp_ts_read: время видеокарты, строка perf:, автопонижение) */
+extern "C" void dcvk_after_fence(unsigned long long ser) {
+    if (ser != s_subSerial.load() || !s_pendKind || s_subDone.load() < ser) return;
+    const int k = s_pendKind; s_pendKind = 0;
+    pp_ts_read(k);
+}
+/* main.cpp, задание показа (поток задания или снятие главным потоком): то же, но этапы кадра на видеокарте (строка perf:) - в
+ * split задания, а свои этапы вызвавшего потока (его кадр такта) не трогаются. 1 - этапы есть */
+extern "C" int dcvk_after_fence_job(unsigned long long ser, double split[7]) {
+    if (ser != s_subSerial.load() || !s_pendKind || s_subDone.load() < ser) return 0;
+    const int k = s_pendKind;
+    double keep[7]; const int keep_ok = t_split_ok[k - 1];
+    for (int i = 0; i < 7; i++) keep[i] = t_split_ms[k - 1][i];
+    t_split_ok[k - 1] = 0;
+    dcvk_after_fence(ser);
+    const int ok = t_split_ok[k - 1];
+    for (int i = 0; i < 7; i++) { split[i] = t_split_ms[k - 1][i]; t_split_ms[k - 1][i] = keep[i]; }
+    t_split_ok[k - 1] = keep_ok;
+    return ok;
+}
+/* главный поток: кадр в полёте дождаться и учесть (синхронный показ, удержание, вход в PT, выход, страховка). 0 - потеряна */
+extern "C" int dcvk_drain(void) {
+    const uint64_t ser = s_subSerial.load();
+    if (s_subDone.load() >= ser && !s_pendKind) return 1;
+    const int ok = cmdWaitPending();
+    if (ok) slow_once(ser);
+    dcvk_after_fence(ser);
+    return ok;
+}
+/* страховка перед записью (главный поток или поток показа при 120+): задание показа - сначала до копии (main.cpp), иначе
+ * кадр без задания: дождаться. Срабатывать не должна - W_copy в pt_main_prewait раньше */
+static void async_guard(const char* where) {
+    if (!vk_pending() && !s_pendKind) return;
+    if (vk_pending()) {
+        s_vkGuardHits++;
+        if (s_vkGuardHits <= 20 || (s_vkGuardHits % 1000) == 0)
+            rlog("[VKR] %s with a submit in flight (#%ld) - the present job is taken over first\n", where, s_vkGuardHits);
+    }
+    if (s_asyncGuardHook) s_asyncGuardHook();
+    dcvk_drain();
 }
 
 static bool pp_mkImage(VkFormat fmt, VkSampleCountFlagBits ns, VkImageUsageFlags use, VkImageAspectFlags asp,
@@ -1527,6 +1871,58 @@ static uint32_t main_pass_dep(const VkSubpassDependency** out) {
                       VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     *out = on ? &d : nullptr;
     return on ? 1u : 0u;
+}
+
+/* 29.10.2026: продолжение прохода после захвата сцены (scap_switch). Копия куска кадра читает s_colImg (TRANSFER_SRC), а начало
+ * продолжения само меняло его раскладку (1x: TRANSFER_SRC -> цвет, MSAA: сведение из UNDEFINED) без зависимости от этой копии:
+ * проверка синхронизации Vulkan - WRITE_AFTER_READ (слот 6, вихрь у Кирка, MSAA 8x/4x и SMAA). На AMD смена раскладки трогает
+ * сжатие цели и могла испортить кусок в копии. Теперь раскладку меняет барьер после копии (ждёт её), а продолжение начинается
+ * сразу с цвета. У s_rpResume и s_rpMSResume меняется только начальная раскладка - с остальными проходами они совместимы.
+ * DC_SCAP_RESUME_SYNC=0 - как было. */
+static int scap_resume_sync_on(void) {
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DC_SCAP_RESUME_SYNC"); on = (e && *e == '0') ? 0 : 1; }
+    return on;
+}
+/* 30.10.2026 (пункт 3 плана скорости): проход начинается с раскладки, в которой образ на самом деле (конечной прошлого
+ * прохода), а не с UNDEFINED - на AMD UNDEFINED заново размечает сжатие цели (DCC/HTILE/CMASK/FMASK) при каждом начале.
+ * Новый образ или раскладка неизвестна - прежний проход с UNDEFINED. DC_RP_KEEP_LAYOUT: 0 - как было, 1 (умолч.) - только
+ * AMD, 2 - любая видеокарта. Раскладки помнятся на записи команд: буфер один, очередь одна, cmdBegin ждёт прошлую отправку */
+extern "C" unsigned ptvk_device_vendor(void);   /* pt_vulkan.cpp: vendorID выбранной видеокарты */
+static int s_rpKeep = -1;
+static int rp_keep_on(void) {
+    if (s_rpKeep < 0) {
+        const char* e = getenv("DC_RP_KEEP_LAYOUT");
+        const int mode = (e && *e == '0') ? 0 : (e && *e == '2') ? 2 : 1;
+        const unsigned ven = ptvk_device_vendor();
+        s_rpKeep = (mode == 2 || (mode == 1 && ven == 0x1002u)) ? 1 : 0;
+        std::fprintf(stderr, "raster: render passes keep image layouts %s (DC_RP_KEEP_LAYOUT=%d, GPU vendor 0x%04X)%c",
+                     s_rpKeep ? "on" : "off", mode, ven, 10);
+    }
+    return s_rpKeep;
+}
+/* начало для цели, которая между проходами всегда в keep (новые образы переводят *_init_layouts или барьер создания) */
+static VkImageLayout rp_keep_lay(VkImageLayout keep) { return rp_keep_on() ? keep : VK_IMAGE_LAYOUT_UNDEFINED; }
+/* проход с началом в SHADER_READ_ONLY, если цель уже рисовалась им (used) и он собран; иначе прежний */
+static VkRenderPass rp_keep_pick(VkRenderPass old, VkRenderPass keep, int used) { return (used && keep && rp_keep_on()) ? keep : old; }
+static VkImageLayout s_layCol = VK_IMAGE_LAYOUT_UNDEFINED, s_layDep = VK_IMAGE_LAYOUT_UNDEFINED;       /* s_colImg, s_depImg */
+static VkImageLayout s_layMsCol = VK_IMAGE_LAYOUT_UNDEFINED, s_layMsDep = VK_IMAGE_LAYOUT_UNDEFINED;   /* цели MSAA */
+static VkRenderPass  s_rpK[2][2] = {};                 /* s_rp / s_rpFirst с keep-раскладкой: [First][глубина в READ_ONLY] */
+static VkRenderPass  s_rpZk = VK_NULL_HANDLE, s_rpZ2k = VK_NULL_HANDLE, s_rpAOk = VK_NULL_HANDLE, s_rpVk = VK_NULL_HANDLE;
+static VkRenderPass  s_aaRpEk = VK_NULL_HANDLE, s_aaRpWk = VK_NULL_HANDLE;
+static int           s_zUsed = 0, s_aoUsed = 0, s_vUsed = 0, s_aaSrcUsed = 0, s_aaEWUsed = 0;   /* цель уже в SHADER_READ_ONLY */
+/* после прохода кадра (или его продолжения): конечные раскладки у всех вариантов одни */
+static void rp_keep_main_done(int msN) {
+    if (!rp_keep_on()) return;
+    s_layCol = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    if (msN > 1) { s_layMsCol = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; s_layMsDep = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL; }
+    else s_layDep = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+}
+/* pp_run / pp_zonly: их барьер перевёл глубину кадра в DEPTH_STENCIL_READ_ONLY */
+static void rp_keep_dep_ro(int msN) {
+    if (!rp_keep_on()) return;
+    if (msN > 1) s_layMsDep = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    else s_layDep = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 }
 
 /* ---- конвейеры растра: 11 вариантов + фон под проход rp и число выборок ns. Текст — тот же, что был в buildFixed ---- */
@@ -1711,11 +2107,12 @@ static bool mkRasterPipesImpl(VkRenderPass rp, VkSampleCountFlagBits ns, VkShade
 static VkPipeline mesh_main_pipe(VkRenderPass rp, VkSampleCountFlagBits ns, VkShaderModule fs,
                                  const VkSpecializationInfo* spec);   /* 06.10.2026, ниже */
 /* sshade: 0 — шейдер на пиксель, 1 — на каждую выборку (dc_raster_ss), 2 — 09.10: свет на пиксель, тексель на выборку (dc_raster_sl);
- * feat - 25.10.2026: опции в шейдере (raster_feat_want) */
+ * feat - 25.10.2026: опции в шейдере (raster_feat_want); 30.10.2026: бит 4 - без рельефа вспышки (s_pipesNF) */
 static bool mkRasterPipes(VkRenderPass rp, VkSampleCountFlagBits ns, int sshade, VkPipeline* pipes, VkPipeline* bgOut, int feat) {
     const RasterSpec rsd = { s_trepCap, (feat & 1) ? VK_TRUE : VK_FALSE, (feat & 2) ? VK_TRUE : VK_FALSE,
-                             (sshade == 2 && s_ppMsFast && ns > VK_SAMPLE_COUNT_1_BIT) ? (1 << (int)ns) - 1 : 0 };
-    const VkSpecializationInfo rsi = { 4, s_rspecMap, sizeof(RasterSpec), &rsd };
+                             (sshade == 2 && s_ppMsFast && ns > VK_SAMPLE_COUNT_1_BIT) ? (1 << (int)ns) - 1 : 0,
+                             (feat & 4) ? VK_FALSE : VK_TRUE };
+    const VkSpecializationInfo rsi = { 5, s_rspecMap, sizeof(RasterSpec), &rsd };
     VkShaderModule vs  = loadSpv("dc_raster.vert.spv");
     VkShaderModule fs  = loadSpv(raster_fs_name(sshade));   /* 25.10.2026: безопасные шейдеры (s_rasterSafe) */
     VkShaderModule bvs = loadSpv("dc_bg.vert.spv");
@@ -1756,17 +2153,39 @@ static VkImageView    s_msColView = VK_NULL_HANDLE, s_msDepView = VK_NULL_HANDLE
 static VkFramebuffer  s_fbMS = VK_NULL_HANDLE;
 static int            s_msW = 0, s_msH = 0;
 static VkImageView    s_msResolveOf = VK_NULL_HANDLE;  /* s_colView, под который собран кадровый буфер */
+static unsigned       s_msColGen = 0;                  /* 29.10.2026: и её поколение (s_colGen) */
 static VkRenderPass   s_rpResumeCur = VK_NULL_HANDLE;  /* продолжение прохода в текущем кадре (scap_switch) */
+static unsigned       s_msDepGen = 0;                  /* 29.10.2026: пересоздания глубины MSAA - привязке глубины SSAO */
 
+/* 30.10.2026: s_rpMS / s_rpMSFirst с keep-раскладкой: [First][глубина в READ_ONLY] */
+static VkRenderPass   s_rpMSK[2][2] = {};
+/* 30.10.2026: проход кадра с раскладок, где цели на самом деле (rp_keep_main_done, rp_keep_dep_ro); неизвестно - прежний rp */
+static VkRenderPass rp_keep_main(VkRenderPass rp, int msN) {
+    if (!rp || !rp_keep_on() || s_layCol != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) return rp;
+    const int ms = (rp == s_rpMS || rp == s_rpMSFirst) ? 1 : 0;
+    const int f = (rp == s_rpFirst || rp == s_rpMSFirst) ? 1 : 0;
+    if (ms != (msN > 1 ? 1 : 0) || (!f && rp != s_rp && rp != s_rpMS)) return rp;
+    if (ms && s_layMsCol != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) return rp;
+    const VkImageLayout dep = ms ? s_layMsDep : s_layDep;
+    if (dep != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL && dep != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) return rp;
+    const int ro = (dep == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) ? 1 : 0;
+    const VkRenderPass k = ms ? s_rpMSK[f][ro] : s_rpK[f][ro];
+    return k ? k : rp;
+}
 static void msaaFree(void) {
     for (int k = 0; k < 13; k++) if (s_pipesMS[k]) { vkDestroyPipeline(C->device, s_pipesMS[k], nullptr); s_pipesMS[k] = VK_NULL_HANDLE; }
     if (s_bgPipeMS) { vkDestroyPipeline(C->device, s_bgPipeMS, nullptr); s_bgPipeMS = VK_NULL_HANDLE; }
     if (s_fbMS) { vkDestroyFramebuffer(C->device, s_fbMS, nullptr); s_fbMS = VK_NULL_HANDLE; }
     pp_freeImage(&s_msColImg, &s_msColMem, &s_msColView);
     pp_freeImage(&s_msDepImg, &s_msDepMem, &s_msDepView);
+    s_msDepGen++;
+    s_layMsCol = s_layMsDep = VK_IMAGE_LAYOUT_UNDEFINED;   /* 30.10.2026: цели MSAA освобождены - первый проход по новым с UNDEFINED */
     if (s_rpMS)       { vkDestroyRenderPass(C->device, s_rpMS, nullptr);       s_rpMS = VK_NULL_HANDLE; }
     if (s_rpMSFirst)  { vkDestroyRenderPass(C->device, s_rpMSFirst, nullptr);  s_rpMSFirst = VK_NULL_HANDLE; }
     if (s_rpMSResume) { vkDestroyRenderPass(C->device, s_rpMSResume, nullptr); s_rpMSResume = VK_NULL_HANDLE; }
+    for (int f = 0; f < 2; f++)   /* 30.10.2026: варианты DC_RP_KEEP_LAYOUT */
+        for (int ro = 0; ro < 2; ro++)
+            if (s_rpMSK[f][ro]) { vkDestroyRenderPass(C->device, s_rpMSK[f][ro], nullptr); s_rpMSK[f][ro] = VK_NULL_HANDLE; }
     s_msN = 1; s_msSS = 0; s_msW = s_msH = 0; s_msResolveOf = VK_NULL_HANDLE;
 }
 /* 11.10.2026: images and framebuffer of the MSAA pass for the current target size (s_rpMS must exist).
@@ -1798,8 +2217,10 @@ static bool msaaBuild(int n, int ss, int W, int H) {
           if (s_fbMS) { vkDestroyFramebuffer(C->device, s_fbMS, nullptr); s_fbMS = VK_NULL_HANDLE; }
           pp_freeImage(&s_msColImg, &s_msColMem, &s_msColView);
           pp_freeImage(&s_msDepImg, &s_msDepMem, &s_msDepView);
+          s_msDepGen++;
+          s_layMsCol = s_layMsDep = VK_IMAGE_LAYOUT_UNDEFINED;   /* 30.10.2026: и здесь цели MSAA новые - первый проход с UNDEFINED */
           if (msaaTargets((VkSampleCountFlagBits)n, W, H)) {
-              s_msW = W; s_msH = H; s_msResolveOf = s_colView;
+              s_msW = W; s_msH = H; s_msResolveOf = s_colView; s_msColGen = s_colGen;
               std::fprintf(stderr, "post: MSAA %dx - new targets %dx%d, pipelines kept%c", n, W, H, 10);
               { char w[48]; std::snprintf(w, sizeof w, "MSAA %dx at %dx%d", n, W, H); vram_note(w); }
               return true;
@@ -1832,8 +2253,20 @@ static bool msaaBuild(int n, int ss, int W, int H) {
     bool ok = vkCreateRenderPass(C->device, &rci, nullptr, &s_rpMS) == VK_SUCCESS;
     a[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE; a[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;   /* отрезки / SSAO */
     ok = ok && vkCreateRenderPass(C->device, &rci, nullptr, &s_rpMSFirst) == VK_SUCCESS;
+    if (ok && rp_keep_on()) {   /* 30.10.2026: те же проходы с раскладок после прошлого кадра (rp_keep_main); не вышло - прежние */
+        VkAttachmentDescription k3[3] = { a[0], a[1], a[2] };
+        k3[0].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; k3[2].initialLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        VkRenderPassCreateInfo r3 = rci; r3.pAttachments = k3;
+        for (int f = 0; f < 2; f++)
+            for (int ro = 0; ro < 2; ro++) {
+                k3[0].storeOp = k3[1].storeOp = f ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                k3[1].initialLayout = ro ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                if (vkCreateRenderPass(C->device, &r3, nullptr, &s_rpMSK[f][ro]) != VK_SUCCESS) s_rpMSK[f][ro] = VK_NULL_HANDLE;
+            }
+    }
     a[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; a[0].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     a[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; a[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    if (scap_resume_sync_on()) a[2].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;   /* 29.10: барьер в scap_switch */
     ok = ok && vkCreateRenderPass(C->device, &rci, nullptr, &s_rpMSResume) == VK_SUCCESS;
     ok = ok && pp_mkImage(VK_FORMAT_R8G8B8A8_UNORM, ns, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
                           W, H, &s_msColImg, &s_msColMem, &s_msColView);
@@ -1862,10 +2295,11 @@ static bool msaaBuild(int n, int ss, int W, int H) {
         msaaFree();
         return false;
     }
-    s_msN = n; s_msSS = ss; s_msW = W; s_msH = H; s_msResolveOf = s_colView; s_featMS = feat;
+    s_msN = n; s_msSS = ss; s_msW = W; s_msH = H; s_msResolveOf = s_colView; s_msColGen = s_colGen; s_featMS = feat;
     rlog("[VKR] MSAA %dx ready (%dx%d, per sample %d)\n", n, W, H, s_msSS);
-    std::fprintf(stderr, "post: MSAA %dx edge smoothing%s (targets %dx%d)%c", n,
-                 s_msSS == 2 ? ", per sample (lighting per pixel)" : s_msSS ? ", per sample" : "", W, H, 10);
+    std::fprintf(stderr, "post: MSAA %dx edge smoothing%s%s (targets %dx%d)%c", n,
+                 s_msSS == 2 ? ", per sample (lighting per pixel)" : s_msSS ? ", per sample" : "",
+                 (s_msSS == 1 && s_ppSloop && !s_ppSLfail && ms_radv_fix()) ? ", RADV sample interpolation workaround" : "", W, H, 10);
     { char w[48]; std::snprintf(w, sizeof w, "MSAA %dx at %dx%d", n, W, H); vram_note(w); }
     return true;
 }
@@ -1932,6 +2366,85 @@ static void feat_prewarm(int feat, int n, int ss) {
     s_featPrepMask = feat;
     s_featPrep = 2;
 }
+/* 30.10.2026 (план скорости, пункт 15): НАБОР БЕЗ РЕЛЬЕФА ВСПЫШКИ. С Materials off (низкий пресет) рельеф металла у вспышки
+ * (dc_raster.frag, поздний вызов metalRelief под sh.flp.w > 0) держит производные текстуры (10 чисел) живыми через весь шейдер:
+ * RGA, gfx1035 (RDNA2, как у Steam Deck и 680M) 75 VGPR -> 62 без него (6 волн на SIMD -> 8), gfx1103 77 -> 63. Константа 4
+ * (DC_F_FLASH_RELIEF) = false этот вызов убирает. В кадре без вспышки (s_flOn == 0: flp.w в блоке UBO = 0, ветка и так не идёт)
+ * картинка та же бит в бит. s_flOn ставит dc_flash_frame / dc_flash_put до записи кадра под тем же замком растра, блок UBO уходит
+ * при его отправке (cmdSubmitAsync) - выбор набора и вспышка в блоке одного кадра. Кадры со вспышкой - обычным набором (s_pipes).
+ * Набор строится в фоне, когда опции устоялись, и сразу идёт в дело; пока его нет - обычный. Только 1x: в низком пресете MSAA
+ * нет. Сброс - при смене опций (raster_feat_sync, после простоя GPU). DC_RASTER_NOFLASH=0 - как было (один набор). */
+static VkPipeline       s_pipesNF[13] = {};
+static std::mutex       s_nfMx;
+static std::atomic<int> s_nfReady{ 0 };              /* 1 - s_pipesNF собран под опции s_nfFeat */
+static int s_nfFeat = -1, s_nfBusy = 0, s_nfBad = -1;
+static unsigned s_nfGen = 0;                          /* сборка, начатая до сброса, свой набор уничтожает */
+static int nf_want(void) {
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DC_RASTER_NOFLASH"); on = (e && *e == '0') ? 0 : 1; }
+    return on;
+}
+/* фоновый поток: набор под опции feat без рельефа вспышки */
+static void nf_build(int feat, unsigned gen) {
+    LARGE_INTEGER fq, t0, t1; QueryPerformanceFrequency(&fq); QueryPerformanceCounter(&t0);
+    VkPipeline p[13] = {}, bg = VK_NULL_HANDLE;
+    const bool ok = mkRasterPipes(s_rp, VK_SAMPLE_COUNT_1_BIT, 0, p, &bg, feat | 4);
+    if (bg) vkDestroyPipeline(C->device, bg, nullptr);        /* фон - общий s_bgPipe */
+    QueryPerformanceCounter(&t1);
+    bool used = false, stale = false;
+    {
+        std::lock_guard<std::mutex> lk(s_nfMx);
+        stale = gen != s_nfGen;
+        if (!stale) {
+            s_nfBusy = 0;
+            if (ok) {
+                for (int k = 0; k < 13; k++) s_pipesNF[k] = p[k];
+                s_nfFeat = feat;
+                s_nfReady.store(1, std::memory_order_release);
+                used = true;
+            } else s_nfBad = feat;
+        }
+    }
+    if (!used) for (int k = 0; k < 13; k++) if (p[k]) vkDestroyPipeline(C->device, p[k], nullptr);
+    if (stale) return;
+    if (ok) std::fprintf(stderr, "raster: pipelines without the flash relief (frames without a flash, shadows %s, materials off) built "
+                         "in the background in %.0f ms (DC_RASTER_NOFLASH=1)%c", (feat & 1) ? "on" : "off",
+                         (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart, 10);
+    else std::fprintf(stderr, "raster: pipelines without the flash relief failed to build - frames use the usual ones%c", 10);
+}
+/* при смене опций, GPU простаивает (raster_feat_sync): набор под прежние опции - в сторону */
+static void nf_drop(void) {
+    std::lock_guard<std::mutex> lk(s_nfMx);
+    s_nfGen++; s_nfBusy = 0;
+    if (!s_nfReady.load(std::memory_order_relaxed)) return;
+    s_nfReady.store(0, std::memory_order_relaxed);
+    for (int k = 0; k < 13; k++) if (s_pipesNF[k]) { vkDestroyPipeline(C->device, s_pipesNF[k], nullptr); s_pipesNF[k] = VK_NULL_HANDLE; }
+    s_nfFeat = -1;
+}
+/* перед кадром, после raster_feat_sync: опции устоялись, Materials off, набора нет - строить в фоне */
+static void raster_nf_sync(void) {
+    if (!nf_want() || s_rasterSafe >= 2 || !s_rp) return;      /* уровень 2 (dc_raster_min) - без света вовсе */
+    const int feat = s_featPipes;
+    if ((feat & 2) || s_featGoal != feat || raster_feat_want() != feat) return;   /* с Materials позднего вызова и так нет */
+    if (s_nfReady.load(std::memory_order_acquire) && s_nfFeat == feat) return;
+    if (s_featPrep.load() == 1 || s_msPrewarm.load() == 1) return;                /* сначала - фоновые сборки опций и MSAA */
+    std::lock_guard<std::mutex> lk(s_nfMx);
+    if (s_nfBusy || s_nfBad == feat) return;
+    s_nfBusy = 1;
+    const unsigned gen = s_nfGen;
+    std::thread([feat, gen] { nf_build(feat, gen); }).detach();
+}
+/* набор 1x для записи кадра: без вспышки - без её рельефа, если готов (строки журнала - по разу на переход в каждую сторону) */
+static VkPipeline* raster_pipes_1x(void) {
+    if (!s_nfReady.load(std::memory_order_acquire) || s_nfFeat != s_featPipes) return s_pipes;
+    static int said = 0;                              /* под замком растра, как и весь кадр */
+    if (!s_flOn) {
+        if (!(said & 1)) { said |= 1; std::fprintf(stderr, "raster: frames without a flash - pipelines without its relief%c", 10); }
+        return s_pipesNF;
+    }
+    if (!(said & 2)) { said |= 2; std::fprintf(stderr, "raster: a frame with a flash - the usual pipelines (relief at the flash)%c", 10); }
+    return s_pipes;
+}
 /* перед кадром (A, B, дополнительные), до msaaEnsure; GPU простаивает (рендер синхронный) */
 static void raster_feat_sync(void) {
     if (s_featGoal < 0) s_featGoal = s_featPipes;
@@ -1959,6 +2472,7 @@ static void raster_feat_sync(void) {
     if (s_bgPipe) vkDestroyPipeline(C->device, s_bgPipe, nullptr);
     s_bgPipe = nbg;
     s_featPipes = s_featGoal;
+    nf_drop();                                       /* 30.10.2026: набор без рельефа вспышки - под прежние опции */
     QueryPerformanceCounter(&t1);
     std::fprintf(stderr, "raster: options in the shader - shadows %s, materials %s (pipelines again, %.1f ms)%c", (s_featPipes & 1) ? "on" : "off",
                  (s_featPipes & 2) ? "on" : "off", (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart, 10);
@@ -1975,7 +2489,7 @@ static int msaaEnsure(int fw, int fh, int has3d) {
     int want = s_ppMsaa > s_ppMsaaMax ? s_ppMsaaMax : s_ppMsaa;
     if (s_ppMsaaFail) want = 1;
     if (want <= 1) { if (s_msN > 1) msaaBuild(1, 0, 0, 0); return 1; }
-    const int ss = (s_ppSshade && s_ppSSok) ? ((s_ppSloop && !s_ppSLfail) ? 2 : 1) : 0;   /* 09.10: 2 — свет на пиксель */
+    const int ss = (s_ppSshade && s_ppSSok) ? ((s_ppSloop && !s_ppSLfail && !ms_radv_fix()) ? 2 : 1) : 0;   /* 09.10: 2 — свет на пиксель; 30.10: не на RADV */
     /* 11.10: the first frame that wants MSAA starts its set in the background and goes without it, as do the next ones
      * until the set is in the cache (the settings of dc_user.cfg are applied by then - the set is the right one) */
     { static int pw = -1;
@@ -1989,14 +2503,16 @@ static int msaaEnsure(int fw, int fh, int has3d) {
     if (fit < 0) { const char* e = getenv("DC_MSAA_FIT"); fit = (e && *e == '0') ? 0 : 1; }
     const int featOk = s_featGoal < 0 || s_featMS == s_featGoal;   /* 25.10.2026: набор MSAA - под нынешние опции */
     if (!fit) {
-        if (s_msN != want || s_msSS != ss || s_msW != s_fbW || s_msH != s_fbH || s_msResolveOf != s_colView || !featOk) {
+        if (s_msN != want || s_msSS != ss || s_msW != s_fbW || s_msH != s_fbH || s_msResolveOf != s_colView || !featOk ||
+            (vk_viewgen_on() && s_msColGen != s_colGen)) {
             if (!msaaBuild(want, ss, s_fbW, s_fbH)) { s_ppMsaaFail = 1; return 1; }
         }
         return s_msN;
     }
     if (fw > s_fbW) fw = s_fbW;
     if (fh > s_fbH) fh = s_fbH;
-    const int same = s_msN == want && s_msSS == ss && s_msResolveOf == s_colView && featOk;
+    const int same = s_msN == want && s_msSS == ss && s_msResolveOf == s_colView && featOk &&
+                     (!vk_viewgen_on() || s_msColGen == s_colGen);
     if (same && fw <= s_msW && fh <= s_msH) return s_msN;          /* кадр помещается в цели */
     if (!has3d) return 1;                                           /* плоский экран: без MSAA, цели не трогаем */
     const int tw = same ? std::max(fw, s_msW) : fw, th = same ? std::max(fh, s_msH) : fh;
@@ -2009,6 +2525,7 @@ static VkRenderPass          s_rpZ = VK_NULL_HANDLE, s_rpAO = VK_NULL_HANDLE, s_
 static VkImage               s_zImg = VK_NULL_HANDLE, s_aoImg = VK_NULL_HANDLE;
 static VkDeviceMemory        s_zMem = VK_NULL_HANDLE, s_aoMem = VK_NULL_HANDLE;
 static VkImageView           s_zView = VK_NULL_HANDLE, s_aoView = VK_NULL_HANDLE;
+static unsigned              s_zGen = 0;                          /* 29.10.2026: пересоздания s_zView (дымке) */
 static VkFramebuffer         s_fbZ = VK_NULL_HANDLE, s_fbAO = VK_NULL_HANDLE, s_fbComp = VK_NULL_HANDLE;
 static VkDescriptorSetLayout s_pdsl = VK_NULL_HANDLE;
 static VkPipelineLayout      s_pplLay = VK_NULL_HANDLE;
@@ -2020,9 +2537,70 @@ static VkPipeline            s_aoPipe = VK_NULL_HANDLE, s_compPipe = VK_NULL_HAN
 static int                   s_ppOk = 0;                          /* 1 — собрано, -1 — не вышло (SSAO не будет) */
 static int                   s_ppW = 0, s_ppH = 0;
 static VkImageView           s_ppColOf = VK_NULL_HANDLE;           /* цветная цель, под которую собраны буферы */
+static unsigned              s_ppColGen = 0;                      /* 29.10.2026: и её поколение */
 static VkImageView           s_ppDepBound = VK_NULL_HANDLE;        /* какая глубина сейчас в биндинге 0 */
+/* ⭐ 29.10.2026 (зависание на смене MSAA): глубина MSAA пересоздаётся при смене числа выборок без смены размера кадра (буферы
+ * SSAO при этом не пересобираются), и новый объект может получить тот же адрес, что прежний: сверка по адресу оставляла в
+ * наборе дескрипторов уничтоженную глубину, проход глубины SSAO читал её, и видеокарта вставала в нём (метки времени кадра:
+ * дошла до 13, нет 10; забор не приходил, порт молчал; и с DC_VK_ASYNC=0). Теперь сверка и по поколению глубины MSAA.
+ * DC_VK_VIEWGEN=0 - как было (см. s_colGen). */
+static unsigned              s_ppDepGen = 0;
+static int pp_depgen_on(void) { return vk_viewgen_on(); }
+static int pp_dep_stale(VkImageView depView, int msN) {   /* привязку глубины SSAO (binding 0) - заново? */
+    if (s_ppDepBound != depView) return 1;
+    if (msN > 1 && s_ppDepGen != s_msDepGen && pp_depgen_on()) {
+        static int said = 0;
+        if (said++ < 8)
+            std::fprintf(stderr, "post: the MSAA depth was made again under the same handle - the SSAO depth binding is written again%c", 10);
+        return 1;
+    }
+    return 0;
+}
+/* 29.10.2026 (пункт 10 плана скорости): цель прохода 1 - две, R32F (±w) и R8 (сырая альфа m), вместо одной RG32F
+ * (dc_ssao_z2.frag, dc_ssao_comp2.frag): проходы 2 и 3 и дымка на каждой выборке глубины читают 4 байта вместо 8.
+ * s_zsplit: 1 - собраны и идут они, 0 - прежний путь (DC_SSAO_ZSPLIT=0 или что-то не собралось). */
+static int                   s_zsplit = 0;
+static VkRenderPass          s_rpZ2 = VK_NULL_HANDLE;
+static VkImage               s_mImg = VK_NULL_HANDLE;
+static VkDeviceMemory        s_mMem = VK_NULL_HANDLE;
+static VkImageView           s_mView = VK_NULL_HANDLE;
+static VkDescriptorSet       s_pdset2 = VK_NULL_HANDLE;           /* проход 3: 1 маска, 2 затенение, 3 глубина */
+static VkPipeline            s_zPipe2[2] = {};
+static VkPipeline            s_compPipe2 = VK_NULL_HANDLE, s_compDbgPipe2 = VK_NULL_HANDLE;
+/* ⭐ 30.10.2026 (игрок: «сделай SSAO в низком пресете дешевле»; замер низкого пресета: SSAO - около 0.30 из 0.82 мс видеокарты
+ * на картинку): затенение в ЧЕТВЕРТЬ разрешения - точек в 4 раза меньше (dc_ssao_q.frag), размытие на самой сетке отдельным
+ * проходом во вторую цель s_ao2Img (dc_ssao_qblur.frag), кадр берёт 2x2 ближайших клетки с весами (dc_ssao_comp2_q.frag).
+ * Только с раздельными целями прохода 1 (s_zsplit: маска R8). Просит main.cpp (dcvk_post_ao_quarter_set): графика понижена
+ * для слабой видеокарты и затенение Low. DC_SSAO_QUARTER: 0 - как было (не собирается), 1 (умолч.) - так, 2 - всегда
+ * (проверка). s_ppStep - шаг сетки затенения, под который собраны цели (2 или 4). */
+static std::atomic<int>      s_aoQuarter{ 0 };      /* пишет main.cpp на такте, читают кадр и кадры между тактами (поток показа) */
+static int                   s_aoQok = 0, s_ppStep = 0, s_ao2Used = 0;
+static VkImage               s_ao2Img = VK_NULL_HANDLE;
+static VkDeviceMemory        s_ao2Mem = VK_NULL_HANDLE;
+static VkImageView           s_ao2View = VK_NULL_HANDLE;
+static VkFramebuffer         s_fbAO2 = VK_NULL_HANDLE;
+static VkDescriptorSet       s_pdset3 = VK_NULL_HANDLE;           /* проход 3 четверти: 1 маска, 2 размытое, 3 глубина */
+static VkPipeline            s_aoPipeQ = VK_NULL_HANDLE, s_aoBlurPipe = VK_NULL_HANDLE;
+static VkPipeline            s_compPipe2Q = VK_NULL_HANDLE, s_compDbgPipe2Q = VK_NULL_HANDLE;
+static int ao_zsplit_want(void) {      /* 29.10.2026: DC_SSAO_ZSPLIT=0 - прежняя цель RG32F (тогда и без четверти) */
+    static int zs = -1;
+    if (zs < 0) { const char* e = getenv("DC_SSAO_ZSPLIT"); zs = (e && *e == '0') ? 0 : 1; }
+    return zs;
+}
+static int ao_quarter_mode(void) {
+    static int m = -1;
+    if (m < 0) {
+        const char* e = getenv("DC_SSAO_QUARTER");
+        m = (e && *e == '0') ? 0 : (e && *e == '2') ? 2 : 1;
+        if (!ao_zsplit_want()) m = 0;    /* 30.10 (разбор): четверть - только с раздельными целями; без неё и предел Medium (main.cpp) */
+    }
+    return m;
+}
+extern "C" void dcvk_post_ao_quarter_set(int on) { s_aoQuarter.store(on ? 1 : 0, std::memory_order_relaxed); }
+extern "C" int  dcvk_post_ao_quarter_mode(void) { return ao_quarter_mode(); }
 
-static bool pp_mkPipe(VkShaderModule vsm, const char* fsPath, int multiply, VkRenderPass rp, VkPipeline* out) {
+/* natt - число цветных вложений прохода (29.10: 2 у прохода 1 с раздельными целями), смешение у всех одно */
+static bool pp_mkPipeN(VkShaderModule vsm, const char* fsPath, int multiply, VkRenderPass rp, int natt, VkPipeline* out) {
     VkShaderModule fsm = loadSpv(fsPath);
     if (!fsm) return false;
     VkPipelineShaderStageCreateInfo st[2]{};
@@ -2050,8 +2628,9 @@ static bool pp_mkPipe(VkShaderModule vsm, const char* fsPath, int multiply, VkRe
         ba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE; ba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
         ba.alphaBlendOp = VK_BLEND_OP_ADD;
     }
+    VkPipelineColorBlendAttachmentState bas[2] = { ba, ba };
     VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
-    cb.attachmentCount = 1; cb.pAttachments = &ba;
+    cb.attachmentCount = (natt == 2) ? 2u : 1u; cb.pAttachments = bas;
     VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
     VkPipelineDynamicStateCreateInfo dst{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
     dst.dynamicStateCount = 2; dst.pDynamicStates = dyn;
@@ -2066,19 +2645,28 @@ static bool pp_mkPipe(VkShaderModule vsm, const char* fsPath, int multiply, VkRe
     if (!ok) rlog("[VKR] post pipeline %s FAILED\n", fsPath);
     return ok;
 }
-static bool pp_mkPass(VkFormat fmt, int load, VkImageLayout initial, VkImageLayout fin,
-                      VkPipelineStageFlags inSrc, VkPipelineStageFlags outDst, VkAccessFlags outAcc, VkRenderPass* out) {
-    VkAttachmentDescription a{};
-    a.format = fmt; a.samples = VK_SAMPLE_COUNT_1_BIT;
-    a.loadOp = (load == 2) ? VK_ATTACHMENT_LOAD_OP_CLEAR     /* 09.10: заливка при начале (рамка заслонивших) */
-             : load ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    a.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; a.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    a.initialLayout = initial; a.finalLayout = fin;
-    VkAttachmentReference r{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+static bool pp_mkPipe(VkShaderModule vsm, const char* fsPath, int multiply, VkRenderPass rp, VkPipeline* out) {
+    return pp_mkPipeN(vsm, fsPath, multiply, rp, 1, out);
+}
+/* nfmt - число цветных вложений (29.10: 2 у прохода 1 SSAO с раздельными целями), у всех одни загрузка и раскладки */
+static bool pp_mkPassN(const VkFormat* fmts, int nfmt, int load, VkImageLayout initial, VkImageLayout fin,
+                       VkPipelineStageFlags inSrc, VkPipelineStageFlags outDst, VkAccessFlags outAcc, VkRenderPass* out) {
+    const int n = (nfmt == 2) ? 2 : 1;
+    VkAttachmentDescription aa[2]{};
+    VkAttachmentReference rr[2]{};
+    for (int i = 0; i < n; i++) {
+        VkAttachmentDescription& a = aa[i];
+        a.format = fmts[i]; a.samples = VK_SAMPLE_COUNT_1_BIT;
+        a.loadOp = (load == 2) ? VK_ATTACHMENT_LOAD_OP_CLEAR     /* 09.10: заливка при начале (рамка заслонивших) */
+                 : load ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        a.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; a.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        a.initialLayout = initial; a.finalLayout = fin;
+        rr[i] = { (uint32_t)i, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+    }
     VkSubpassDescription sp{};
     sp.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    sp.colorAttachmentCount = 1; sp.pColorAttachments = &r;
+    sp.colorAttachmentCount = (uint32_t)n; sp.pColorAttachments = rr;
     VkSubpassDependency d[2]{};
     d[0].srcSubpass = VK_SUBPASS_EXTERNAL; d[0].dstSubpass = 0;
     d[0].srcStageMask = inSrc; d[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -2087,9 +2675,13 @@ static bool pp_mkPass(VkFormat fmt, int load, VkImageLayout initial, VkImageLayo
     d[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; d[1].dstStageMask = outDst;
     d[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; d[1].dstAccessMask = outAcc;
     VkRenderPassCreateInfo rci{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
-    rci.attachmentCount = 1; rci.pAttachments = &a; rci.subpassCount = 1; rci.pSubpasses = &sp;
+    rci.attachmentCount = (uint32_t)n; rci.pAttachments = aa; rci.subpassCount = 1; rci.pSubpasses = &sp;
     rci.dependencyCount = 2; rci.pDependencies = d;
     return vkCreateRenderPass(C->device, &rci, nullptr, out) == VK_SUCCESS;
+}
+static bool pp_mkPass(VkFormat fmt, int load, VkImageLayout initial, VkImageLayout fin,
+                      VkPipelineStageFlags inSrc, VkPipelineStageFlags outDst, VkAccessFlags outAcc, VkRenderPass* out) {
+    return pp_mkPassN(&fmt, 1, load, initial, fin, inSrc, outDst, outAcc, out);
 }
 /* 18.10.2026: объекты SSAO без целей (проходы, раскладка, конвейеры) - отдельно: их заранее строит экран подготовки шейдеров
  * (dcvk_prepare_all); цели зависят от размера кадра и делаются на первом кадре мира, как раньше. 1 - собраны. */
@@ -2109,9 +2701,9 @@ static int postObjects(void) {
         VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
         plci.setLayoutCount = 1; plci.pSetLayouts = &s_pdsl; plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pr;
         if (vkCreatePipelineLayout(C->device, &plci, nullptr, &s_pplLay) != VK_SUCCESS) return 0;
-        VkDescriptorPoolSize psz{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4 };
+        VkDescriptorPoolSize psz{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 12 };    /* 29.10: + s_pdset2; 30.10: + s_pdset3 */
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-        dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &psz;
+        dpci.maxSets = 3; dpci.poolSizeCount = 1; dpci.pPoolSizes = &psz;
         if (vkCreateDescriptorPool(C->device, &dpci, nullptr, &s_pdpool) != VK_SUCCESS) return 0;
         VkDescriptorSetAllocateInfo dsa{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
         dsa.descriptorPool = s_pdpool; dsa.descriptorSetCount = 1; dsa.pSetLayouts = &s_pdsl;
@@ -2140,10 +2732,49 @@ static int postObjects(void) {
                      && pp_mkPipe(pvs, "shaders\\dc_ssao.frag.spv",       0, s_rpAO,   &s_aoPipe)
                      && pp_mkPipe(pvs, "shaders\\dc_ssao_comp.frag.spv",  1, s_rpComp, &s_compPipe)
                      && pp_mkPipe(pvs, "shaders\\dc_ssao_comp.frag.spv",  0, s_rpComp, &s_compDbgPipe);
+        /* 29.10.2026: раздельные цели прохода 1 (см. s_zsplit). Не собралось - остаётся прежний путь RG32F, SSAO работает */
+        if (ok) {
+            if (ao_zsplit_want()) {
+                const VkFormat zf[2] = { VK_FORMAT_R32_SFLOAT, VK_FORMAT_R8_UNORM };
+                VkDescriptorSetAllocateInfo dsa2{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+                dsa2.descriptorPool = s_pdpool; dsa2.descriptorSetCount = 1; dsa2.pSetLayouts = &s_pdsl;
+                const bool ok2 = pp_mkPassN(zf, 2, 0, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                            VK_ACCESS_SHADER_READ_BIT, &s_rpZ2)
+                              && vkAllocateDescriptorSets(C->device, &dsa2, &s_pdset2) == VK_SUCCESS
+                              && pp_mkPipeN(pvs, "shaders\\dc_ssao_z2.frag.spv",    0, s_rpZ2,    2, &s_zPipe2[0])
+                              && pp_mkPipeN(pvs, "shaders\\dc_ssao_z2_ms.frag.spv", 0, s_rpZ2,    2, &s_zPipe2[1])
+                              && pp_mkPipe(pvs, "shaders\\dc_ssao_comp2.frag.spv",  1, s_rpComp, &s_compPipe2)
+                              && pp_mkPipe(pvs, "shaders\\dc_ssao_comp2.frag.spv",  0, s_rpComp, &s_compDbgPipe2);
+                s_zsplit = ok2 ? 1 : 0;
+                if (!ok2) std::fprintf(stderr, "post: SSAO split depth (R32F + R8) not built - RG32F as before%c", 10);
+                if (ok2 && ao_quarter_mode()) {   /* 30.10.2026: четверть (s_aoQuarter); не собралось - только половинная сетка */
+                    s_aoQok = (vkAllocateDescriptorSets(C->device, &dsa2, &s_pdset3) == VK_SUCCESS
+                               && pp_mkPipe(pvs, "shaders\\dc_ssao_q.frag.spv",       0, s_rpAO,   &s_aoPipeQ)
+                               && pp_mkPipe(pvs, "shaders\\dc_ssao_qblur.frag.spv",   0, s_rpAO,   &s_aoBlurPipe)
+                               && pp_mkPipe(pvs, "shaders\\dc_ssao_comp2_q.frag.spv", 1, s_rpComp, &s_compPipe2Q)
+                               && pp_mkPipe(pvs, "shaders\\dc_ssao_comp2_q.frag.spv", 0, s_rpComp, &s_compDbgPipe2Q)) ? 1 : 0;
+                    if (!s_aoQok) std::fprintf(stderr, "post: SSAO at quarter resolution not built - half resolution only%c", 10);
+                }
+            }
+        }
         vkDestroyShaderModule(C->device, pvs, nullptr);
         if (!ok) { std::fprintf(stderr, "post: SSAO pipelines failed to build - no SSAO%c", 10); return 0; }
         s_ppOk = 1;
-        rlog("[VKR] SSAO ready\n");
+        if (rp_keep_on()) {   /* 30.10.2026: те же проходы с начала в SHADER_READ_ONLY (цель уже рисовалась); не вышло - прежние */
+            const VkFormat zf2[2] = { VK_FORMAT_R32_SFLOAT, VK_FORMAT_R8_UNORM };
+            if (!pp_mkPass(VK_FORMAT_R32G32_SFLOAT, 0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, &s_rpZk))
+                s_rpZk = VK_NULL_HANDLE;
+            if (!pp_mkPass(VK_FORMAT_R32G32_SFLOAT, 0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, &s_rpAOk))
+                s_rpAOk = VK_NULL_HANDLE;
+            if (s_zsplit && !pp_mkPassN(zf2, 2, 0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                        VK_ACCESS_SHADER_READ_BIT, &s_rpZ2k))
+                s_rpZ2k = VK_NULL_HANDLE;
+        }
+        rlog("[VKR] SSAO ready%s%s\n", s_zsplit ? " (split depth R32F + R8)" : "", s_aoQok ? " (quarter resolution ready)" : "");
     }
     return 1;
 }
@@ -2154,10 +2785,11 @@ static int postObjects(void) {
  * начале кадра A и B, до postEnsure / fxEnsure / volEnsure. DC_POST_FIT=0 - во всю цель, как было. */
 static int s_pfW = 0, s_pfH = 0;
 static VkImageView s_pfOf = VK_NULL_HANDLE;
+static unsigned s_pfGen = 0;   /* 29.10.2026: поколение s_pfOf (s_colGen) */
 static void post_fit_note(int w, int h, int has3d) {
     static int on = -1;
     if (on < 0) { const char* e = getenv("DC_POST_FIT"); on = (e && *e == '0') ? 0 : 1; }
-    if (s_pfOf != s_colView) { s_pfOf = s_colView; s_pfW = s_pfH = 0; }
+    if (s_pfOf != s_colView || (vk_viewgen_on() && s_pfGen != s_colGen)) { s_pfOf = s_colView; s_pfGen = s_colGen; s_pfW = s_pfH = 0; }
     if (!on || !has3d) return;
     if (w > s_fbW) w = s_fbW;
     if (h > s_fbH) h = s_fbH;
@@ -2165,7 +2797,7 @@ static void post_fit_note(int w, int h, int has3d) {
     if (h > s_pfH) s_pfH = h;
 }
 static void post_fit_size(int* w, int* h) {
-    const int ok = s_pfOf == s_colView && s_pfW > 0 && s_pfH > 0;
+    const int ok = s_pfOf == s_colView && (!vk_viewgen_on() || s_pfGen == s_colGen) && s_pfW > 0 && s_pfH > 0;
     *w = ok ? s_pfW : s_fbW; *h = ok ? s_pfH : s_fbH;
 }
 /* 1 — SSAO можно гнать в этом кадре (всё собрано под текущую цветную цель). До записи команд кадра. */
@@ -2173,26 +2805,44 @@ static int postEnsure(void) {
     if (s_ppOk < 0) return 0;
     if (!s_ppOk && !postObjects()) return 0;
     int TW, TH; post_fit_size(&TW, &TH);
-    if (s_ppW != TW || s_ppH != TH || s_ppColOf != s_colView) {
+    const int qm = ao_quarter_mode();
+    const int step = (s_aoQok && (qm == 2 || (qm == 1 && s_aoQuarter.load(std::memory_order_relaxed)))) ? 4 : 2;   /* 30.10.2026: сетка затенения */
+    if (s_ppW != TW || s_ppH != TH || s_ppColOf != s_colView || (vk_viewgen_on() && s_ppColGen != s_colGen) || s_ppStep != step) {
         vkDeviceWaitIdle(C->device);
         if (s_fbZ)    { vkDestroyFramebuffer(C->device, s_fbZ, nullptr);    s_fbZ = VK_NULL_HANDLE; }
         if (s_fbAO)   { vkDestroyFramebuffer(C->device, s_fbAO, nullptr);   s_fbAO = VK_NULL_HANDLE; }
+        if (s_fbAO2)  { vkDestroyFramebuffer(C->device, s_fbAO2, nullptr);  s_fbAO2 = VK_NULL_HANDLE; }
         if (s_fbComp) { vkDestroyFramebuffer(C->device, s_fbComp, nullptr); s_fbComp = VK_NULL_HANDLE; }
-        pp_freeImage(&s_zImg, &s_zMem, &s_zView);
+        pp_freeImage(&s_zImg, &s_zMem, &s_zView); s_zGen++;
+        pp_freeImage(&s_mImg, &s_mMem, &s_mView);
         pp_freeImage(&s_aoImg, &s_aoMem, &s_aoView);
-        const int hw = (TW + 1) / 2, hh = (TH + 1) / 2;
-        bool ok = pp_mkImage(VK_FORMAT_R32G32_SFLOAT, VK_SAMPLE_COUNT_1_BIT,     /* 01.10: + доля затенения в g */
+        pp_freeImage(&s_ao2Img, &s_ao2Mem, &s_ao2View);
+        if (s_ppStep != step && (s_ppStep != 0 || step == 4))   /* 30.10 (разбор): первая сборка на половинной - без строки, как было */
+            std::fprintf(stderr, "post: SSAO occlusion at %s resolution (DC_SSAO_QUARTER=%d)%c", step == 4 ? "quarter" : "half", qm, 10);
+        const int hw = (TW + step - 1) / step, hh = (TH + step - 1) / step;
+        /* 01.10: + доля затенения в g; 29.10: с раздельными целями (s_zsplit) - R32F и маска R8 */
+        bool ok = pp_mkImage(s_zsplit ? VK_FORMAT_R32_SFLOAT : VK_FORMAT_R32G32_SFLOAT, VK_SAMPLE_COUNT_1_BIT,
                              VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
                              TW, TH, &s_zImg, &s_zMem, &s_zView)
+               && (!s_zsplit || pp_mkImage(VK_FORMAT_R8_UNORM, VK_SAMPLE_COUNT_1_BIT,
+                             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
+                             TW, TH, &s_mImg, &s_mMem, &s_mView))
                && pp_mkImage(VK_FORMAT_R32G32_SFLOAT, VK_SAMPLE_COUNT_1_BIT,
                              VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
-                             hw, hh, &s_aoImg, &s_aoMem, &s_aoView);
+                             hw, hh, &s_aoImg, &s_aoMem, &s_aoView)
+               && (step != 4 || pp_mkImage(VK_FORMAT_R32G32_SFLOAT, VK_SAMPLE_COUNT_1_BIT,     /* 30.10: размытая четверть */
+                             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
+                             hw, hh, &s_ao2Img, &s_ao2Mem, &s_ao2View));
         VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
         fci.attachmentCount = 1; fci.layers = 1;
-        if (ok) { fci.renderPass = s_rpZ; fci.pAttachments = &s_zView; fci.width = (uint32_t)TW; fci.height = (uint32_t)TH;
-                  ok = vkCreateFramebuffer(C->device, &fci, nullptr, &s_fbZ) == VK_SUCCESS; }
+        const VkImageView zatt[2] = { s_zView, s_mView };
+        if (ok) { fci.renderPass = s_zsplit ? s_rpZ2 : s_rpZ; fci.attachmentCount = s_zsplit ? 2u : 1u; fci.pAttachments = zatt;
+                  fci.width = (uint32_t)TW; fci.height = (uint32_t)TH;
+                  ok = vkCreateFramebuffer(C->device, &fci, nullptr, &s_fbZ) == VK_SUCCESS; fci.attachmentCount = 1; }
         if (ok) { fci.renderPass = s_rpAO; fci.pAttachments = &s_aoView; fci.width = (uint32_t)hw; fci.height = (uint32_t)hh;
                   ok = vkCreateFramebuffer(C->device, &fci, nullptr, &s_fbAO) == VK_SUCCESS; }
+        if (ok && step == 4) { fci.pAttachments = &s_ao2View;
+                  ok = vkCreateFramebuffer(C->device, &fci, nullptr, &s_fbAO2) == VK_SUCCESS; }
         if (ok) { fci.renderPass = s_rpComp; fci.pAttachments = &s_colView; fci.width = (uint32_t)s_fbW; fci.height = (uint32_t)s_fbH;
                   ok = vkCreateFramebuffer(C->device, &fci, nullptr, &s_fbComp) == VK_SUCCESS; }
         if (!ok) { s_ppOk = -1; std::fprintf(stderr, "post: SSAO buffers not created - no SSAO%c", 10); return 0; }
@@ -2205,8 +2855,19 @@ static int postEnsure(void) {
             wd[i].descriptorCount = 1; wd[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; wd[i].pImageInfo = &ii[i];
         }
         vkUpdateDescriptorSets(C->device, 3, wd, 0, nullptr);
+        if (s_zsplit) {                      /* 29.10: набор прохода 3 - маска вместо цветной цели (binding 0 он не читает) */
+            ii[0].imageView = s_mView;
+            for (int i = 0; i < 3; i++) wd[i].dstSet = s_pdset2;
+            vkUpdateDescriptorSets(C->device, 3, wd, 0, nullptr);
+            if (step == 4) {                 /* 30.10: набор прохода 3 четверти - размытая сетка вместо сырой */
+                ii[1].imageView = s_ao2View;
+                for (int i = 0; i < 3; i++) wd[i].dstSet = s_pdset3;
+                vkUpdateDescriptorSets(C->device, 3, wd, 0, nullptr);
+            }
+        }
         s_ppDepBound = VK_NULL_HANDLE;
-        s_ppW = TW; s_ppH = TH; s_ppColOf = s_colView;
+        s_ppW = TW; s_ppH = TH; s_ppColOf = s_colView; s_ppColGen = s_colGen; s_ppStep = step;
+        s_zUsed = s_aoUsed = s_ao2Used = 0;   /* 30.10.2026: цели SSAO новые - первый проход с UNDEFINED */
         { char wn[48]; std::snprintf(wn, sizeof wn, "SSAO at %dx%d", TW, TH); vram_note(wn); }
     }
     return 1;
@@ -2215,13 +2876,13 @@ static int postEnsure(void) {
 static void pp_run(int w, int h, int msN, const float* view, const float* wp) {
     const VkImage     depImg  = (msN > 1) ? s_msDepImg  : s_depImg;
     const VkImageView depView = (msN > 1) ? s_msDepView : s_depView;
-    if (s_ppDepBound != depView) {
+    if (pp_dep_stale(depView, msN)) {
         VkDescriptorImageInfo di{ s_pSamp, depView, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL };
         VkWriteDescriptorSet wd{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
         wd.dstSet = s_pdset; wd.dstBinding = 0; wd.descriptorCount = 1;
         wd.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; wd.pImageInfo = &di;
         vkUpdateDescriptorSets(C->device, 1, &wd, 0, nullptr);
-        s_ppDepBound = depView;
+        s_ppDepBound = depView; s_ppDepGen = s_msDepGen;
     }
     VkImageMemoryBarrier b[2]{};
     for (int i = 0; i < 2; i++) {
@@ -2241,8 +2902,9 @@ static void pp_run(int w, int h, int msN, const float* view, const float* wp) {
                             (float)w, (float)h, 1.f / (float)w, 1.f / (float)h,
                             s_pp[PP_RADIUS], s_pp[PP_STRENGTH], s_pp[PP_BIAS], s_pp[PP_SAMPLES],
                             s_pp[PP_MAXPX], s_pp[PP_BLUR], (float)s_ppDbg, 0.f };
-    const int hw = (w + 1) / 2, hh = (h + 1) / 2;
-    auto pass = [&](VkRenderPass rp, VkFramebuffer fb, int pw, int ph, VkPipeline pipe) {
+    const int q = (s_ppStep == 4);                                 /* 30.10.2026: затенение в четверть разрешения */
+    const int hw = q ? (w + 3) / 4 : (w + 1) / 2, hh = q ? (h + 3) / 4 : (h + 1) / 2;
+    auto pass = [&](VkRenderPass rp, VkFramebuffer fb, int pw, int ph, VkPipeline pipe, VkDescriptorSet set) {
         const VkViewport vpt{ 0.f, 0.f, (float)pw, (float)ph, 0.f, 1.f };
         const VkRect2D sc{ { 0, 0 }, { (uint32_t)pw, (uint32_t)ph } };
         VkRenderPassBeginInfo rb{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
@@ -2250,15 +2912,20 @@ static void pp_run(int w, int h, int msN, const float* view, const float* wp) {
         vkCmdBeginRenderPass(s_cmd, &rb, VK_SUBPASS_CONTENTS_INLINE);
         vkCmdSetViewport(s_cmd, 0, 1, &vpt); vkCmdSetScissor(s_cmd, 0, 1, &sc);
         vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-        vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pplLay, 0, 1, &s_pdset, 0, nullptr);
+        vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pplLay, 0, 1, &set, 0, nullptr);
         vkCmdPushConstants(s_cmd, s_pplLay, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pcs, pcs);
         vkCmdDraw(s_cmd, 3, 1, 0, 0);
         vkCmdEndRenderPass(s_cmd);
     };
-    pass(s_rpZ, s_fbZ, w, h, s_zPipe[(msN > 1) ? 1 : 0]);         /* 1: линейная глубина + маска */
+    const int zi = (msN > 1) ? 1 : 0;                              /* 1: линейная глубина + маска (29.10: s_zsplit - две цели) */
+    rp_keep_dep_ro(msN);   /* 30.10.2026: глубина кадра - в READ_ONLY (барьер выше); s_zImg, s_aoImg - с прошлого раза */
+    pass(s_zsplit ? rp_keep_pick(s_rpZ2, s_rpZ2k, s_zUsed) : rp_keep_pick(s_rpZ, s_rpZk, s_zUsed), s_fbZ, w, h,
+         s_zsplit ? s_zPipe2[zi] : s_zPipe[zi], s_pdset);
+    s_zUsed = rp_keep_on();
     pp_ts(10);                                                     /* 09.10 (2): DC_VK_STAGES */
-    pass(s_rpAO, s_fbAO, hw, hh, s_aoPipe);                        /* 2: затенение, половинная сетка */
+    pass(rp_keep_pick(s_rpAO, s_rpAOk, s_aoUsed), s_fbAO, hw, hh, q ? s_aoPipeQ : s_aoPipe, s_pdset); s_aoUsed = rp_keep_on();   /* 2: затенение, половинная сетка (или четверть) */
     pp_ts(11);
+    if (q) { pass(rp_keep_pick(s_rpAO, s_rpAOk, s_ao2Used), s_fbAO2, hw, hh, s_aoBlurPipe, s_pdset); s_ao2Used = rp_keep_on(); }   /* 30.10: размытие четверти */
     VkImageMemoryBarrier c{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
     c.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; c.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     c.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
@@ -2267,7 +2934,9 @@ static void pp_run(int w, int h, int msN, const float* view, const float* wp) {
     c.srcQueueFamilyIndex = c.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     vkCmdPipelineBarrier(s_cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                          0, 0, nullptr, 0, nullptr, 1, &c);
-    pass(s_rpComp, s_fbComp, w, h, s_ppDbg ? s_compDbgPipe : s_compPipe);   /* 3: размытие + умножение кадра */
+    if (q)             pass(s_rpComp, s_fbComp, w, h, s_ppDbg ? s_compDbgPipe2Q : s_compPipe2Q, s_pdset3);   /* 30.10: 2x2 клетки четверти */
+    else if (s_zsplit) pass(s_rpComp, s_fbComp, w, h, s_ppDbg ? s_compDbgPipe2 : s_compPipe2, s_pdset2);
+    else               pass(s_rpComp, s_fbComp, w, h, s_ppDbg ? s_compDbgPipe : s_compPipe, s_pdset);   /* 3: размытие + умножение кадра */
     pp_ts(12);
 }
 /* 27.09: только проход 1 (линейная глубина + маска) — для дымки у ламп, когда SSAO выключен (меню GRAPHICS -> Ambient
@@ -2275,13 +2944,13 @@ static void pp_run(int w, int h, int msN, const float* view, const float* wp) {
 static void pp_zonly(int w, int h, int msN, const float* view, const float* wp) {
     const VkImage     depImg  = (msN > 1) ? s_msDepImg  : s_depImg;
     const VkImageView depView = (msN > 1) ? s_msDepView : s_depView;
-    if (s_ppDepBound != depView) {
+    if (pp_dep_stale(depView, msN)) {
         VkDescriptorImageInfo di{ s_pSamp, depView, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL };
         VkWriteDescriptorSet wd{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
         wd.dstSet = s_pdset; wd.dstBinding = 0; wd.descriptorCount = 1;
         wd.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; wd.pImageInfo = &di;
         vkUpdateDescriptorSets(C->device, 1, &wd, 0, nullptr);
-        s_ppDepBound = depView;
+        s_ppDepBound = depView; s_ppDepGen = s_msDepGen;
     }
     VkImageMemoryBarrier b[2]{};
     for (int i = 0; i < 2; i++) {
@@ -2304,10 +2973,11 @@ static void pp_zonly(int w, int h, int msN, const float* view, const float* wp) 
     const VkViewport vpt{ 0.f, 0.f, (float)w, (float)h, 0.f, 1.f };
     const VkRect2D sc{ { 0, 0 }, { (uint32_t)w, (uint32_t)h } };
     VkRenderPassBeginInfo rb{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
-    rb.renderPass = s_rpZ; rb.framebuffer = s_fbZ; rb.renderArea = sc;
+    rp_keep_dep_ro(msN);   /* 30.10.2026: глубина кадра - в READ_ONLY (барьер выше) */
+    rb.renderPass = s_zsplit ? rp_keep_pick(s_rpZ2, s_rpZ2k, s_zUsed) : rp_keep_pick(s_rpZ, s_rpZk, s_zUsed); s_zUsed = rp_keep_on(); rb.framebuffer = s_fbZ; rb.renderArea = sc;   /* 29.10: s_zsplit */
     vkCmdBeginRenderPass(s_cmd, &rb, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdSetViewport(s_cmd, 0, 1, &vpt); vkCmdSetScissor(s_cmd, 0, 1, &sc);
-    vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_zPipe[(msN > 1) ? 1 : 0]);
+    vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_zsplit ? s_zPipe2[(msN > 1) ? 1 : 0] : s_zPipe[(msN > 1) ? 1 : 0]);
     vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pplLay, 0, 1, &s_pdset, 0, nullptr);
     vkCmdPushConstants(s_cmd, s_pplLay, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pcs, pcs);
     vkCmdDraw(s_cmd, 3, 1, 0, 0);
@@ -2346,6 +3016,7 @@ static VkFramebuffer    s_aaFbE = VK_NULL_HANDLE, s_aaFbW = VK_NULL_HANDLE, s_aa
 static int              s_aaTW = 0, s_aaTH = 0, s_aaEW = 0;   /* размер целей; есть ли цели рёбер и весов */
 static int              s_aaFW = 0, s_aaFH = 0;               /* размер цели кадра под s_aaFbOut */
 static VkImageView      s_aaColOf = VK_NULL_HANDLE;           /* цель кадра, под которую собраны буферы */
+static unsigned         s_aaColGen = 0;                       /* 29.10.2026: и её поколение */
 
 static void aa_free_targets(void) {
     if (s_aaFbE)   { vkDestroyFramebuffer(C->device, s_aaFbE, nullptr);   s_aaFbE = VK_NULL_HANDLE; }
@@ -2392,6 +3063,14 @@ static int aaObjects(int mode) {
                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
                        VK_ACCESS_TRANSFER_READ_BIT, &s_aaRpOut))
             return 0;
+        if (rp_keep_on()) {   /* 30.10.2026: рёбра и веса прошлого кадра - в SHADER_READ_ONLY; не вышло - прежние */
+            if (!pp_mkPass(VK_FORMAT_R8G8_UNORM, 2, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, &s_aaRpEk))
+                s_aaRpEk = VK_NULL_HANDLE;
+            if (!pp_mkPass(VK_FORMAT_R8G8B8A8_UNORM, 2, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, &s_aaRpWk))
+                s_aaRpWk = VK_NULL_HANDLE;
+        }
         s_aaBase = 1;
     }
     s_aaMode[mode] = -1;
@@ -2419,7 +3098,8 @@ static int aaEnsure(int mode, int w, int h) {
     if (!aaObjects(mode)) return 0;
     int TW, TH; post_fit_size(&TW, &TH);
     const int ew = mode >= 2;
-    if (s_aaTW != TW || s_aaTH != TH || s_aaColOf != s_colView || s_aaFW != s_fbW || s_aaFH != s_fbH || s_aaEW < ew) {
+    if (s_aaTW != TW || s_aaTH != TH || s_aaColOf != s_colView || s_aaFW != s_fbW || s_aaFH != s_fbH || s_aaEW < ew ||
+        (vk_viewgen_on() && s_aaColGen != s_colGen)) {
         vkDeviceWaitIdle(C->device);
         aa_free_targets();
         const VkImageUsageFlags rt = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -2451,7 +3131,8 @@ static int aaEnsure(int mode, int w, int h) {
             wd[i].descriptorCount = 1; wd[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; wd[i].pImageInfo = &ii[i];
         }
         vkUpdateDescriptorSets(C->device, 12, wd, 0, nullptr);
-        s_aaTW = TW; s_aaTH = TH; s_aaEW = ew; s_aaFW = s_fbW; s_aaFH = s_fbH; s_aaColOf = s_colView;
+        s_aaTW = TW; s_aaTH = TH; s_aaEW = ew; s_aaFW = s_fbW; s_aaFH = s_fbH; s_aaColOf = s_colView; s_aaColGen = s_colGen;
+        s_aaSrcUsed = s_aaEWUsed = 0;   /* 30.10.2026: цели сглаживания новые - первый раз с UNDEFINED */
         { char wn[48]; std::snprintf(wn, sizeof wn, "AA filter at %dx%d", TW, TH); vram_note(wn); }
     }
     return w <= s_aaTW && h <= s_aaTH;
@@ -2478,7 +3159,9 @@ static void aa_run(int mode, int w, int h, int keepAlpha) {
     b[0].oldLayout = b[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;            /* записи прохода - до копии */
     b[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; b[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     b[0].image = s_colImg;
-    b[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    b[1].oldLayout = (s_aaSrcUsed && rp_keep_on()) ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL   /* 30.10.2026: копия прошлого раза */
+                                                   : VK_IMAGE_LAYOUT_UNDEFINED;
+    b[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; s_aaSrcUsed = rp_keep_on();
     b[1].srcAccessMask = 0; b[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     b[1].image = s_aaSrcImg;
     vkCmdPipelineBarrier(s_cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
@@ -2507,8 +3190,9 @@ static void aa_run(int mode, int w, int h, int keepAlpha) {
         vkCmdEndRenderPass(s_cmd);
     };
     if (mode == 1) { pass(s_aaRpOut, s_aaFbOut, s_aaPipe[1][0], s_aaSet[0]); return; }
-    pass(s_aaRpE,   s_aaFbE,   s_aaPipe[mode][0], s_aaSet[0]);   /* рёбра */
-    pass(s_aaRpW,   s_aaFbW,   s_aaPipe[mode][1], s_aaSet[1]);   /* веса вдоль рёбер */
+    /* 30.10.2026: рёбра и веса прошлого кадра - в SHADER_READ_ONLY (s_aaEWUsed) */
+    pass(rp_keep_pick(s_aaRpE, s_aaRpEk, s_aaEWUsed), s_aaFbE, s_aaPipe[mode][0], s_aaSet[0]);   /* рёбра */
+    pass(rp_keep_pick(s_aaRpW, s_aaRpWk, s_aaEWUsed), s_aaFbW, s_aaPipe[mode][1], s_aaSet[1]); s_aaEWUsed = rp_keep_on();   /* веса вдоль рёбер */
     pass(s_aaRpOut, s_aaFbOut, s_aaPipe[mode][2], s_aaSet[2]);   /* смешение - в цель кадра */
 }
 
@@ -2549,6 +3233,7 @@ static VkFramebuffer         s_fbFXe = VK_NULL_HANDLE, s_fbFXr = VK_NULL_HANDLE,
 static int                   s_fxOk = 0;                    /* 1 — собрано, -1 — не вышло (эффектов не будет) */
 static int                   s_fxW = 0, s_fxH = 0;
 static VkImageView           s_fxColOf = VK_NULL_HANDLE;
+static unsigned              s_fxColGen = 0;                      /* 29.10.2026: и её поколение */
 static int                   s_fxFresh = 0;                 /* новые образы — перевести в SHADER_READ_ONLY на ближайшем кадре */
 static float                 s_rfPlane[4] = { 0.f, 0.f, 0.f, 0.f };
 static int                   s_rfPlaneOk = 0;
@@ -2673,10 +3358,12 @@ static int fxObjects(void) {
         {   VkAttachmentDescription a[2]{};
             a[0].format = HF; a[0].samples = VK_SAMPLE_COUNT_1_BIT;
             a[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; a[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-            a[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; a[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            a[0].initialLayout = rp_keep_lay(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);   /* 30.10.2026: E/R всегда в SHADER_READ_ONLY (fx_init_layouts) */
+            a[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             a[1].format = VK_FORMAT_D32_SFLOAT; a[1].samples = VK_SAMPLE_COUNT_1_BIT;
             a[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; a[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-            a[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; a[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            a[1].initialLayout = rp_keep_lay(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);   /* 30.10.2026: s_fxDep всегда в DEPTH_STENCIL_ATTACHMENT (fx_init_layouts) */
+            a[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             for (int i = 0; i < 2; i++) { a[i].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; a[i].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; }
             VkAttachmentReference cr{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL }, dr{ 1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
             VkSubpassDescription sp{};
@@ -2688,6 +3375,10 @@ static int fxObjects(void) {
             d[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
             d[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
             d[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            if (rp_keep_on()) {   /* 30.10.2026: s_fxDep пишут оба прохода кадра (отражение, свечение); заливка второго - после записей первого */
+                d[0].srcStageMask |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+                d[0].srcAccessMask |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            }
             d[1].srcSubpass = 0; d[1].dstSubpass = VK_SUBPASS_EXTERNAL;
             d[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; d[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
             d[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; d[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
@@ -2695,7 +3386,7 @@ static int fxObjects(void) {
             rci.attachmentCount = 2; rci.pAttachments = a; rci.subpassCount = 1; rci.pSubpasses = &sp;
             rci.dependencyCount = 2; rci.pDependencies = d;
             if (vkCreateRenderPass(C->device, &rci, nullptr, &s_rpFX) != VK_SUCCESS) return 0; }
-        if (!pp_mkPass(HF, 0, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        if (!pp_mkPass(HF, 0, rp_keep_lay(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,   /* 30.10: fx/mpf_init_layouts */
                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, &s_rpGB))
             return 0;
         if (!pp_mkPass(VK_FORMAT_R8G8B8A8_UNORM, 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -2751,7 +3442,7 @@ static int fxEnsure(void) {
     const VkFormat HF = VK_FORMAT_R16G16B16A16_SFLOAT;
     if (!s_fxOk && !fxObjects()) return 0;
     int TW, TH; post_fit_size(&TW, &TH);                /* 24.10.2026: по кадрам с 3D (post_fit_note) */
-    if (s_fxW != TW || s_fxH != TH || s_fxColOf != s_colView) {
+    if (s_fxW != TW || s_fxH != TH || s_fxColOf != s_colView || (vk_viewgen_on() && s_fxColGen != s_colGen)) {
         vkDeviceWaitIdle(C->device);
         fx_freeTargets();
         const int hw = (TW + 1) / 2, hh = (TH + 1) / 2, qw = (hw + 1) / 2, qh = (hh + 1) / 2;
@@ -2795,7 +3486,7 @@ static int fxEnsure(void) {
             nw++;
             vkUpdateDescriptorSets(C->device, (uint32_t)nw, wd, 0, nullptr); }
         s_fxFresh = 1;
-        s_fxW = TW; s_fxH = TH; s_fxColOf = s_colView;
+        s_fxW = TW; s_fxH = TH; s_fxColOf = s_colView; s_fxColGen = s_colGen;
         std::fprintf(stderr, "fx: glow and reflection targets %dx%d / %dx%d%c", hw, hh, qw, qh, 10);
     }
     return 1;
@@ -2814,6 +3505,17 @@ static void fx_init_layouts(void) {
     }
     vkCmdPipelineBarrier(s_cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                          0, 0, nullptr, 0, nullptr, FXI_N, b);
+    if (rp_keep_on() && s_fxDep) {   /* 30.10.2026: и глубину - сразу в DEPTH_STENCIL_ATTACHMENT (с неё начинает s_rpFX) */
+        VkImageMemoryBarrier d{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        d.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; d.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        d.srcAccessMask = 0;
+        d.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        d.image = s_fxDep; d.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+        d.srcQueueFamilyIndex = d.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        vkCmdPipelineBarrier(s_cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &d);
+    }
 }
 /* флаги растра (истинный цвет, фильтр, округление UV) — те же, что у основного прохода */
 static float fx_pc7(void) {
@@ -3053,6 +3755,7 @@ static VkFramebuffer         s_fbV = VK_NULL_HANDLE;
 static int                   s_vOk = 0;                     /* 1 — собрано, -1 — не вышло (объёмного света не будет) */
 static int                   s_vW = 0, s_vH = 0;
 static VkImageView           s_vZOf = VK_NULL_HANDLE;        /* под какую глубину SSAO записан набор дескрипторов */
+static unsigned              s_vZGen = 0;                    /* 29.10.2026: и её поколение (s_zGen) */
 
 static bool v_mkPipe(VkShaderModule vsm, VkShaderModule fsm, int additive, VkRenderPass rp, VkPipeline* out) {
     VkPipelineShaderStageCreateInfo st[2]{};
@@ -3104,6 +3807,9 @@ static int volObjects(void) {
         if (!pp_mkPass(HF, 0, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, &s_rpV))
             return 0;
+        if (rp_keep_on() && !pp_mkPass(HF, 0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,   /* 30.10.2026: s_vUsed */
+                                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, &s_rpVk))
+            s_rpVk = VK_NULL_HANDLE;
         VkDescriptorSetLayoutBinding b[4]{};
         for (int i = 0; i < 4; i++) {
             b[i].binding = (uint32_t)i; b[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -3161,9 +3867,10 @@ static int volEnsure(void) {
         }
         if (!ok) { s_vOk = -1; std::fprintf(stderr, "vol: haze target not created - no volumetric light%c", 10); return 0; }
         s_vW = TW; s_vH = TH; s_vZOf = VK_NULL_HANDLE;
+        s_vUsed = 0;   /* 30.10.2026: цель дымки новая - первый проход с UNDEFINED */
         std::fprintf(stderr, "vol: haze target %dx%d%c", hw, hh, 10);
     }
-    if (s_vZOf != s_zView) {                          /* глубина SSAO пересоздана (размер кадра) — набор заново */
+    if (s_vZOf != s_zView || (vk_viewgen_on() && s_vZGen != s_zGen)) {   /* глубина SSAO пересоздана (размер кадра) — набор заново */
         VkDescriptorImageInfo ii[3] = { { s_pSamp,  s_zView,  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
                                         { s_shSamp, s_shView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
                                         { s_pSamp,  s_vView,  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL } };
@@ -3179,7 +3886,7 @@ static int volEnsure(void) {
         wd[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;         wd[2].pBufferInfo = &ub;
         wd[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; wd[3].pImageInfo = &ii[2];
         vkUpdateDescriptorSets(C->device, 4, wd, 0, nullptr);
-        s_vZOf = s_zView;
+        s_vZOf = s_zView; s_vZGen = s_zGen;
     }
     return 1;
 }
@@ -3209,7 +3916,7 @@ static void vol_run(int w, int h, const float* view, const float* wp, const floa
         vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_vplLay, 0, 1, &s_vset, 0, nullptr);
         vkCmdPushConstants(s_cmd, s_vplLay, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pcs, pcs);
     };
-    begin(s_rpV, s_fbV, hw, hh);                                    /* 1: дымка, половинная сетка */
+    begin(rp_keep_pick(s_rpV, s_rpVk, s_vUsed), s_fbV, hw, hh); s_vUsed = rp_keep_on();                                    /* 1: дымка, половинная сетка */
     vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_vPipe);
     vkCmdDraw(s_cmd, 3, 1, 0, 0);
     vkCmdEndRenderPass(s_cmd);
@@ -4291,7 +4998,7 @@ static int mpfEnsure(void) {
                             && fx_mkPost(pvs, "shaders\\dc_moon_pack.frag.spv", 0, s_rpGB, &s_mpfPackPipe);
         if (pvs) vkDestroyShaderModule(C->device, pvs, nullptr);
         if (!ok) { std::fprintf(stderr, "moonpf: no shaders\\dc_moon_pf.frag.spv / dc_moon_pack.frag.spv - the moon shadow takes the old path%c", 10); return 0; } }
-    if (!pp_mkPass(HF, 2, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,   /* нет — проходы по всей карте */
+    if (!pp_mkPass(HF, 2, rp_keep_lay(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,   /* 30.10: mpf_init_layouts */   /* нет — проходы по всей карте */
                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, &s_rpGBclr))
         s_rpGBclr = VK_NULL_HANDLE;
     {   VkDescriptorPoolSize psz{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 * (SH_MAX + 2) };
@@ -4425,10 +5132,10 @@ static int spfEnsure(void) {
     s_spfRes = s_shSize / 2; if (s_spfRes < 128) s_spfRes = 128;
     { int lv = 1, r = s_spfRes; while (lv < SPF_LV && r > 4) { r /= 2; lv++; } s_spfLevels = lv; }
     const VkFormat F = VK_FORMAT_R16G16_SFLOAT;
-    if (!pp_mkPass(F, 0, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    if (!pp_mkPass(F, 0, rp_keep_lay(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,   /* 30.10: spf_init_layouts */
                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, &s_rpSPF))
         { std::fprintf(stderr, "shpf: pass not created - shadows take the old path%c", 10); return 0; }
-    if (!pp_mkPass(F, 2, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,   /* 09.10; нет — уровни целиком */
+    if (!pp_mkPass(F, 2, rp_keep_lay(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,   /* 30.10: spf_init_layouts */   /* 09.10; нет — уровни целиком */
                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, &s_rpSPFclr))
         s_rpSPFclr = VK_NULL_HANDLE;
     {   VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
@@ -4657,6 +5364,18 @@ static bool raster_sets(void) {
     return true;
 }
 
+/* 30.10.2026: кадр не ушёл на GPU (ошибка отправки или потеря устройства) - раскладки неизвестны: проходы снова с прежних
+ * (UNDEFINED), образы эффектов снова переводятся из UNDEFINED на ближайшем кадре (их пишет заново каждый кадр, где они
+ * нужны). DC_RP_KEEP_LAYOUT=0 - ничего */
+static void rp_keep_forget(void) {
+    if (!rp_keep_on()) return;
+    s_layCol = s_layDep = s_layMsCol = s_layMsDep = VK_IMAGE_LAYOUT_UNDEFINED;
+    s_zUsed = s_aoUsed = s_vUsed = s_aaSrcUsed = s_aaEWUsed = s_ao2Used = 0;
+    if (s_fxImg[0]) s_fxFresh = 1;
+    if (s_mpfOk > 0) s_mpfFresh = 1;
+    if (s_spfOk > 0) s_spfFresh = 1;
+}
+
 static bool buildFixed() {
     // command pool / buffer / fence
     VkCommandPoolCreateInfo pci{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
@@ -4707,10 +5426,22 @@ static bool buildFixed() {
         VkRenderPassCreateInfo r2 = rci; r2.pAttachments = a2;
         if (vkCreateRenderPass(C->device, &r2, nullptr, &s_rpFirst) != VK_SUCCESS) s_rpFirst = VK_NULL_HANDLE;
         a2[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        a2[0].initialLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        a2[0].initialLayout = scap_resume_sync_on() ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL   /* 29.10: барьер в scap_switch */
+                                                    : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         a2[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         a2[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         if (vkCreateRenderPass(C->device, &r2, nullptr, &s_rpResume) != VK_SUCCESS) s_rpResume = VK_NULL_HANDLE;
+    }
+    if (rp_keep_on()) {   /* 30.10.2026: s_rp / s_rpFirst с раскладок после прошлого кадра (rp_keep_main); не вышло - прежние */
+        VkAttachmentDescription a3[2] = { att[0], att[1] };
+        a3[0].initialLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        VkRenderPassCreateInfo r3 = rci; r3.pAttachments = a3;
+        for (int f = 0; f < 2; f++)
+            for (int ro = 0; ro < 2; ro++) {
+                a3[1].storeOp = f ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                a3[1].initialLayout = ro ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                if (vkCreateRenderPass(C->device, &r3, nullptr, &s_rpK[f][ro]) != VK_SUCCESS) s_rpK[f][ro] = VK_NULL_HANDLE;
+            }
     }
 
     /* 25.10.2026: набор дескрипторов - raster_sets (выше); безопасные шейдеры (s_rasterSafe) - с самого начала, если
@@ -4733,6 +5464,13 @@ static bool buildFixed() {
                 VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                 &s_shUbo, &s_shUboMem, (void**)&s_shUboMap) && s_shUboMap) {
+        if (vk_async_want() || shubo_cpu_on()) {   /* 29.10.2026 (async), 30.10 (пункт 11 - и без него): все пишут тень, отображённый блок - копией при отправке кадра */
+            s_shUboGpu = s_shUboMap;
+            for (int i = 0; i < SH_UBO_FLOATS; i++) s_shUboGpu[i] = 0.f;
+            s_shUboMap = s_shUboShadow;
+        }
+        std::fprintf(stderr, "raster: shadow and light data block - %s (DC_SHUBO_CPU=%d, DC_VK_ASYNC=%d)%c",
+                     s_shUboGpu ? "CPU copy, sent with each frame" : "written straight into the mapped block", shubo_cpu_on(), vk_async_want(), 10);
         for (int i = 0; i < SH_UBO_FLOATS; i++) s_shUboMap[i] = 0.f;
         dcvk_shadow_shape(nullptr, 0);                /* 27.09: мягкость теней — круг, пока лампы-текстуры не зададут форму */
         s_shUboMap[115] = -1.f;                 /* луны нет */
@@ -4781,7 +5519,7 @@ static bool buildFixed() {
                 sa.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; sa.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
                 sa.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
                 sa.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-                sa.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                sa.initialLayout = rp_keep_lay(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);   /* 30.10.2026: слои всегда в SHADER_READ_ONLY (барьер после создания) */
                 sa.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
                 VkAttachmentReference sr{ 0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
                 VkSubpassDescription ssp{};
@@ -4846,6 +5584,34 @@ static bool buildFixed() {
         snprintf(s_rasterErr, sizeof s_rasterErr, "no memory for the pair tag stream"); return false;
     }
     memset(s_pvMap, 0, (size_t)MAX_VERTS * sizeof(uint32_t));
+    s_vbufS[0] = s_vbuf; s_vmemS[0] = s_vmem; s_vmapS[0] = s_vmap;
+    s_rvBufS[0] = s_rvBuf; s_rvMemS[0] = s_rvMem; s_rvMapS[0] = s_rvMap;
+    s_pvBufS[0] = s_pvBuf; s_pvMemS[0] = s_pvMem; s_pvMapS[0] = s_pvMap;
+    if (vk_async_want()) {   /* 29.10.2026 (async): второй набор потоков - тем же кодом; не вышло - отправка как была */
+        ptvk_set_wait_note(raster_wait_note);   /* долгое ожидание забора - строка render: stuck wait (только с DC_VK_ASYNC=1) */
+        int ok = makeBufStream((VkDeviceSize)MAX_VERTS * VERT_FLOATS * sizeof(float), &s_vbufS[1], &s_vmemS[1], (void**)&s_vmapS[1],
+                               "vertex stream, second set") && s_vmapS[1];
+        ok = ok && makeBufStream((VkDeviceSize)MAX_VERTS * 4 * sizeof(float), &s_rvBufS[1], &s_rvMemS[1], (void**)&s_rvMapS[1],
+                                 "second vertex stream, second set") && s_rvMapS[1];
+        ok = ok && makeBufStream((VkDeviceSize)MAX_VERTS * sizeof(uint32_t), &s_pvBufS[1], &s_pvMemS[1], (void**)&s_pvMapS[1],
+                                 "pair tag stream, second set") && s_pvMapS[1];
+        if (ok) {
+            for (size_t i = 0; i < (size_t)MAX_VERTS; i++) { s_rvMapS[1][i * 4] = -1.f; s_rvMapS[1][i * 4 + 1] = s_rvMapS[1][i * 4 + 2] = s_rvMapS[1][i * 4 + 3] = 0.f; }
+            memset(s_pvMapS[1], 0, (size_t)MAX_VERTS * sizeof(uint32_t));
+            s_asyncMode = 1;
+            rlog("[VKR] async: frames go to the GPU without waiting for it (DC_VK_ASYNC=1), second vertex stream set %.1f MB\n",
+                 (double)((size_t)MAX_VERTS * (VERT_FLOATS + 4 + 1) * 4) / 1048576.0);
+        } else {
+            VkBuffer* bs[3] = { &s_vbufS[1], &s_rvBufS[1], &s_pvBufS[1] };
+            VkDeviceMemory* ms[3] = { &s_vmemS[1], &s_rvMemS[1], &s_pvMemS[1] };
+            for (int i = 0; i < 3; i++) {
+                if (*bs[i]) { vkDestroyBuffer(C->device, *bs[i], nullptr); *bs[i] = VK_NULL_HANDLE; }
+                if (*ms[i]) { vkFreeMemory(C->device, *ms[i], nullptr); *ms[i] = VK_NULL_HANDLE; }
+            }
+            s_vmapS[1] = nullptr; s_rvMapS[1] = nullptr; s_pvMapS[1] = nullptr;
+            rlog("[VKR] async off: no memory for the second vertex stream set - every frame waits for the GPU, as before\n");
+        }
+    }
     if (!trep_gpu_init()) {
         rlog("[VKR] texture replacement init failed\n");
         snprintf(s_rasterErr, sizeof s_rasterErr, "the texture array could not be set up"); return false;
@@ -4988,9 +5754,11 @@ static bool ensureTargets(int w, int h) {
     if (s_prevMem) vkFreeMemory(C->device, s_prevMem, nullptr);
     s_fb = VK_NULL_HANDLE; s_colImg = VK_NULL_HANDLE; s_depImg = VK_NULL_HANDLE;
     s_colView = VK_NULL_HANDLE; s_depView = VK_NULL_HANDLE;
+    s_colGen++;                              /* 29.10.2026: цель кадра пересоздаётся - кэши под неё заново (vk_viewgen_on) */
     s_colMem = VK_NULL_HANDLE; s_depMem = VK_NULL_HANDLE;
     s_prevImg = VK_NULL_HANDLE; s_prevView = VK_NULL_HANDLE; s_prevMem = VK_NULL_HANDLE;
     s_prevOnGpu = 0; s_prevValid = 0;
+    s_layCol = s_layDep = VK_IMAGE_LAYOUT_UNDEFINED;   /* 30.10.2026: цель кадра новая - первый проход с UNDEFINED */
 
     auto mkImg = [&](VkFormat fmt, VkImageUsageFlags use, VkImageAspectFlags asp,
                      VkImage* img, VkDeviceMemory* mem, VkImageView* view) -> bool {
@@ -5344,6 +6112,7 @@ static int raster_init_impl(void) {
         rlog("[VKR] core acquire FAILED\n"); s_rlogMirror = 0; return 0;
     }
     pc_load();                       /* 11.10: кэш конвейеров - до первой сборки */
+    rp_keep_on();   /* 30.10.2026: DC_RP_KEEP_LAYOUT - до первого прохода (buildFixed), строка в журнал */
     if (!buildFixed()) { std::fprintf(stderr, "raster: bring-up FAILED%c", 10); s_rlogMirror = 0; return 0; }
     s_draws.reserve(512);
     std::fprintf(stderr, "raster: ready%s%c", s_rasterSafe >= 2 ? " (safe shaders, level 2: no lights, shadows, materials, MSAA)"
@@ -5389,6 +6158,14 @@ struct TRep {
      * декод, начатый до перечитывания или снятия, не кладётся. state −2 — снята (место освободит кадр), −3 — освобождена */
     uint64_t stamp = 0;
     unsigned gen = 0;
+    /* 01.11.2026 (без пределов, trep_frame_prepare): кадр, когда картинку рисовали последний раз; её видеопамять; во сколько
+     * раз уменьшена (2^down); с какого кадра ждёт места или памяти (state 5 - отдыхает без пикселей). pin - картинка меша,
+     * чьё место вшито в вершины копии на видеокарте навсегда (dc_meshrep.cpp gpu_build) */
+    uint32_t used = 0;
+    uint64_t bytes = 0;
+    int down = 0;
+    uint32_t wait = 0;
+    bool pin = false;
 };
 /* 05.10 ночь (2): deque — записи мешей добавляются на ходу, ссылки на прежние должны жить */
 static std::deque<TRep> s_trep;
@@ -5401,6 +6178,8 @@ static bool s_trepThr = false;
 static int s_trepSlots = 0;
 static std::vector<int> s_trepUpload;           /* созданы в этом кадре — записать команды заливки */
 static std::vector<std::pair<VkBuffer, VkDeviceMemory>> s_trepFree;   /* промежуточные буферы прошлого кадра */
+static uint32_t s_trepTick = 1;                 /* 01.11.2026: кадры подготовки (trep_frame_prepare) - часы для «давно не рисовали» */
+static uint64_t s_trepBytes = 0;                /* 01.11.2026: видеопамять образов картинок из mods */
 static VkSampler s_trepSamp = VK_NULL_HANDLE;
 static VkSampler s_trepSampRep = VK_NULL_HANDLE;    /* 05.10 ночь (2): для картинок мешей (UV за пределами 0..1) */
 static int s_repOvSlot = -1;                       /* dcvk_rep_override: место картинки на вершинах следующих треугольников */
@@ -5574,10 +6353,10 @@ static void trep_worker(void) {
         if (frame) frame->Release();
         if (dec) dec->Release();
         if (stm) stm->Release();
-        std::vector<uint8_t>().swap(png);
         std::lock_guard<std::mutex> lk(s_trepMu);
         TRep& r = s_trep[idx];
         if (r.gen != gen0 || r.state != 1) continue;   /* 06.10.2026: перечитана или снята, пока декодировалась — не эта картинка */
+        if (!png.empty() && r.png.empty()) r.png.swap(png);   /* 01.11.2026: байты PNG из glb - назад (освобождённую декодировать снова) */
         r.stamp = stamp;
         if (ok) { r.rgba.swap(px); r.w = (int)w; r.h = (int)h; r.state = 2; }
         else { r.state = -1; std::fprintf(stderr, "mods: texture %ls - cannot read the PNG%c", path.c_str(), 10); }
@@ -5593,7 +6372,7 @@ static void trep_stat(int k, const float* v) {
     if (!s_trepLog) return;
     s_trepSt[k]++;
     static long n = 0, said = 0;
-    if (k >= 3 && said < 400 && (++n % 50) == 1) {
+    if (k >= 3 && k <= 6 && said < 400 && (++n % 50) == 1) {
         said++;
         std::fprintf(stderr, "texrep: %s tp %03x clut %d,%d flags %x uv (%.0f,%.0f)(%.0f,%.0f)(%.0f,%.0f)%c",
                      k == 3 ? "no page+palette" : k == 4 ? "UV window outside" : k == 5 ? "wrong key" : "taken",
@@ -5602,17 +6381,25 @@ static void trep_stat(int k, const float* v) {
     }
     long tot = 0; for (int i = 0; i < 8; i++) tot += s_trepSt[i];
     if (tot % 20000 == 0)
-        std::fprintf(stderr, "texrep: totals flags %ld window %ld none %ld uv %ld key %ld taken %ld%c",
-                     s_trepSt[1], s_trepSt[2], s_trepSt[3], s_trepSt[4], s_trepSt[5], s_trepSt[6], 10);
+        std::fprintf(stderr, "texrep: totals flags %ld window %ld none %ld uv %ld key %ld taken %ld hd %ld%c",
+                     s_trepSt[1], s_trepSt[2], s_trepSt[3], s_trepSt[4], s_trepSt[5], s_trepSt[6], s_trepSt[7], 10);
 }
 
+/* 01.11.2026: потоков декода - DC_TREP_THREADS=<n> (по умолчанию ядер минус 2, не больше 3; 1 - один, как было): картинки
+ * комнаты из HD-пака (до 65 штук до 2048x2048) один поток декодировал по очереди, и HD появлялось с опозданием */
+static int trep_threads(void) {
+    const char* e = getenv("DC_TREP_THREADS");
+    int n = e ? atoi(e) : 0;
+    if (n <= 0) { const unsigned hw = std::thread::hardware_concurrency(); n = hw > 3 ? (int)std::min(3u, hw - 2) : 1; }
+    return n > 8 ? 8 : n;
+}
 static void trep_queue(int idx) {
     TRep& r = s_trep[idx];
     if (r.state != 0) return;
     std::lock_guard<std::mutex> lk(s_trepMu);
     r.state = 1;
     s_trepQ.push_back(idx);
-    if (!s_trepThr) { std::thread(trep_worker).detach(); s_trepThr = true; }
+    if (!s_trepThr) { s_trepThr = true; for (int i = 0, n = trep_threads(); i < n; i++) std::thread(trep_worker).detach(); }
     s_trepCv.notify_one();
 }
 
@@ -5630,6 +6417,7 @@ extern "C" int dcvk_rep_tex_add(const wchar_t* path, const uint8_t* png, size_t 
     if (rgba && w > 0 && h > 0) { r.rgba.assign(rgba, rgba + (size_t)w * h * 4); r.w = w; r.h = h; r.state = 2; }
     else if (r.path.empty() && r.png.empty()) return -1;
     r.key = ~0ull;                                                   /* не текстура игры: в s_trepBy не попадает */
+    r.used = s_trepTick;
     s_trep.push_back(std::move(r));
     s_trepOn = 1;
     return (int)s_trep.size() - 1;
@@ -5638,8 +6426,15 @@ extern "C" int dcvk_rep_tex_add(const wchar_t* path, const uint8_t* png, size_t 
 extern "C" int dcvk_rep_tex_slot(int idx) {
     if (idx < 0 || idx >= (int)s_trep.size()) return -1;
     TRep& r = s_trep[idx];
+    r.used = s_trepTick;                                             /* 01.11.2026: модель с ней рисуется */
     if (r.state == 0) trep_queue(idx);
     return r.state == 3 ? r.slot : -1;
+}
+/* 01.11.2026 (dc_meshrep.cpp): pin 1 - место картинки вшито в копию модели на видеокарте навсегда (склейку не держали), такую
+ * не освобождать; 0 - можно (модель рисует процессор по текущим местам, или копию перестроят, когда место сменится) */
+extern "C" void dcvk_rep_tex_pin(int idx, int pin) {
+    if (idx < 0 || idx >= (int)s_trep.size()) return;
+    s_trep[idx].pin = pin != 0;
 }
 
 /* 06.10.2026 (подхват модов на лету, dc_meshrep.cpp): картинка снятой модели — её образ и место освободит следующий кадр */
@@ -5728,6 +6523,7 @@ extern "C" void dcvk_screen_begin(int x, int y, int w, int h) {
         }
     for (int idx : it->second) {
         if (s_trep[idx].key != hsh) continue;
+        s_trep[idx].used = s_trepTick;                 /* 01.11.2026: экран рисуется */
         trep_queue(idx);
         s_scrNow = idx;
         s_scrRect[0] = (float)x; s_scrRect[1] = (float)y; s_scrRect[2] = (float)w; s_scrRect[3] = (float)h;
@@ -5780,15 +6576,19 @@ static void trep_tri(const float* v, float* rv) {
         const unsigned ep = dc_tex_epoch_now();
         if (r.epoch != ep || !r.epoch) {
             r.epoch = ep ? ep : 1;
-            r.valid = trep_key_vram(sw_vram_base(), r.tp, r.cx, r.cy, r.u0, r.v0, r.u1, r.v1) == r.key;
+            const unsigned short* fo = dc_facehd_orig_vram();   /* 31.10.2026: глаза и рты лиц - исходные (кадры анимации - мимо ключа) */
+            r.valid = trep_key_vram(fo ? fo : sw_vram_base(), r.tp, r.cx, r.cy, r.u0, r.v0, r.u1, r.v1) == r.key;
         }
         if (!r.valid) { why = 5; continue; }
         trep_stat(6, v);
+        r.used = s_trepTick;                                            /* 01.11.2026: рисуется в этом кадре */
         trep_queue(idx);
         if (r.state != 3) return;                                       /* ещё грузится — пока родная */
+        trep_stat(7, v);                                                /* 01.11.2026: hd - нарисован картинкой из mods */
         const float W = (float)(r.u1 - r.u0 + 1), H = (float)(r.v1 - r.v0 + 1);
+        const float sl = (float)(r.slot + (dc_facehd_enabled() ? 4096 : 0));   /* 31.10.2026: +4096 - сверять с маской лиц */
         for (int i = 0; i < 3; i++) {
-            rv[i * 4] = (float)r.slot;
+            rv[i * 4] = sl;
             rv[i * 4 + 1] = (v[i * VERT_FLOATS + 2] - (float)r.u0) / W;
             rv[i * 4 + 2] = (v[i * VERT_FLOATS + 3] - (float)r.v0) / H;
         }
@@ -5859,6 +6659,8 @@ static void trep_release(TRep& r) {
     if (r.stage) vkDestroyBuffer(C->device, r.stage, nullptr);
     if (r.smem) vkFreeMemory(C->device, r.smem, nullptr);
     r.view = VK_NULL_HANDLE; r.img = VK_NULL_HANDLE; r.mem = VK_NULL_HANDLE; r.stage = VK_NULL_HANDLE; r.smem = VK_NULL_HANDLE;
+    s_trepBytes -= std::min(s_trepBytes, r.bytes);     /* 01.11.2026: счёт видеопамяти картинок */
+    r.bytes = 0;
 }
 static void trep_slot_free(TRep& r) {
     if (r.slot < 0) return;
@@ -5867,53 +6669,175 @@ static void trep_slot_free(TRep& r) {
     r.slot = -1;
 }
 
+/* ===================================================================================================================
+ * 01.11.2026 - ТЕКСТУРЫ МОДОВ БЕЗ ПРЕДЕЛОВ (игрок: «нужен способ, при котором нет значения, какая текстура и сколько она весит»).
+ * Прежде места в массиве (s_trepCap: 512, у Intel 57) занимались по порядку появления и не освобождались: HD-пак (1432
+ * картинки) кончал их за несколько десятков комнат (Intel - за несколько), дальше state -1 до перезапуска, «all N places taken»;
+ * не влезло в видеопамять - тоже -1 навсегда. Теперь:
+ * - мест нет - уходит картинка, которую дольше всех не рисовали (не моложе DC_TREP_AGE кадров), её место - новой; понадобится
+ *   снова - декодируется снова. Освободить некого (всё нужно сейчас) - ждёт, а не отказ;
+ * - видеопамять - по бюджету карты (trep_budget): не влезает - уходят давно не рисованные, не хватает и так - картинка
+ *   заливается уменьшенной вдвое (до 64 точек), а не отказ;
+ * - заливок за кадр - до DC_TREP_UPLOAD_MB (по умолчанию 64 МБ, хотя бы одна): вход в комнату не дёргает кадр.
+ * Картинки мешей с вшитым в копию на видеокарте местом (pin) не уходят. DC_TREP_LRU=0 - всё как было.
+ * =================================================================================================================== */
+static int trep_lru(void) {
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DC_TREP_LRU"); on = (e && *e == '0') ? 0 : 1; }
+    return on;
+}
+static int s_trepEvicted = 0, s_trepHalved = 0;
+/* самая давно не рисованная картинка уходит с видеокарты (место и память свободны). Кадр B и перенос комнаты прошлого показа
+ * рисуют вершины прошлого кадра с их местами - поэтому не моложе 3 кадров; по умолчанию 30 (DC_TREP_AGE=<n>) */
+static bool trep_evict_oldest(void) {
+    static int age = -1;
+    if (age < 0) { const char* e = getenv("DC_TREP_AGE"); age = e ? atoi(e) : 30; if (age < 3) age = 3; }
+    int best = -1;
+    uint32_t bestAge = 0;
+    for (size_t i = 0; i < s_trep.size(); i++) {
+        const TRep& v = s_trep[i];
+        if (v.state != 3 || v.pin) continue;
+        if (v.key == ~0ull && v.path.empty() && v.png.empty()) continue;   /* цвет материала без картинки - декодировать нечего */
+        const uint32_t a = s_trepTick - v.used;
+        if (a < (uint32_t)age || a <= bestAge) continue;
+        best = (int)i; bestAge = a;
+    }
+    if (best < 0) return false;
+    TRep& v = s_trep[(size_t)best];
+    trep_release(v); trep_slot_free(v);
+    v.state = 0; v.down = 0; v.wait = 0;
+    s_trepEvicted++;
+    return true;
+}
+/* сколько видеопамяти можно картинкам из mods: DC_TREP_MB=<n> - столько; иначе бюджет системы (VK_EXT_memory_budget) минус
+ * занятое без них минус запас (четверть бюджета, не меньше 256 МБ); без расширения - треть своей памяти карты. Не меньше 64 МБ */
+static uint64_t trep_budget(void) {
+    static long long fixed = -1;
+    if (fixed < 0) { const char* e = getenv("DC_TREP_MB"); fixed = e ? atoll(e) : 0; if (fixed < 0) fixed = 0; }
+    if (fixed > 0) return (uint64_t)fixed << 20;
+    double u = 0.0, b = 0.0, hs = 0.0;
+    double mb;
+    if (ptvk_vram_usage(&u, &b, &hs) && b > 0.0) {
+        const double mine = (double)s_trepBytes / 1048576.0;
+        mb = b - (u > mine ? u - mine : 0.0) - std::max(256.0, b * 0.25);
+    } else mb = hs / 3.0;
+    return mb > 64.0 ? (uint64_t)(mb * 1048576.0) : (64ull << 20);
+}
+/* картинка вдвое меньше (среднее 2x2, как мипы); false - уже не больше 64 точек */
+static bool trep_halve(TRep& r) {
+    if (r.rgba.empty() || (r.w <= 64 && r.h <= 64)) return false;
+    const int w2 = r.w > 1 ? r.w / 2 : 1, h2 = r.h > 1 ? r.h / 2 : 1;
+    std::vector<uint8_t> o((size_t)w2 * h2 * 4);
+    for (int y = 0; y < h2; y++) {
+        const uint8_t* a = &r.rgba[(size_t)std::min(2 * y, r.h - 1) * (size_t)r.w * 4];
+        const uint8_t* b = &r.rgba[(size_t)std::min(2 * y + 1, r.h - 1) * (size_t)r.w * 4];
+        uint8_t* d = &o[(size_t)y * (size_t)w2 * 4];
+        for (int x = 0; x < w2; x++) {
+            const int x0 = std::min(2 * x, r.w - 1) * 4, x1 = std::min(2 * x + 1, r.w - 1) * 4;
+            for (int c = 0; c < 4; c++) d[x * 4 + c] = (uint8_t)((a[x0 + c] + a[x1 + c] + b[x0 + c] + b[x1 + c] + 2) >> 2);
+        }
+    }
+    r.rgba.swap(o); r.w = w2; r.h = h2; r.down++;
+    s_trepHalved++;
+    return true;
+}
+/* места или памяти нет: декодированная ждёт с пикселями; дольше 120 кадров - пиксели отпускаются и 120 кадров отдыха (state 5),
+ * потом её декодируют снова, когда она нужна. Без источника (цвет материала) - ждёт с пикселями */
+static void trep_wait(TRep& r) {
+    if (!r.wait) r.wait = s_trepTick;
+    if (s_trepTick - r.wait < 120 || (r.key == ~0ull && r.path.empty() && r.png.empty())) return;
+    std::vector<uint8_t>().swap(r.rgba);
+    r.state = 5; r.wait = s_trepTick; r.down = 0;
+}
+
 /* до записи команд кадра (GPU простаивает): образы для декодированных картинок, их места в массиве дескрипторов */
 static void trep_frame_prepare(void) {
     for (auto& f : s_trepFree) { vkDestroyBuffer(C->device, f.first, nullptr); vkFreeMemory(C->device, f.second, nullptr); }
     s_trepFree.clear();
     if (s_trepOn <= 0 || !s_trepSamp) return;
     std::lock_guard<std::mutex> lk(s_trepMu);
+    s_trepTick++;                                       /* 01.11.2026: часы «давно не рисовали» */
+    const bool lru = trep_lru() != 0;
+    static int upMB = -1;
+    if (upMB < 0) { const char* e = getenv("DC_TREP_UPLOAD_MB"); upMB = e ? atoi(e) : 64; if (upMB < 0) upMB = 0; }
+    uint64_t budget = 0, upBytes = 0;                   /* бюджет - один раз за кадр, когда понадобится */
+    bool noVictim = false;                              /* освобождать в этом кадре уже некого */
+    int waitNow = 0;
     for (size_t i = 0; i < s_trep.size(); i++) {
         TRep& r = s_trep[i];
         if (r.state == -2) { trep_release(r); trep_slot_free(r); r.state = -3; continue; }   /* 06.10.2026: снята */
+        if (r.state == 5) { if (s_trepTick - r.wait >= 120) { r.state = 0; r.wait = 0; } continue; }   /* 01.11.2026: отдохнула */
         if (r.state != 2) continue;
+        if (lru && upMB && !s_trepUpload.empty() && upBytes >= ((uint64_t)upMB << 20)) continue;   /* остальные - в следующих кадрах */
         trep_release(r);                                /* 06.10.2026: перечитана — прежний образ уходит, место остаётся */
         if (r.slot < 0 && s_trepSlots >= s_trepCap && s_trepFreeSlots.empty()) {
+            if (!lru) {
+                static int said = 0;
+                if (!said) { said = 1; std::fprintf(stderr, "mods: textures - all %d places taken, the rest keep the game's own%c", (int)s_trepCap, 10); }
+                r.state = -1; continue;
+            }
+            if (noVictim || !trep_evict_oldest()) { noVictim = true; trep_wait(r); waitNow++; continue; }
             static int said = 0;
-            if (!said) { said = 1; std::fprintf(stderr, "mods: textures - all %d places taken, the rest keep the game's own%c", (int)s_trepCap, 10); }
-            r.state = -1; continue;
+            if (!said) { said = 1; std::fprintf(stderr, "mods: textures - all %d places taken; the longest unseen ones give theirs to new ones%c", (int)s_trepCap, 10); }
         }
+        bool ok = false, waitMem = false;
         int mips = 1;
-        for (int d = r.w > r.h ? r.w : r.h; d > 1; d >>= 1) mips++;
-        VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-        ici.imageType = VK_IMAGE_TYPE_2D; ici.format = VK_FORMAT_R8G8B8A8_UNORM;
-        ici.extent = { (uint32_t)r.w, (uint32_t)r.h, 1 };
-        ici.mipLevels = (uint32_t)mips; ici.arrayLayers = 1; ici.samples = VK_SAMPLE_COUNT_1_BIT; ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-        ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        bool ok = vkCreateImage(C->device, &ici, nullptr, &r.img) == VK_SUCCESS;
-        if (ok) {
+        void* map = nullptr;
+        for (int tries = 0; tries < 24 && !ok; tries++) {
+            mips = 1;
+            for (int d = r.w > r.h ? r.w : r.h; d > 1; d >>= 1) mips++;
+            VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+            ici.imageType = VK_IMAGE_TYPE_2D; ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+            ici.extent = { (uint32_t)r.w, (uint32_t)r.h, 1 };
+            ici.mipLevels = (uint32_t)mips; ici.arrayLayers = 1; ici.samples = VK_SAMPLE_COUNT_1_BIT; ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+            ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+            ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            if (vkCreateImage(C->device, &ici, nullptr, &r.img) != VK_SUCCESS) {   /* больше, чем берёт карта, - вдвое меньше */
+                r.img = VK_NULL_HANDLE;
+                if (lru && trep_halve(r)) continue;
+                break;
+            }
             VkMemoryRequirements mr{};
             vkGetImageMemoryRequirements(C->device, r.img, &mr);
+            if (lru) {                                  /* 01.11.2026: бюджет - давно не рисованные уходят, иначе меньше */
+                if (!budget) budget = trep_budget();
+                while (!noVictim && s_trepBytes + mr.size > budget) if (!trep_evict_oldest()) noVictim = true;
+                if (s_trepBytes + mr.size > budget) {
+                    trep_release(r);
+                    if (trep_halve(r)) continue;
+                    waitMem = true; break;
+                }
+            }
             VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
             mai.allocationSize = mr.size; mai.memoryTypeIndex = memType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-            ok = mai.memoryTypeIndex != ~0u && vkAllocateMemory(C->device, &mai, nullptr, &r.mem) == VK_SUCCESS &&
-                 vkBindImageMemory(C->device, r.img, r.mem, 0) == VK_SUCCESS;
+            bool got = mai.memoryTypeIndex != ~0u && vkAllocateMemory(C->device, &mai, nullptr, &r.mem) == VK_SUCCESS;
+            if (!got) r.mem = VK_NULL_HANDLE;
+            got = got && vkBindImageMemory(C->device, r.img, r.mem, 0) == VK_SUCCESS;
+            if (got) { r.bytes = mr.size; s_trepBytes += mr.size; }
+            if (got) {
+                VkImageViewCreateInfo ivi{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+                ivi.image = r.img; ivi.viewType = VK_IMAGE_VIEW_TYPE_2D; ivi.format = VK_FORMAT_R8G8B8A8_UNORM;
+                ivi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, (uint32_t)mips, 0, 1 };
+                if (vkCreateImageView(C->device, &ivi, nullptr, &r.view) != VK_SUCCESS) { r.view = VK_NULL_HANDLE; got = false; }
+            }
+            if (got) got = makeBuf((VkDeviceSize)r.rgba.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &r.stage, &r.smem, &map) && map;
+            if (got) { ok = true; break; }
+            trep_release(r);
+            if (!lru) break;
+            /* 01.11.2026: память не дали - освободить давно не рисованную или взять вдвое меньше и попробовать снова */
+            if (!noVictim && trep_evict_oldest()) continue;
+            noVictim = true;
+            if (trep_halve(r)) continue;
+            waitMem = true; break;
         }
-        if (ok) {
-            VkImageViewCreateInfo ivi{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-            ivi.image = r.img; ivi.viewType = VK_IMAGE_VIEW_TYPE_2D; ivi.format = VK_FORMAT_R8G8B8A8_UNORM;
-            ivi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, (uint32_t)mips, 0, 1 };
-            ok = vkCreateImageView(C->device, &ivi, nullptr, &r.view) == VK_SUCCESS;
-        }
-        void* map = nullptr;
-        if (ok) ok = makeBuf((VkDeviceSize)r.rgba.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &r.stage, &r.smem, &map) && map;
         if (!ok) {
             trep_release(r); trep_slot_free(r);
+            if (waitMem) { trep_wait(r); waitNow++; continue; }
             r.state = -1; std::fprintf(stderr, "mods: texture %ls - no video memory for it%c", r.path.c_str(), 10); continue;
         }
         memcpy(map, r.rgba.data(), r.rgba.size());
+        upBytes += r.rgba.size();
         std::vector<uint8_t>().swap(r.rgba);
         r.mips = mips;
         if (r.slot < 0) {                               /* 06.10.2026: место снятой картинки — первым */
@@ -5923,6 +6847,23 @@ static void trep_frame_prepare(void) {
         trep_write_slot(r.slot, r.view, r.repeat);
         s_trepUpload.push_back((int)i);
         r.state = 4;                                    /* образ есть, заливка — в командах этого кадра */
+        r.wait = 0;
+        if (r.down) {
+            static int said = 0;
+            if (said < 40) { said++; std::fprintf(stderr, "mods: texture %ls - made %d times smaller to fit into video memory (%dx%d)%c",
+                                                  r.path.empty() ? L"(from a model)" : r.path.c_str(), 1 << r.down, r.w, r.h, 10); }
+        }
+    }
+    /* 01.11.2026: сводка, когда что-то освобождалось, уменьшалось или ждёт (не чаще раза в 600 кадров) */
+    static uint32_t saidAt = 0;
+    static int lastEv = 0, lastHv = 0;
+    if (lru && (s_trepEvicted != lastEv || s_trepHalved != lastHv || waitNow) && (!saidAt || s_trepTick - saidAt >= 600)) {
+        saidAt = s_trepTick; lastEv = s_trepEvicted; lastHv = s_trepHalved;
+        int on = 0;
+        for (const TRep& x : s_trep) on += x.state == 3 || x.state == 4;
+        std::fprintf(stderr, "mods: textures - %d on the video card (%u MB, the budget %u MB), places %d of %d; long unseen freed %d, "
+                     "made smaller %d, waiting now %d%c", on, (unsigned)(s_trepBytes >> 20), (unsigned)((budget ? budget : trep_budget()) >> 20),
+                     s_trepSlots - (int)s_trepFreeSlots.size(), (int)s_trepCap, s_trepEvicted, s_trepHalved, waitNow, 10);
     }
 }
 
@@ -6226,6 +7167,8 @@ static bool mesh_copy(VkBuffer st, int n, const VkBuffer* dst, const VkBufferCop
         VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkBeginCommandBuffer(cb, &bi);
+        /* 29.10.2026 (async, m2 аудита): кадр в полёте ещё может читать место снятой модели - копия после всего, что в очереди */
+        if (s_asyncMode) vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 0, nullptr);
         for (int k = 0; k < n; k++) vkCmdCopyBuffer(cb, st, dst[k], 1, &reg[k]);
         VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
         mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -6408,7 +7351,7 @@ extern "C" void dcvk_prepare_all(void) {
     s_rlogMirror = 1;                                           /* 23.10.2026: into the game's log too (rlog) */
     pp_init();
     const int want = s_ppMsaaFail ? 1 : (s_ppMsaa > s_ppMsaaMax ? s_ppMsaaMax : s_ppMsaa);   /* как msaaEnsure */
-    const int ss = (s_ppSshade && s_ppSSok) ? ((s_ppSloop && !s_ppSLfail) ? 2 : 1) : 0;
+    const int ss = (s_ppSshade && s_ppSSok) ? ((s_ppSloop && !s_ppSLfail && !ms_radv_fix()) ? 2 : 1) : 0;   /* как msaaEnsure */
     std::fprintf(stderr, "shaders: preparing - MSAA %dx (by samples %d), pipeline cache %s%c", want, ss,
                  s_pcache ? (s_pcCold.load() == 1 ? "empty" : "from the file") : "off", 10);
     std::thread mt;
@@ -6510,6 +7453,7 @@ static int s_worldDrawn = 0;
 extern "C" void dc_actor_in_flip(void);   /* gpu_sw_renderer.c: счётчик пришедших примитивов персонажа */
 
 extern "C" void dcvk_frame_reset(void) {
+    if (s_setSubmitted) { s_setSubmitted = 0; s_set ^= 1; set_ptrs(s_set); }   /* 29.10.2026 (async): эмуляция - в другой набор */
     sw_uipage_reset();
     dc_actor_in_flip();
     s_alost_oob_p = s_alost_oob; s_alost_behind_p = s_alost_behind;
@@ -6525,6 +7469,7 @@ extern "C" void dcvk_frame_reset(void) {
     s_pauseDim = 0;
     s_worldDrawn = 0;
     s_nverts = 0;
+    s_awDrawn = 0;                                    /* 29.10.2026 (разбор 1): слоты актёров в потоке кадра */
     s_occCpu.clear();                                 /* 09.10: заслонившие кадра (рамка на картах теней) */
     s_draws.clear();
     s_semiLate.clear();
@@ -6982,6 +7927,18 @@ static void scap_switch(const Scap& c, const VkRenderPassBeginInfo& rbi0, int w,
         vkCmdPipelineBarrier(s_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                              0, 0, nullptr, 0, nullptr, 1, &pr);
     }
+    if (scap_resume_sync_on()) {   /* 29.10: цель - в цвет только после копии (WRITE_AFTER_READ, см. scap_resume_sync_on) */
+        VkImageMemoryBarrier cb{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        cb.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        cb.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        cb.srcAccessMask = 0;
+        cb.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        cb.image = s_colImg;
+        cb.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        cb.srcQueueFamilyIndex = cb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        vkCmdPipelineBarrier(s_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &cb);
+    }
     VkRenderPassBeginInfo r2 = rbi0;
     r2.renderPass = s_rpResumeCur ? s_rpResumeCur : s_rpResume;   /* 25.09: с MSAA — продолжение прохода MSAA */
     r2.clearValueCount = 0; r2.pClearValues = nullptr;
@@ -7412,6 +8369,10 @@ extern "C" void dcvk_push_tri(const float* v, int semi_mode, int ztest) {
     }
     if (n < 3) { if (ACTOR_TRI(v)) s_alost_short++; return; }
     const uint32_t pin[3] = { s_pairTri[0], s_pairTri[1], s_pairTri[2] };   /* 26.10: метки - у каждого куска обрезки свои */
+    /* 30.10.2026: строка куска туннеля (одна на треугольник, piece_warp_make) переживает обрезку - иначе обрезанные грани у
+     * камеры стояли бы кадром A, а соседние ехали */
+    const float prow7 = (v[7] > 63.5f + (float)ACTW_ROWS && v[7] < 63.5f + (float)(ACTW_ROWS + PIECEW_ROWS) &&
+                         v[7 + VERT_FLOATS] == v[7] && v[7 + 2 * VERT_FLOATS] == v[7]) ? v[7] : 0.0f;
 
     /* per-primitive lanes (texture page, clut, flags) belong to the whole
      * triangle, so they come across untouched */
@@ -7424,7 +8385,7 @@ extern "C" void dcvk_push_tri(const float* v, int semi_mode, int ztest) {
             o[0] = ox + H * p.x / p.z * wsx;
             o[1] = oy + H * p.y / p.z;
             o[2] = p.u;  o[3] = p.vv;
-            o[4] = p.r;  o[5] = p.g;  o[6] = p.b;  o[7] = 0.0f;
+            o[4] = p.r;  o[5] = p.g;  o[6] = p.b;  o[7] = prow7;
             o[8] = v[8]; o[9] = v[9]; o[10] = v[10]; o[11] = v[11];
             o[12] = p.z;
             s_pairTri[j] = p.tag;
@@ -7511,7 +8472,11 @@ static void dcvk_push_tri_raw(const float* v, int semi_mode, int ztest) {
      * число второго буфера (шейдер - v_glint 1..2); цвет-альфу ниже перепишет номер вывода */
     for (int i = 0; i < 3; i++) { const float gq = v[i * VERT_FLOATS + 7];
         if (gq >= 15.5f && gq <= 17.5f) s_rvMap[((size_t)s_nverts + (size_t)i) * 4 + 3] = gq - 15.0f;
-        else if (gq >= 31.5f && gq <= 63.5f) s_rvMap[((size_t)s_nverts + (size_t)i) * 4 + 3] = -(gq - 31.0f); }   /* 20.10: её кость -> -(кость + 1) */
+        else if (gq >= 31.5f && gq <= 63.5f) s_rvMap[((size_t)s_nverts + (size_t)i) * 4 + 3] = -(gq - 31.0f);     /* 20.10: её кость -> -(кость + 1) */
+        else if (gq > 63.5f && gq < 63.5f + (float)(ACTW_ROWS + PIECEW_ROWS)) {                                    /* 29.10: строка актёра */
+            s_rvMap[((size_t)s_nverts + (size_t)i) * 4 + 3] = -(gq + 1.0f);                                       /* -> -(65 + строка) */
+            if (gq < 63.5f + (float)ACTW_ROWS)                                            /* 30.10: строки 240.. - куски туннеля */
+                s_awDrawn |= 1u << ((int)(gq - 63.5f) / ACTW_NMAX); } }                   /* разбор 1: его слот нарисован в этом кадре */
     occ_note(v, 3);                                /* 09.10: заслонивший — и в память процессора (рамка на картах теней) */
 
     /* LIFT THE GAME'S DECALS OFF THE FLOOR.
@@ -7746,6 +8711,7 @@ static int s_outW = 0, s_outH = 0;      /* active region of the last render */
  * (s_colImg ещё держит его) */
 static void dx_full_readback(void) {
     if (ptvk_lost() || !s_lastShared || !s_rbBuf || !s_colImg || !s_outW || !s_outH) return;
+    if (vk_pending() || s_pendKind) async_guard("readback");   /* 29.10.2026 (async): кадр в полёте - сначала его */
     struct GpuGuard { GpuGuard() { ptvk_gpu_lock(); } ~GpuGuard() { ptvk_gpu_unlock(); } } gpu_guard;
     cmdBegin();
     VkBufferImageCopy out{};
@@ -7791,8 +8757,16 @@ struct WarpSnap {
     int vcopy = 0;                         /* 25.10: вершины кадра скопированы в s_wsVb / s_wsRv */
     std::vector<MeshRef> mrefs;            /* 25.10: меши его draw (Draw::mref) */
     int pairs = 0;                         /* 26.10: пары кусков собраны (s_pairSet, pair_build) */
+    int set = 0;                           /* 29.10.2026 (async): набор потоков вершин кадра A */
+    unsigned amask = 0;                    /* 29.10.2026 (разбор 1): слоты актёров с вершинами со строкой (s_awDrawn) */
 };
 static WarpSnap s_wsnap;
+/* 29.10.2026 (async): потоки вершин снимка - набор его кадра A (без DC_VK_ASYNC набор один, это те же s_vmap и прочие) */
+static float*    snap_vmap(void)  { return s_asyncMode ? s_vmapS[s_wsnap.set & 1] : s_vmap; }
+static uint32_t* snap_pvmap(void) { return s_asyncMode ? s_pvMapS[s_wsnap.set & 1] : s_pvMap; }
+static VkBuffer  snap_vbuf(void)  { return s_asyncMode ? s_vbufS[s_wsnap.set & 1] : s_vbuf; }
+static VkBuffer  snap_rvbuf(void) { return s_asyncMode ? s_rvBufS[s_wsnap.set & 1] : s_rvBuf; }
+static VkBuffer  snap_pvbuf(void) { return s_asyncMode ? s_pvBufS[s_wsnap.set & 1] : s_pvBuf; }
 /* 26.10.2026: пары кусков (gte.cpp - учёт проекций по проходам; сборка - pair_build у warp_pc_make) */
 extern "C" int g_dc_pair_track, g_dc_dma_pass, g_dc_pass_id;
 extern "C" int dc_pair_pass_get(int pass, int* nproj);
@@ -7920,6 +8894,12 @@ extern "C" float dcvk_frame_alpha_used(void) { return s_frame_alpha_used; }   /*
  * курс, прицел, кости рук - состояние игры (memory.c, pt_anim.c, pt_renderer.c), которое эмуляция следующего такта
  * перезаписывает. Поток показа (main.cpp DC_PRESENT_THREAD) рисует кадры между тактами вместе с эмуляцией - он берёт эти
  * значения из снимка на момент показа кадра такта (dcvk_warp_pub). Главный поток снимает их прямо перед расчётом, как было. */
+/* 29.10.2026: враги и NPC - актёр слота k одного прохода (pt_renderer.c pt_act_get; actor_warp_make); разбор 1: load - номер
+ * загрузки сейва, sig - подпись цепочки узлов */
+struct ActIn {
+    unsigned mask, model, sig; int kind, nn, dh, load; int scl[3]; signed char par[ACTW_NMAX];
+    float r[ACTW_NMAX][9], t[ACTW_NMAX][3], D[9], T[3];
+};
 struct WarpIn {
     int cams; float Nr[9], er[3], tr[3], Nn[9], en3[3], tn[3]; unsigned long long fr, fn;   /* dc_nots_warp_cams */
     int aim, tank, strafe, turn; float dcam, dher;           /* прицел, Tank / RE4, стрейф, её поворот (dc_nots_warp_turn) */
@@ -7927,6 +8907,10 @@ struct WarpIn {
     int dhN; float dNd[9], tNd[3];                          /* 26.10: переприцел прохода N (корпус между тактами) */
     unsigned okA, okN; float rA[16][9], tAb[16][3], rNb[16][9], tNb[16][3];   /* кости 0..15 проходов A и N (биты - есть; 25.10: все) */
     int okW; float rw[9], tw[3];                            /* корпус прохода A «миром» (строка armwarp) */
+    int actOn; unsigned actMask; ActIn act[2][ACTW_SLOTS];  /* 29.10: враги и NPC проходов A и N (DC_ACTOR_WARP); маска - кадр A */
+    int pwN, dnN; unsigned char pwOk[PIECEW_ROWS]; unsigned pwGp[PIECEW_ROWS];   /* 30.10: куски туннеля (pt_piece_get), dnN - есть D N */
+    float pwD[9], pwT[3], dN[9], tN[3];                     /* переприцел кадра A (обход) и прохода N (dc_nots_delta_next) */
+    float pwRa[PIECEW_ROWS][9], pwTa[PIECEW_ROWS][3], pwRn[PIECEW_ROWS][9], pwTn[PIECEW_ROWS][3];
 };
 static void warp_in_take(WarpIn* w);
 static int warp_pc_make(float alpha, float wpc[16], int* stand, int dbg, double* o_ang, double* o_de, double* o_dt,
@@ -7958,9 +8942,15 @@ static void glint_ubo_update(void) {
     }
     s_shUboMap[456] = x; s_shUboMap[457] = y; s_shUboMap[458] = z; s_shUboMap[459] = wid;
 }
+static int s_carryMesh = 0;   /* 29.10.2026 (async, разбор): кадр A перенёс меш мода из комнаты прошлого показа - он и кадры B после него синхронно */
+static unsigned s_dithcPend = 0;     /* 31.10.2026: места карты решётки, чьи блоки ещё не скопированы в текстуру VRAM */
+static int s_fhPend = 0, s_fhRect[4]; /* 31.10.2026: прямоугольник маски лиц (x, y, w, h в словах), ещё не скопированный */
 extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
                                            int dispW, int dispH, int scale) {
     if (ptvk_lost()) return nullptr;    /* 18.10: видеокарта потеряна - кадр родным путём (ptvk_wait_fence) */
+    if (vk_pending() || s_pendKind) async_guard("render");   /* 29.10.2026 (async): прошлый кадр в полёте - сначала его */
+    const int asyncReq = s_asyncFrame; s_asyncFrame = 0;     /* main.cpp: этот кадр - заданием показа (dcvk_async_frame) */
+    s_carryMesh = 0;
     /* whole render (record + submit + fence + readback) under the GPU lock:
      * the PT trace thread shares the queue and the VRAM image/staging. */
     struct GpuGuard { GpuGuard() { ptvk_gpu_lock(); } ~GpuGuard() { ptvk_gpu_unlock(); } } gpu_guard;
@@ -8312,11 +9302,39 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
           } }
     }
 
-    ptvk_upload_vram(sw_vram_base());   /* fresh textures for this frame */
+    const unsigned short* const vramNow = sw_vram_base();
+    ptvk_upload_vram(vramNow);          /* fresh textures for this frame */
+    /* 31.10.2026: карта решётки (pt_renderer.c dc_dithc_stage) - из того же снимка VRAM, в строки 512..1023 промежуточного
+     * буфера; блоки изменённых мест уходят в видеокарту вместе с VRAM (ниже, «VRAM staging copy»). Новая текстура VRAM -
+     * все места заново. Кадра в полёте нет (async), буфер свободен. */
+    { static VkImage s_dithcImg = VK_NULL_HANDLE;
+      if (C->vramStagingMap && ptvk_vram_dirty()) {
+          const int force = C->vramImg != s_dithcImg;
+          s_dithcImg = C->vramImg;
+          s_dithcPend |= dc_dithc_stage((unsigned short*)C->vramStagingMap + 1024 * 512, vramNow, force);
+      } }
+    /* 31.10.2026: маска лиц (gpu.c dc_facehd_stage) - тексели, которые анимация лица сейчас изменила, в строки 1024..1535;
+     * только при текстурах из mods. Прямоугольник уходит в видеокарту вместе с VRAM. */
+    { static VkImage s_fhImg = VK_NULL_HANDLE;
+      if (C->vramStagingMap && ptvk_vram_dirty() && s_trepOn > 0 && dc_facehd_enabled()) {
+          const int force = C->vramImg != s_fhImg;
+          int rc[4];
+          s_fhImg = C->vramImg;
+          if (dc_facehd_stage((unsigned short*)C->vramStagingMap + 1024 * 1024, force, rc)) {
+              if (!s_fhPend) { for (int k = 0; k < 4; k++) s_fhRect[k] = rc[k]; }
+              else {
+                  const int x0 = std::min(s_fhRect[0], rc[0]), y0 = std::min(s_fhRect[1], rc[1]);
+                  const int x1 = std::max(s_fhRect[0] + s_fhRect[2], rc[0] + rc[2]), y1 = std::max(s_fhRect[1] + s_fhRect[3], rc[1] + rc[3]);
+                  s_fhRect[0] = x0; s_fhRect[1] = y0; s_fhRect[2] = x1 - x0; s_fhRect[3] = y1 - y0;
+              }
+              s_fhPend = 1;
+          }
+      } }
 
     /* 25.09: MSAA и SSAO этого кадра. Объекты собираются здесь, до записи команд (пересборка ждёт простоя GPU).
      * SSAO — только в кадре мира с 3D (как у кадра B): меню, плоские экраны, копии кадра, загадка на мониторе — без него. */
     raster_feat_sync();                                /* 25.10.2026: конвейеры - под опции меню */
+    raster_nf_sync();                                  /* 30.10.2026: и набор без рельефа вспышки (в фоне) */
     post_fit_note(w, h, !s_prev_no3d);                 /* 24.10: цели SSAO, свечения, дымки - по кадрам с 3D */
     const int msN = msaaEnsure(w, h, !s_prev_no3d);   /* 24.10: цели MSAA - по кадрам с 3D */
     const int ppWorld = !s_prev_no3d && !s_flat_frame && !s_frameCopy && !s_prev_copyflat && !s_mon_frame
@@ -8373,7 +9391,7 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
     s_mpfFrame = mpfFrame;
     /* 27.09 (2): тени без зерна — пирамида карт теней ламп (объекты собираются до записи команд) */
     const int spfFrame = s_shOk && s_shN > 0 && s_spfWant && s_spfMask && s_shUboMap && spfEnsure();
-    VkPipeline* const P  = (msN > 1) ? s_pipesMS : s_pipes;
+    VkPipeline* const P  = (msN > 1) ? s_pipesMS : raster_pipes_1x();   /* 30.10.2026: без вспышки - набор без её рельефа */
     const VkPipeline  BG = (msN > 1) ? s_bgPipeMS : s_bgPipe;
 
     trep_frame_prepare();     /* 05.10: образы текстур PNG из mods, декодированных к этому кадру (до записи команд) */
@@ -8396,11 +9414,31 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
         toDst.srcQueueFamilyIndex = toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         vkCmdPipelineBarrier(s_cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toDst);
-        VkBufferImageCopy bic{};
-        bic.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        bic.imageExtent = { 1024, 512, 1 };
+        VkBufferImageCopy bic[1 + 8 + 1]{};
+        bic[0].imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        bic[0].imageExtent = { 1024, 512, 1 };
+        uint32_t nbic = 1;
+        for (int s = 0; s < 8; s++) {        /* 31.10.2026: блоки 256x256 мест карты решётки, изменённых с прошлой копии */
+            if (!(s_dithcPend & (1u << s))) continue;
+            VkBufferImageCopy& b = bic[nbic++];
+            b.bufferOffset = (VkDeviceSize)((512 + (s >> 2) * 256) * 1024 + (s & 3) * 256) * 2;
+            b.bufferRowLength = 1024;
+            b.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            b.imageOffset = { (s & 3) * 256, 512 + (s >> 2) * 256, 0 };
+            b.imageExtent = { 256, 256, 1 };
+        }
+        s_dithcPend = 0;
+        if (s_fhPend) {                      /* 31.10.2026: маска лиц */
+            VkBufferImageCopy& b = bic[nbic++];
+            b.bufferOffset = (VkDeviceSize)((1024 + s_fhRect[1]) * 1024 + s_fhRect[0]) * 2;
+            b.bufferRowLength = 1024;
+            b.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            b.imageOffset = { s_fhRect[0], 1024 + s_fhRect[1], 0 };
+            b.imageExtent = { (uint32_t)s_fhRect[2], (uint32_t)s_fhRect[3], 1 };
+            s_fhPend = 0;
+        }
         vkCmdCopyBufferToImage(s_cmd, C->vramStaging, C->vramImg,
-                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, nbic, bic);
         VkImageMemoryBarrier toRead = toDst;
         toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -8410,6 +9448,7 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toRead);
         ptvk_vram_clear_dirty();
     }
+    font_stage_sync();        /* 29.10.2026 (async): копия атласа - в промежуточный буфер (кадра в полёте нет) */
     fontHiresUpload(s_cmd);   /* hi-res атлас шрифта, если пришёл новый */
     trep_frame_upload(s_cmd); /* 05.10: и текстуры PNG из mods */
     if (s_prevImg && !s_prevOnGpu) {   /* 15.09: новый образ прошлого кадра — сразу в SHADER_READ_ONLY */
@@ -8575,7 +9614,10 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
         int had3dA = 0;
         for (size_t di = (size_t)drawFrom; di < s_draws.size() && !had3dA; di++) { int k = s_draws[di].kind; if (k == 0 || (k >= 2 && k < 6)) had3dA = 1; }
         int standA = 0;
-        if (had3dA && warp_pc_make(s_frame_alpha, wpcA, &standA, 0, nullptr, nullptr, nullptr, nullptr, nullptr) && !standA) {
+        s_awLive = 1;                                    /* 29.10.2026 (разбор 1): кадр A - маска актёров его живого потока */
+        const int warpOkA = had3dA && warp_pc_make(s_frame_alpha, wpcA, &standA, 0, nullptr, nullptr, nullptr, nullptr, nullptr);
+        s_awLive = 0;
+        if (warpOkA && !standA) {
             int dxA = 0, dyA = 0; gpu_get_draw_offset(&dxA, &dyA);
             wpcA[12] = g_pt_proj_ofx + (float)dxA; wpcA[13] = g_pt_proj_ofy + (float)dyA;
             wpcA[14] = g_pt_proj_h; wpcA[15] = g_pt_proj_h * dc_ws_sq();
@@ -8594,6 +9636,7 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
     }
 
     pp_ts(0);
+    rbi.renderPass = rp_keep_main(rbi.renderPass, msN);   /* 30.10.2026: DC_RP_KEEP_LAYOUT */
     vkCmdBeginRenderPass(s_cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
 
     VkViewport vpt{ 0.f, 0.f, (float)w, (float)h, 0.f, 1.f };
@@ -8809,6 +9852,7 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
                     for (size_t i = 0; i < keepD.size(); i++) {
                         Draw nd = keepD[i]; nd.first += base;
                         if (nd.clip) { nd.cr[0] += sdx; nd.cr[2] += sdx; nd.cr[1] += sdy; nd.cr[3] += sdy; }
+                        if (nd.mesh >= 0) s_carryMesh = 1;   /* 29.10.2026 (async): его половина экземпляров - прошлого кадра, эмуляция её перепишет */
                         s_draws.push_back(nd);
                     }
                     static long said = 0;
@@ -9336,6 +10380,7 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
         }
     }
     vkCmdEndRenderPass(s_cmd);
+    rp_keep_main_done(msN);   /* 30.10.2026: цвет - TRANSFER_SRC, глубина - DEPTH_STENCIL_ATTACHMENT */
     pp_ts(1);
     if (aaMode) aa_run(aaMode, w, h, aoFrame || volFrame);   /* 25.10.2026: сглаживание - до SSAO, свечения и дымки */
     pp_ts(13);
@@ -9415,11 +10460,16 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
     pp_ts(5);                                               /* 09.10: после копий кадра (DC_VK_STAGES) */
     LARGE_INTEGER tsub, twait;                              /* 09.10: DC_VK_STAGES=1 - время этапов кадра */
     QueryPerformanceCounter(&tsub);
-    if (!cmdSubmitWait()) { rlog("[VKR] submit/hang\n"); s_prevValid = 0; s_wsnap.valid = 0; return nullptr; }
-    test_gpu_slow(0);
+    /* 29.10.2026 (async): кадр задания показа - без ожидания (m1 аудита: только кадр в общую текстуру); иначе ждём, как было */
+    const int asyncNow = asyncReq && s_asyncMode && shFrame && !s_carryMesh;
+    bool subOk = cmdSubmitAsync(1);
+    if (subOk && !asyncNow) subOk = cmdWaitPending() != 0;
+    if (!subOk) { rlog("[VKR] submit/hang\n"); s_prevValid = 0; s_wsnap.valid = 0; rp_keep_forget(); return nullptr; }   /* 30.10.2026: rp_keep_forget */
+    if (!asyncNow) test_gpu_slow(0);
     QueryPerformanceCounter(&twait);
     s_lastShared = shFrame ? 1 : 0;
-    pp_ts_read();
+    if (asyncNow) s_pendKind = 1;   /* метки - после забора (dcvk_after_fence) */
+    else pp_ts_read(1);
     {   /* 17.09 вечер: снимок кадра для перепроецирования в кадре B */
         int had3d = 0;
         for (size_t di = (size_t)drawFrom; di < s_draws.size() && !had3d; di++) { int k = s_draws[di].kind; if (k == 0 || (k >= 2 && k < 6)) had3d = 1; }
@@ -9434,6 +10484,7 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
               std::fprintf(stderr, "warp: snapshot world=%d (had3d %d flat %d copy %d copyflat %d) draws %d verts %d%c",
                            s_wsnap.world, had3d, s_flat_frame, s_frameCopy, s_prev_copyflat, (int)s_draws.size(), s_nverts, 10); } }
         s_wsnap.nverts = s_nverts;
+        s_wsnap.amask = s_awDrawn;                       /* 29.10.2026 (разбор 1): слоты актёров кадра A */
         s_wsnap.dispX = dispX; s_wsnap.dispY = dispY; s_wsnap.dispW = dispW; s_wsnap.dispH = dispH; s_wsnap.w = w; s_wsnap.h = h;
         s_wsnap.pc[0] = pc[0]; s_wsnap.pc[1] = pc[1]; s_wsnap.pc[2] = pc[2]; s_wsnap.pc[3] = pc[3];
         s_wsnap.pc[4] = 0.f; s_wsnap.pc[5] = pc[5]; s_wsnap.pc[6] = pc[6]; s_wsnap.pc[7] = pc7_base;
@@ -9455,6 +10506,8 @@ extern "C" const unsigned int* dcvk_render(int dispX, int dispY,
             s_wsnap.mrefs.push_back(r);
         }
         s_wsnap.vcopy = vcopy;
+        s_wsnap.set = s_set;                             /* 29.10.2026 (async): его набор потоков; эмуляция - в другой */
+        if (s_asyncMode) s_setSubmitted = 1;
         s_wsnap.frame++;
         s_wsnap.pairs = 0;                               /* 26.10: пары кусков кадра A и следующего такта (двери; main.cpp включает учёт) */
         { static int pen = -1;
@@ -9597,6 +10650,18 @@ extern "C" int pt_skel_get_view(int pass, int f, float r9[9], float tr3[3]);   /
 extern "C" int pt_skel_get_delta(int pass, float D[9], float T[3]);            /* 21.10 (3): переприцел этого вида в нашу камеру */
 extern "C" int pt_arm_warp_mode(void);
 extern "C" int dc_nots_delta_pass(int prev);
+extern "C" int pt_actor_warp_on(void);                                       /* 29.10: pt_renderer.c - враги и NPC между тактами */
+extern "C" unsigned pt_act_get(int pass, int k, int nmax, unsigned* model, int* kind, int* nn, int* scl, signed char* par,
+                               float* r, float* t, int* dh, float* D, float* T, int* load, unsigned* sig);
+extern "C" long g_aw_vtxn;                                                   /* разбор 1: pt_renderer.c, DC_ACTORWARP_DBG=1 */
+extern "C" int pt_piece_warp_on(void);                                       /* 30.10: pt_renderer.c - куски туннеля между тактами */
+extern "C" int pt_piece_get(int passA, int passN, int nmax, unsigned char* ok, unsigned* gp, float* D, float* T,
+                            float* Ra, float* Ta, float* Rn, float* Tn);
+extern "C" int dc_nots_delta_next(float D[9], float T[3]);                  /* 30.10: memory.c - переприцел прохода N */
+static void act_in_get(int pass, int k, ActIn* o) {
+    o->mask = pt_act_get(pass, k, ACTW_NMAX, &o->model, &o->kind, &o->nn, o->scl, o->par, &o->r[0][0], &o->t[0][0], &o->dh, o->D, o->T,
+                         &o->load, &o->sig);
+}
 static int arm_warp_vmode(void) {                                /* 21.10 (2): DC_ARM_WARP_VIEW=0 - кости «миром» */
     static int vmode = -1;
     if (vmode < 0) { const char* e = getenv("DC_ARM_WARP_VIEW"); vmode = (e && *e == '0') ? 0 : 1; }
@@ -9622,6 +10687,19 @@ static void warp_in_take(WarpIn* w) {                            /* 25.10: вс�
     w->dhA = vmode ? pt_skel_get_delta(w->pA, w->dA, w->tA) : 0;
     w->dhN = (vmode && w->pN == w->pA + 1) ? pt_skel_get_delta(w->pN, w->dNd, w->tNd) : 0;
     w->okW = pt_skel_get(w->pA, 0, w->rw, w->tw);
+    w->actOn = pt_actor_warp_on();                                  /* 29.10: враги и NPC - снимки проходов A и N */
+    if (w->actOn) {
+        w->actMask = s_awLive ? s_awDrawn : s_wsnap.amask;          /* разбор 1: их вершины в кадре A (кадр A под DC_HZ - живой поток) */
+        for (int k = 0; k < ACTW_SLOTS; k++) {
+            act_in_get(w->pA, k, &w->act[0][k]);
+            if (w->pN == w->pA + 1) act_in_get(w->pN, k, &w->act[1][k]);
+        }
+    }
+    if (pt_piece_warp_on() && w->pN == w->pA + 1) {                  /* 30.10: куски туннеля кадра A и переприцел прохода N */
+        w->pwN = pt_piece_get(w->pA, w->pN, PIECEW_ROWS, w->pwOk, w->pwGp, w->pwD, w->pwT, &w->pwRa[0][0], &w->pwTa[0][0],
+                              &w->pwRn[0][0], &w->pwTn[0][0]);
+        if (w->pwN > 0) w->dnN = dc_nots_delta_next(w->dN, w->tN);
+    }
     if (w->cams == 2) warp_in_orig(w);
 }
 /* ⭐ 25.10.2026 - ВЕСЬ ЕЁ СКЕЛЕТ МЕЖДУ ТАКТАМИ (игрок: «вся анимация Регины... стробит больше, чем... при малых FPS, типа
@@ -9905,6 +10983,179 @@ static int arm_warp_make(float alpha, const WarpIn& in, int rigid, float hdl, in
             } } }
     return nb;
 }
+/* ⭐ 29.10.2026 - ВРАГИ И NPC МЕЖДУ ТАКТАМИ (руководитель: путь её костей - на слоты актёров 0..9; правило игрока - «только
+ * интерполировать мягко, ничего не добавлять»). Кадры между тактами двигали врагов и NPC одной нашей камерой: их поза и ход стояли
+ * тактом (30 Гц) - на 60-165 Гц раптор шагал рывками раз в такт рядом с плавной Региной. Теперь у каждого узла актёра (снимок
+ * прохода - pt_renderer.c aw_capture) доля пути от позы этого такта к позе следующего тем же счётом, что у её костей
+ * (arm_warp_make). Корень - как её корпус, только без её доворота и хода пивота (шейдер добавляет их лишь вершинам F_ACTOR): цель
+ * на доле 1 - корень прохода N в нашем виде N, переведённый в вид A (K = Nr Nn^T, ke = Nr (eN - eA)); в типе Original - камеры
+ * игры и единичные дельты, как у warp_in_orig. Узлы ниже - поворот к родителю (slerp) и сустав в системе родителя по таблице
+ * родителей самого актёра; узла без вершин в проходе нет - родителем идёт ближайший снятый предок. Масштаб актёра (+0xA4) в
+ * матрицах узлов снимается делением (ровный, тот же в обоих проходах; иначе или с перекосом - актёр позой такта). Актёр берётся,
+ * только если его вершины со строкой есть в кадре A (in.actMask: иначе кадр от него не меняется - повтор Fixed остаётся
+ * повтором, разбор 1) и он в обоих проходах (pN = pA + 1) с той же моделью, числом узлов, видом, таблицей родителей, подписью
+ * цепочки узлов и номером загрузки сейва (разбор 1: загрузка между проходами - другой мир). Ворота за такт:
+ * корень - угол / ход (DC_ACTOR_WARP_ROOT_ANG, рад, 0.9; DC_ACTOR_WARP_ROOT_MOVE, ед., 2000) - сработали: весь актёр позой такта;
+ * узел - угол / сдвиг сустава (DC_ACTOR_WARP_JOINT_ANG 1.2; DC_ACTOR_WARP_JOINT_OFS 300) - узел идёт за родителем. Строки - в
+ * блоке пар кусков UBO (пары и warp_pc_make в одном кадре не бывают): 667 (pq.w) = 1 - строки актёров есть, 668.. по две на
+ * узел (строка = слот * ACTW_NMAX + узел): кватернион, перенос + (w) есть, в виде кадра A. DC_ACTOR_WARP_HZ=N - доля актёров
+ * ступенями 29.97/N кадра игры (только замер; 0 - выкл.), DC_ACTORWARP_DBG=1 - строка actorwarp:. -> сколько строк сдвинуто. */
+static int actw_rot(const float* m, double k, double o[9]) {   /* поворот узла без масштаба актёра; 0 - не поворот */
+    double d[9], e = 0.0, q[4];
+    for (int i = 0; i < 9; i++) d[i] = (double)m[i] * k;
+    for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) {
+        const double v = d[r * 3] * d[c * 3] + d[r * 3 + 1] * d[c * 3 + 1] + d[r * 3 + 2] * d[c * 3 + 2] - (r == c ? 1.0 : 0.0);
+        if (fabs(v) > e) e = fabs(v); }
+    if (e > 0.02) return 0;                      /* неровный масштаб, перекос - не трогаем */
+    wq_from_m(d, q); wq_to_m(q, o);
+    return 1;
+}
+static void actw_slerp(const double q4[4], double ang, double a, double o[9]) {   /* доля a поворота q4 (угол ang) -> матрица */
+    double qa[4]; const double s = sin(ang * 0.5);
+    if (s > 1e-9) { const double k = sin(0.5 * ang * a) / s; qa[0] = q4[0] * k; qa[1] = q4[1] * k; qa[2] = q4[2] * k; qa[3] = cos(0.5 * ang * a); }
+    else { qa[0] = q4[0] * a; qa[1] = q4[1] * a; qa[2] = q4[2] * a; qa[3] = 1.0; }
+    const double n = sqrt(qa[0] * qa[0] + qa[1] * qa[1] + qa[2] * qa[2] + qa[3] * qa[3]); for (int i = 0; i < 4; i++) qa[i] /= n;
+    wq_to_m(qa, o);
+}
+static int actor_warp_make(float alpha, const WarpIn& in) {
+    if (!in.actOn || !s_shUboMap) return 0;      /* DC_ACTOR_WARP=0 - блок UBO не трогается */
+    float* const rows = s_shUboMap + 668;
+    s_shUboMap[667] = 0.f;
+    static int dbg = -1, hz = 0; static double rmaxa = 0.9, rmaxj = 2000.0, jmaxa = 1.2, jmaxj = 300.0;
+    if (dbg < 0) { const char* e = getenv("DC_ACTORWARP_DBG"); dbg = (e && *e == '1') ? 1 : 0;
+                   e = getenv("DC_ACTOR_WARP_HZ"); hz = e ? atoi(e) : 0;
+                   e = getenv("DC_ACTOR_WARP_ROOT_ANG"); if (e) rmaxa = atof(e);
+                   e = getenv("DC_ACTOR_WARP_ROOT_MOVE"); if (e) rmaxj = atof(e);
+                   e = getenv("DC_ACTOR_WARP_JOINT_ANG"); if (e) jmaxa = atof(e);
+                   e = getenv("DC_ACTOR_WARP_JOINT_OFS"); if (e) jmaxj = atof(e); }
+    double a = alpha < 0.f ? 0.0 : alpha > 1.f ? 1.0 : (double)alpha;
+    if (hz > 0) { const double st = 29.97 / (double)hz; a = st >= 1.0 ? 0.0 : floor(a / st + 1e-6) * st; }
+    int nA = 0, nact = 0, nrow = 0, njg = 0, sk[6] = { 0, 0, 0, 0, 0, 0 };   /* не в кадре A, нет в N, другой актёр, масштаб, дельта, ворота корня */
+    double mrj = 0.0, mra = 0.0, mja = 0.0;
+    const double I9[9] = { 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0 };
+    for (int k = 0; k < ACTW_SLOTS && a > 0.0; k++) {
+        float* const rk = rows + (size_t)k * ACTW_NMAX * 8;
+        for (int f = 0; f < ACTW_NMAX; f++) rk[f * 8 + 7] = 0.f;      /* строки нет - вершины как в кадре A */
+        const ActIn& A = in.act[0][k]; const ActIn& N = in.act[1][k];
+        if (!A.mask) continue;                                         /* нет в проходе A - нет и его вершин */
+        nA++;
+        if (!((in.actMask >> k) & 1u)) { sk[0]++; continue; }          /* разбор 1: в кадре A нет его вершин со строкой - кадр от него не меняется */
+        if (!N.mask) { sk[1]++; continue; }
+        int same = A.model == N.model && A.nn == N.nn && A.kind == N.kind && A.nn > 0 && A.nn <= ACTW_NMAX &&
+                   A.sig == N.sig && A.load == N.load;                  /* разбор 1: те же узлы, без загрузки сейва между проходами */
+        for (int f = 0; same && f < A.nn; f++) if (A.par[f] != N.par[f]) same = 0;
+        if (!same) { sk[2]++; continue; }
+        if (A.scl[0] <= 0 || A.scl[1] != A.scl[0] || A.scl[2] != A.scl[0] ||
+            N.scl[0] != A.scl[0] || N.scl[1] != A.scl[1] || N.scl[2] != A.scl[2]) { sk[3]++; continue; }
+        if (in.cams != 2 && !(A.dh && N.dh)) { sk[4]++; continue; }
+        const int nn = A.nn;
+        const double is = 4096.0 / (double)A.scl[0];
+        double Do[9], DNo[9], TA[3] = { 0.0, 0.0, 0.0 }, TN[3] = { 0.0, 0.0, 0.0 };
+        if (in.cams == 2) { memcpy(Do, I9, sizeof Do); memcpy(DNo, I9, sizeof DNo); }   /* Original: вид кадра - вид GTE */
+        else { m3_ortho(A.D, Do); m3_ortho(N.D, DNo); for (int r = 0; r < 3; r++) { TA[r] = A.T[r]; TN[r] = N.T[r]; } }
+        double RA[ACTW_NMAX][9], RN[ACTW_NMAX][9], M[ACTW_NMAX][9], T[ACTW_NMAX][3];
+        int pq[ACTW_NMAX]; unsigned have = 0, haveN = 0; int bad = 0;
+        for (int f = 0; f < nn && !bad; f++) {
+            pq[f] = -2;
+            if (!((A.mask >> f) & 1u)) continue;                       /* узла нет в проходе A (без вершин) */
+            if (!actw_rot(A.r[f], is, RA[f])) { bad = 1; break; }
+            if ((N.mask >> f) & 1u) { if (!actw_rot(N.r[f], is, RN[f])) { bad = 1; break; } haveN |= 1u << f; }
+            have |= 1u << f;
+            int q = A.par[f];
+            while (q >= 0 && !((have >> q) & 1u)) q = A.par[q];         /* родителя нет в проходе - ближайший предок */
+            pq[f] = q;
+        }
+        if (bad) { sk[3]++; continue; }
+        double NrD[9], K[9], ke[3];
+        for (int i = 0; i < 9; i++) NrD[i] = in.Nr[i];
+        { double NnD[9]; for (int i = 0; i < 9; i++) NnD[i] = in.Nn[i];
+          m3_mult(NrD, NnD, K);                                         /* вид N -> вид A: v_A = Nr Nn^T v_N + Nr (eN - eA) */
+          const double ee[3] = { (double)in.en3[0] - in.er[0], (double)in.en3[1] - in.er[1], (double)in.en3[2] - in.er[2] };
+          m3_v(NrD, ee, ke); }
+        int rootx = 0, jg = 0; double ja = 0.0;
+        for (int f = 0; f < nn && !rootx; f++) {
+            if (!((have >> f) & 1u)) continue;
+            const float* ta = A.t[f];
+            const int q = pq[f];
+            if (q < 0) {                                                /* корень: родитель - сам актёр */
+                if (!((haveN >> f) & 1u)) { rootx = 1; break; }
+                double RAv[9], RNv[9], tav[3], tnv[3], x[3], Rt[9], Tt[3], DR[9], q4[4];
+                m3_mul(Do, RA[f], RAv); m3_mul(DNo, RN[f], RNv);        /* корень в нашем виде своего кадра */
+                { const double a3[3] = { ta[0], ta[1], ta[2] }, n3[3] = { N.t[f][0], N.t[f][1], N.t[f][2] };
+                  m3_v(Do, a3, x);  for (int r = 0; r < 3; r++) tav[r] = x[r] + TA[r];
+                  m3_v(DNo, n3, x); for (int r = 0; r < 3; r++) tnv[r] = x[r] + TN[r]; }
+                m3_mul(K, RNv, Rt); m3_v(K, tnv, x); for (int r = 0; r < 3; r++) Tt[r] = x[r] + ke[r];   /* корень N в виде A */
+                m3_mult(Rt, RAv, DR); wq_from_m(DR, q4);
+                const double ang = 2.0 * acos(q4[3] > 1.0 ? 1.0 : q4[3]);
+                const double dj = sqrt((Tt[0] - tav[0]) * (Tt[0] - tav[0]) + (Tt[1] - tav[1]) * (Tt[1] - tav[1]) + (Tt[2] - tav[2]) * (Tt[2] - tav[2]));
+                if (ang > mra) mra = ang; if (dj > mrj) mrj = dj;
+                if (ang > rmaxa || dj > rmaxj) { rootx = 1; break; }    /* скачок (бросок, телепорт, смена) - весь актёр позой такта */
+                double Ra[9], t2[9]; actw_slerp(q4, ang, a, Ra);
+                m3_tmul(Do, Ra, t2); m3_mul(t2, Do, M[f]);              /* в вид GTE прохода A: M = D^T Ra D */
+                const double y[3] = { a * (Tt[0] - tav[0]), a * (Tt[1] - tav[1]), a * (Tt[2] - tav[2]) };
+                m3_tv(Do, y, x); for (int r = 0; r < 3; r++) T[f][r] = ta[r] + x[r];   /* T = tA + D^T a (Tt - tav) */
+            } else {                                                    /* узел: к родителю - доля пути, сустав в его системе */
+                double Qf[9], JA[3], JN[3];
+                memcpy(Qf, I9, sizeof Qf);
+                { const double da[3] = { (double)ta[0] - A.t[q][0], (double)ta[1] - A.t[q][1], (double)ta[2] - A.t[q][2] };
+                  m3_tv(RA[q], da, JA); }
+                for (int i = 0; i < 3; i++) JN[i] = JA[i];
+                if (((haveN >> f) & 1u) && ((haveN >> q) & 1u)) {
+                    const double dn[3] = { (double)N.t[f][0] - N.t[q][0], (double)N.t[f][1] - N.t[q][1], (double)N.t[f][2] - N.t[q][2] };
+                    double jn[3], LA[9], LN[9], DL[9], q4[4];
+                    m3_tv(RN[q], dn, jn);
+                    m3_tmul(RA[q], RA[f], LA); m3_tmul(RN[q], RN[f], LN); m3_mult(LN, LA, DL); wq_from_m(DL, q4);
+                    const double ang = 2.0 * acos(q4[3] > 1.0 ? 1.0 : q4[3]);
+                    const double dj = sqrt((jn[0] - JA[0]) * (jn[0] - JA[0]) + (jn[1] - JA[1]) * (jn[1] - JA[1]) + (jn[2] - JA[2]) * (jn[2] - JA[2]));
+                    if (ang > ja) ja = ang;
+                    if (ang > jmaxa || dj > jmaxj) jg++;                /* скачок позы - узел идёт за родителем */
+                    else { actw_slerp(q4, ang, a, Qf); for (int i = 0; i < 3; i++) JN[i] = jn[i]; }
+                }
+                double t1[9], t2[9], y[3], y2[3], y3[3];
+                m3_mul(RA[q], Qf, t1); m3_mult(t1, RA[q], t2); m3_mul(M[q], t2, M[f]);    /* M_f = M_q Rq Qf Rq^T */
+                for (int i = 0; i < 3; i++) y[i] = JA[i] + a * (JN[i] - JA[i]);
+                m3_v(RA[q], y, y2); m3_v(M[q], y2, y3);
+                for (int i = 0; i < 3; i++) T[f][i] = T[q][i] + y3[i];   /* T_f = T_q + M_q Rq (JA + a (JN - JA)) */
+            }
+        }
+        if (rootx) { sk[5]++; continue; }
+        nact++; njg += jg; if (ja > mja) mja = ja;
+        for (int f = 0; f < nn; f++) {
+            if (!((have >> f) & 1u)) continue;
+            const double tf3[3] = { A.t[f][0], A.t[f][1], A.t[f][2] };
+            double mt[3], cw[3];                                        /* вершина u кадра A (вид GTE) -> M u + c */
+            m3_v(M[f], tf3, mt);
+            for (int i = 0; i < 3; i++) cw[i] = T[f][i] - mt[i];
+            { double mq0[4]; wq_from_m(M[f], mq0);                      /* узел и его предки стоят - вершины как есть */
+              const double am = 2.0 * acos(mq0[3] > 1.0 ? 1.0 : mq0[3]);
+              const double dsp = sqrt((T[f][0] - tf3[0]) * (T[f][0] - tf3[0]) + (T[f][1] - tf3[1]) * (T[f][1] - tf3[1]) + (T[f][2] - tf3[2]) * (T[f][2] - tf3[2]));
+              if (am * 400.0 + dsp < 0.02) continue; }
+            double Mo[9], co[3];                                        /* в наш вид кадра A: v = D u + T */
+            { double t9[9], dc3[3], mo3[3];
+              m3_mul(Do, M[f], t9); m3_mult(t9, Do, Mo);
+              m3_v(Do, cw, dc3); m3_v(Mo, TA, mo3);
+              for (int r = 0; r < 3; r++) co[r] = dc3[r] + TA[r] - mo3[r]; }
+            double mq[4]; wq_from_m(Mo, mq);
+            float* const ro = rk + f * 8;
+            for (int i = 0; i < 4; i++) ro[i] = (float)mq[i];
+            for (int r = 0; r < 3; r++) ro[4 + r] = (float)co[r];
+            ro[7] = 1.f;
+            nrow++;
+        }
+    }
+    s_shUboMap[667] = nrow > 0 ? 1.f : 0.f;
+    if (dbg) { static unsigned long long lfn = ~0ull; static int la = -1; static ULONGLONG lt = 0; static long lvx = 0;
+        const int ai = (int)(a * 100.0 + 0.5); const ULONGLONG now = GetTickCount64();
+        if ((lfn != in.fn || la != ai) && now - lt >= 100) { lfn = in.fn; la = ai; lt = now;   /* не чаще 10 строк в секунду */
+            const long vx = g_aw_vtxn;                                  /* разбор 1: полигоны актёров по-вершинным поиском - позой такта */
+            std::fprintf(stderr, "actorwarp: flips %llu->%llu alpha %.2f (frame %.2f) passes %d->%d cams %d actors %d drawn %03X interpolated %d,"
+                                 " skipped: not drawn %d, not in next %d, other actor %d, scale %d, delta %d, root gate %d; rows %d,"
+                                 " root max move %.0f ang %.3f rad, joint max ang %.3f rad, gated joints %d; per-vertex polys at tick pose %ld%c",
+                         in.fr, in.fn, a, (double)alpha, in.pA, in.pN, in.cams, nA, in.actMask & 0x3FFu, nact, sk[0], sk[1], sk[2], sk[3],
+                         sk[4], sk[5], nrow, mrj, mra, mja, njg, vx - lvx, 10);
+            lvx = vx; } }
+    return nrow;
+}
 /* ⭐ 26.10.2026 - ПАРЫ КУСКОВ: КАДРЫ МЕЖДУ ТАКТАМИ У ДВЕРЕЙ (игрок: «ни сцены с открытием двери, ни катсцены... не должны менять
  * своё значение FPS»; «если игрок выставил 120 кадров, значит, будет везде 120 кадров»). Кадры между тактами двигают картинку
  * такта по нашей камере (warp_pc_make) - у дверей её нет, и там шло 30 новых кадров в секунду при любой частоте. Здесь каждый
@@ -10183,6 +11434,151 @@ static int pair_pc_make(float alpha, float wpc[16], float* pr, int* stand) {
 }
 /* main.cpp: у снимка кадра A есть пары кусков (кадры между тактами без нашей камеры - двери) */
 extern "C" int dcvk_pair_ready(void) { return s_wsnap.valid && !s_wsnap.dropped && s_wsnap.world && s_wsnap.pairs; }
+/* ⭐ 30.10.2026 - КУСКИ ТУННЕЛЯ МЕЖДУ ТАКТАМИ (игрок: «Туда тиранозавра. Да.»; попадания и кровь у него верные - их не трогаем).
+ * Погоня тиранозавра (комната 89) - беговая дорожка: камера стоит, а игра двигает куски туннеля ~400 ед. за такт; кадры между
+ * тактами двигали камеру, её и врагов, а туннель стоял кадром A и прыгал раз в такт. Кусок, который обход нарисовал историей
+ * слота (pt_renderer.c s_pw: кадр A - запись прошлого прохода Ra, Ta; следующий такт - запись сейчас Rn, Tn; переприцел кадра A
+ * D, T), идёт долей пути: точка кадра A vA = D (Ra u + Ta) + T, цель на доле 1 - та же точка следующего такта в нашем виде N
+ * (переприцел прохода N, dc_nots_delta_next), переведённая в вид A (K = Nr Nn^T, ke = Nr (eN - eA), как у врагов); в типе
+ * Original - камеры игры и единичные дельты. Rt = M_N M_A^-1: поворот - доля пути (slerp), начало куска - линейно. Строки -
+ * сразу за строками врагов (ACTW_ROWS + слот, тот же флаг 667, вид кадра A). Ворота за такт: ход больше DC_PIECE_WARP_MOVE
+ * (ед., 1500) - кусок перескочил назад (замер trex38: все три куска туннеля разом на 3600 = 4000 - 400 раз в 10 тактов; картинка
+ * дорожки повторяется через 4000, поэтому игра так и прячет перескок). Такой кусок сразу стоит на записи следующего такта и
+ * доезжает до неё последним ходом за такт: место на доле a = цель - (1 - a) ход; на доле 1 - ровно кадр A'. (Сплошной ход от
+ * кадра A уводил ближний конец куска на 400 вперёд - открывалась щель у камеры, и кадр не сходился с A'.) Ход за такт - ход
+ * записи этого куска за прошлый такт (вид GTE; скорость дорожки постоянна), нет прошлого такта - ход самого быстрого куска
+ * этого кадра без перескока (от 200 ед.), нет и его - стоит кадром A; поворот больше DC_PIECE_WARP_ANG (рад, 0.06) - стоит
+ * кадром A. Слоты «в запасе» (игра держит их на x = -2^31) не трогаются: их ход - только погрешность на такой дальности.
+ * DC_PIECE_WARP=0 - как было (pt_renderer.c), DC_PIECE_WARP_DBG=1 - строка piecewarp:
+ * (у слота: без буквы - своя строка, t - ход прошлого такта, d - ход донора, w - перескок без строки, p - в запасе, '-' - стоит),
+ * =12 - и записи кусков, =2 - строка на каждый кадр между тактами (и «none», когда кусков нет). -> сколько строк кусков поставлено. */
+static void pw_target(const double DN[9], const double TN[3], const double K[9], const double ke[3], const double tn[3], double oT[3]) {
+    double x[3], y[3];                                                 /* запись следующего такта -> начало куска в виде A */
+    m3_v(DN, tn, x); for (int r = 0; r < 3; r++) y[r] = x[r] + TN[r];
+    m3_v(K, y, x); for (int r = 0; r < 3; r++) oT[r] = x[r] + ke[r];
+}
+static double s_pwDT[PIECEW_ROWS][3];                                  /* ход записи куска за такт (вид GTE), проход и показ кадра A */
+static int s_pwDTpass[PIECEW_ROWS];
+static unsigned long long s_pwDTfr[PIECEW_ROWS];
+static int piece_warp_make(float alpha, const WarpIn& in) {
+    if (!s_shUboMap) return 0;
+    float* const prw = s_shUboMap + 668 + (size_t)ACTW_ROWS * 8;
+    for (int k = 0; k < PIECEW_ROWS; k++) prw[k * 8 + 7] = 0.f;      /* строки нет - кусок как в кадре A */
+    if (!in.actOn) s_shUboMap[667] = 0.f;                              /* с врагами флаг ставит actor_warp_make */
+    static int dbg = -1; static double gang = 0.06, gmove = 1500.0;
+    if (dbg < 0) { const char* e = getenv("DC_PIECE_WARP_DBG"); dbg = (e && (*e == '1' || *e == '2')) ? *e - '0' : 0;
+                   e = getenv("DC_PIECE_WARP_ANG"); if (e) gang = atof(e);
+                   e = getenv("DC_PIECE_WARP_MOVE"); if (e) gmove = atof(e);
+                   for (int k = 0; k < PIECEW_ROWS; k++) s_pwDTpass[k] = -100000; }   /* хода прошлого такта ещё нет */
+    const double a = alpha < 0.f ? 0.0 : alpha > 1.f ? 1.0 : (double)alpha;
+    if (in.pwN <= 0 || a <= 0.0 || (in.cams != 2 && !in.dnN)) {        /* нет снимка кусков, доля 0, нет переприцела N */
+        if (dbg == 2) std::fprintf(stderr, "piecewarp: none flips %llu->%llu alpha %.2f passes %d->%d cams %d pieces %d next re-aim %d%c",
+                                   in.fr, in.fn, a, in.pA, in.pN, in.cams, in.pwN, in.dnN, 10);
+        return 0;
+    }
+    const double I9[9] = { 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0 };
+    double DA[9], TA[3], DN[9], TN[3] = { 0.0, 0.0, 0.0 }, K[9], ke[3];
+    for (int i = 0; i < 9; i++) DA[i] = in.pwD[i];                     /* ровно тот переприцел, которым нарисован кадр A */
+    for (int i = 0; i < 3; i++) TA[i] = in.pwT[i];
+    if (in.cams == 2) memcpy(DN, I9, sizeof DN);                       /* Original: вид кадра - вид GTE */
+    else { for (int i = 0; i < 9; i++) DN[i] = in.dN[i]; for (int i = 0; i < 3; i++) TN[i] = in.tN[i]; }
+    { double NrD[9], NnD[9]; for (int i = 0; i < 9; i++) { NrD[i] = in.Nr[i]; NnD[i] = in.Nn[i]; }
+      m3_mult(NrD, NnD, K);                                            /* вид N -> вид A */
+      const double ee[3] = { (double)in.en3[0] - in.er[0], (double)in.en3[1] - in.er[1], (double)in.en3[2] - in.er[2] };
+      m3_v(NrD, ee, ke); }
+    double rq[PIECEW_ROWS][4], rmv[PIECEW_ROWS], roA[PIECEW_ROWS][3], roT[PIECEW_ROWS][3], rso[PIECEW_ROWS][3], rdd[PIECEW_ROWS][3];
+    int st[PIECEW_ROWS];      /* 0 - стоит, 1 - своя строка, 2 - перескок без хода, 3 - перескок, ход донора, 4 - перескок, ход прошлого такта, 5 - в запасе */
+    int npc = 0, nmov = 0, nga = 0, nwrap = 0, ntk = 0, ndon = 0, npark = 0, nrow = 0, donor = -1;
+    double mvmax = 0.0, angmax = 0.0, wrapmax = 0.0;
+    for (int k = 0; k < PIECEW_ROWS; k++) {
+        st[k] = 0; rmv[k] = 0.0;
+        if (!in.pwOk[k]) continue;
+        npc++;
+        double ta[3], tn[3];
+        for (int r = 0; r < 3; r++) { ta[r] = in.pwTa[k][r]; tn[r] = in.pwTn[k][r]; }
+        if (fabs(ta[0]) > 1e6 || fabs(ta[1]) > 1e6 || fabs(ta[2]) > 1e6 || fabs(tn[0]) > 1e6 || fabs(tn[1]) > 1e6 || fabs(tn[2]) > 1e6) {
+            st[k] = 5; npark++; continue; }                            /* в запасе (x = -2^31) - не на экране */
+        double Ra[9], Rn[9], MA[9], MN[9], oA[3], oT[3], x[3], t9[9];
+        for (int i = 0; i < 9; i++) { Ra[i] = in.pwRa[k][i]; Rn[i] = in.pwRn[k][i]; }
+        m3_mul(DA, Ra, MA);                                            /* кадр A: vA = MA u + oA */
+        m3_v(DA, ta, x); for (int r = 0; r < 3; r++) oA[r] = x[r] + TA[r];
+        m3_mul(DN, Rn, t9); m3_mul(K, t9, MN);                         /* следующий такт в виде A: vT = MN u + oT */
+        pw_target(DN, TN, K, ke, tn, oT);
+        double iA[9], det = 0.0; m3_inv(MA, iA, &det);
+        if (fabs(det) < 1e-12) continue;                               /* матрица кадра A вырождена - стоит */
+        double Rt[9], q4[4]; m3_mul(MN, iA, Rt); wq_from_m(Rt, q4);
+        const double ang = 2.0 * acos(q4[3] > 1.0 ? 1.0 : q4[3]);
+        double mv = sqrt((oT[0] - oA[0]) * (oT[0] - oA[0]) + (oT[1] - oA[1]) * (oT[1] - oA[1]) + (oT[2] - oA[2]) * (oT[2] - oA[2]));
+        const int wrap = mv > gmove;                                   /* перескок назад */
+        if (wrap) {
+            nwrap++; if (mv > wrapmax) wrapmax = mv;
+            rmv[k] = mv;
+            if (s_pwDTpass[k] == in.pA - 1 && in.fr > s_pwDTfr[k] && in.fr - s_pwDTfr[k] <= 2) {
+                double tu[3], oC[3];                                   /* ход записи за прошлый такт (его не переписываем) */
+                for (int r = 0; r < 3; r++) tu[r] = ta[r] + s_pwDT[k][r];
+                pw_target(DN, TN, K, ke, tu, oC);
+                for (int r = 0; r < 3; r++) rdd[k][r] = oC[r] - oA[r];
+                mv = sqrt(rdd[k][0] * rdd[k][0] + rdd[k][1] * rdd[k][1] + rdd[k][2] * rdd[k][2]);
+                if (mv <= gmove) { st[k] = 4; rmv[k] = mv; }
+            }
+        } else {
+            rmv[k] = mv;
+            for (int r = 0; r < 3; r++) s_pwDT[k][r] = tn[r] - ta[r];
+            s_pwDTpass[k] = in.pA; s_pwDTfr[k] = in.fr;
+        }
+        if (ang > angmax) angmax = ang;
+        if (ang > gang) { nga++; st[k] = 0; continue; }
+        if (!wrap && ang * 400.0 + mv < 0.02) continue;                /* стоит - вершины как есть */
+        double Rs[9]; actw_slerp(q4, ang, a, Rs); wq_from_m(Rs, rq[k]);
+        m3_v(Rs, oA, rso[k]);
+        for (int r = 0; r < 3; r++) { roA[k][r] = oA[r]; roT[k][r] = oT[r]; }
+        if (wrap) { if (st[k] != 4) st[k] = 2; continue; }             /* ход - ниже */
+        st[k] = 1; nmov++; if (mv > mvmax) mvmax = mv;
+        for (int r = 0; r < 3; r++) rdd[k][r] = oT[r] - oA[r];
+        if (mv >= 200.0 && (donor < 0 || mv > rmv[donor])) donor = k;
+    }
+    for (int k = 0; k < PIECEW_ROWS; k++) {                            /* перескок без своего хода прошлого такта - ход донора (вид A) */
+        if (st[k] != 2 || donor < 0) continue;
+        memcpy(rdd[k], rdd[donor], sizeof rdd[k]);
+        rmv[k] = rmv[donor]; st[k] = 3; ndon++;
+    }
+    for (int k = 0; k < PIECEW_ROWS; k++) {
+        if (st[k] != 1 && st[k] != 3 && st[k] != 4) continue;
+        if (st[k] != 1) { ntk += st[k] == 4; nmov++; if (rmv[k] > mvmax) mvmax = rmv[k]; }
+        float* const ro = prw + k * 8;
+        for (int i = 0; i < 4; i++) ro[i] = (float)rq[k][i];
+        for (int r = 0; r < 3; r++) {                                  /* v = Rs vA + t */
+            const double o = st[k] == 1 ? roA[k][r] + a * rdd[k][r]   /* начало куска - линейно от кадра A */
+                                        : roT[k][r] - (1.0 - a) * rdd[k][r];   /* перескок: на доле 1 - ровно запись следующего такта */
+            ro[4 + r] = (float)(o - rso[k][r]);
+        }
+        ro[7] = 1.f;
+        nrow++;
+    }
+    if (nrow > 0) {
+        if (s_shUboMap[667] < 0.5f) {                                  /* строк врагов в этом кадре нет: там могли остаться прошлые или пары */
+            float* const ar = s_shUboMap + 668;
+            for (int r = 0; r < ACTW_ROWS; r++) ar[r * 8 + 7] = 0.f;
+        }
+        s_shUboMap[667] = 1.f;
+    }
+    if (dbg) { static unsigned long long lfn = ~0ull; static int la = -1; static ULONGLONG lt = 0;
+        const int ai = (int)(a * 100.0 + 0.5); const ULONGLONG now = GetTickCount64();
+        if ((lfn != in.fn || la != ai) && (dbg == 2 || now - lt >= 100)) { lfn = in.fn; la = ai; lt = now;   /* =1 не чаще 10 строк в секунду, =2 все */
+            char sl[160]; int n = 0; sl[0] = 0;
+            for (int k = 0; k < PIECEW_ROWS && n < 140; k++) if (in.pwOk[k])
+                n += snprintf(sl + n, sizeof sl - (size_t)n, " %d:%.0f%s", k, rmv[k],
+                              st[k] == 5 ? "p" : st[k] == 4 ? "t" : st[k] == 3 ? "d" : st[k] == 2 ? "w" : st[k] == 1 ? "" : "-");
+            std::fprintf(stderr, "piecewarp: flips %llu->%llu alpha %.2f passes %d->%d cams %d pieces %d (parked %d) moving %d rows %d, gated turn %d,"
+                                 " jumped back %d (last tick's move %d, donor slot %d took %d), max move %.0f turn %.4f rad, max jump %.0f; slot:move%s%c",
+                         in.fr, in.fn, a, in.pA, in.pN, in.cams, npc, npark, nmov, nrow, nga, nwrap, ntk, donor, ndon, mvmax, angmax, wrapmax, sl, 10);
+            static int dbg2 = -1; if (dbg2 < 0) { const char* e = getenv("DC_PIECE_WARP_DBG"); dbg2 = (e && e[0] == '1' && e[1] == '2') ? 1 : 0; }
+            if (dbg2) for (int k = 0; k < PIECEW_ROWS; k++) if (in.pwOk[k])    /* DC_PIECE_WARP_DBG=12: записи кусков этого кадра */
+                std::fprintf(stderr, "piecewarp-slot: pass %d slot %d group %06X Ta %.0f,%.0f,%.0f Tn %.0f,%.0f,%.0f Ra0 %.3f,%.3f,%.3f Rn0 %.3f,%.3f,%.3f%c",
+                             in.pA, k, in.pwGp[k] & 0xFFFFFFu, in.pwTa[k][0], in.pwTa[k][1], in.pwTa[k][2], in.pwTn[k][0], in.pwTn[k][1], in.pwTn[k][2],
+                             in.pwRa[k][0], in.pwRa[k][1], in.pwRa[k][2], in.pwRn[k][0], in.pwRn[k][1], in.pwRn[k][2], 10); } }
+    return nrow;
+}
 static int warp_pc_make(float alpha, float wpc[16], int* stand, int dbg, double* o_ang, double* o_de, double* o_dt,
                         unsigned long long* o_fr, unsigned long long* o_fn, const WarpIn* in_) {
     *stand = 0;
@@ -10290,11 +11686,16 @@ static int warp_pc_make(float alpha, float wpc[16], int* stand, int dbg, double*
       } }
     { static int adbg = -1; if (adbg < 0) { const char* e = getenv("DC_ARMWARP_DBG"); adbg = (e && *e == '1') ? 1 : 0; }   /* 20.10 */
       if (arm_warp_make(alpha, in, wpc[11] > 0.5f, hdl_used, dbg || adbg) > 0) *stand = 0; }   /* 25.10: камера стоит, а кости идут - кадр новый */
+    if (in.actOn && actor_warp_make(alpha, in) > 0) *stand = 0;      /* 29.10: камера стоит, а враги и NPC идут - кадр новый */
+    if (piece_warp_make(alpha, in) > 0) *stand = 0;                  /* 30.10: камера стоит, а куски туннеля едут - кадр новый */
     if (o_ang) *o_ang = ang; if (o_de) *o_de = de; if (o_dt) *o_dt = dt; if (o_fr) *o_fr = fr; if (o_fn) *o_fn = fn;
     return 1;
 }
 static const unsigned int* warp_render_impl(float alpha_in, int extra, const WarpIn* in_pt) {
     if (ptvk_lost()) return nullptr;    /* 18.10: видеокарта потеряна */
+    if (vk_pending() || s_pendKind) async_guard("warp");     /* 29.10.2026 (async): прошлый кадр в полёте - сначала его */
+    const int asyncReq = (in_pt || extra) ? 0 : s_asyncFrame;   /* main.cpp: кадр B такта - заданием показа */
+    if (!in_pt) s_asyncFrame = 0;
     static int en = -1, dbg = -1; static float alpha_env = -1.f;
     if (en < 0) { const char* e = getenv("DC_FRAME_WARP"); en = (e && *e == '0') ? 0 : 1;
                   e = getenv("DC_WARP_DBG"); dbg = (e && *e == '1') ? 1 : 0;
@@ -10316,7 +11717,8 @@ static const unsigned int* warp_render_impl(float alpha_in, int extra, const War
     if (!pairB && !warp_pc_make(alpha, wpc, &stand, dbg, &ang, &de, &dt, &fr, &fn, in_pt)) return nullptr;
     if (dbg && !in_pt && s_nverts == 0 && s_vmap) { static int nn = 0;   /* 19.10: её вершины в снимке (F_ACTOR, с глубиной) */
         if (nn++ < 12) { int na = 0, naw = 0;
-            for (int i = 0; i < s_wsnap.nverts; i++) { const float* v = s_vmap + (size_t)i * VERT_FLOATS;
+            const float* sv = snap_vmap();                           /* 29.10.2026 (async): набор снимка */
+            for (int i = 0; i < s_wsnap.nverts; i++) { const float* v = sv + (size_t)i * VERT_FLOATS;
                 if ((int)v[11] & 16) { na++; if (v[12] >= 1.5f) naw++; } }
             std::fprintf(stderr, "warp-her: snapshot verts %d, hers %d, hers with depth %d, ubo hc.w %.0f%c", s_wsnap.nverts, na, naw,
                          s_shUboMap ? s_shUboMap[535] : -1.f, 10); } }
@@ -10337,7 +11739,7 @@ static const unsigned int* warp_render_impl(float alpha_in, int extra, const War
               float mo = 0.f; const float* pr = s_shUboMap + 668;
               for (int i = 0; i < s_pairSet.count; i++) for (int r = 0; r < 3; r++) { const float c = fabsf(pr[i * 12 + r * 4 + 3]); if (c > mo) mo = c; }
               int nt = 0, nm = 0;
-              if (!in_pt && s_nverts == 0 && s_pvMap) for (int i = 0; i < s_wsnap.nverts; i++) { const uint32_t t = s_pvMap[i];
+              if (!in_pt && s_nverts == 0 && s_pvMap) for (int i = 0; i < s_wsnap.nverts; i++) { const uint32_t t = snap_pvmap()[i];
                   if (t) { nt++; const int ix = (int)(t & 0x1FFFu) - 1;
                            if ((int)(t >> 13) == (s_pairSet.passA & 3) && ix >= 0 && ix < s_pairSet.count && s_pairSet.p[ix].on) nm++; } }
               std::fprintf(stderr, "pairwarp-b: alpha %.3f extra %d thread %d frame %llu pass %d moving %d max offset %.2f, tags %d of %d verts, own pair %d%c",
@@ -10368,12 +11770,13 @@ static const unsigned int* warp_render_impl(float alpha_in, int extra, const War
     const int maskB = aoFrameB || volB || aaModeB;
     if (s_shUboMap) s_shUboMap[127] = reflB ? (s_pp[PP_RF_ALL] > 0.5f ? 2.f : 1.f) : 0.f;
     glint_ubo_update();                              /* 12.10: блеск предметов - и в кадре B */
-    VkPipeline* const P  = (msN > 1) ? s_pipesMS : s_pipes;
+    VkPipeline* const P  = (msN > 1) ? s_pipesMS : raster_pipes_1x();   /* 30.10.2026: без вспышки - набор без её рельефа */
     const VkPipeline  BG = (msN > 1) ? s_bgPipeMS : s_bgPipe;
-    const VkBuffer wvb = s_wsnap.vcopy ? s_wsVb : s_vbuf, wrv = s_wsnap.vcopy ? s_wsRv : s_rvBuf;   /* 25.10: копия вершин кадра A */
-    const VkBuffer wpv = s_wsnap.vcopy ? s_wsPv : s_pvBuf;                                         /* 26.10: и его меток кусков */
+    const VkBuffer wvb = s_wsnap.vcopy ? s_wsVb : snap_vbuf(), wrv = s_wsnap.vcopy ? s_wsRv : snap_rvbuf();   /* 25.10: копия вершин кадра A */
+    const VkBuffer wpv = s_wsnap.vcopy ? s_wsPv : snap_pvbuf();                                            /* 26.10: и его меток кусков */
     cmdBegin();
     pp_ts_reset();
+    pp_ts(3);                 /* 29.10.2026: начало кадра B на GPU - для строки perf: (pp_ts_split) */
     VkClearValue clears[2]{};
     clears[0].color = { { 0.f, 0.f, 0.f, 1.f } };
     clears[1].depthStencil = { 0.f, 0 };
@@ -10395,6 +11798,7 @@ static const unsigned int* warp_render_impl(float alpha_in, int extra, const War
                                 wvb, &s_wsnap.mrefs, wpv);
     }
     pp_ts(0);
+    rbi.renderPass = rp_keep_main(rbi.renderPass, msN);   /* 30.10.2026: DC_RP_KEEP_LAYOUT */
     vkCmdBeginRenderPass(s_cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
     VkViewport vpt{ 0.f, 0.f, (float)w, (float)h, 0.f, 1.f };
     VkRect2D sc{ { 0, 0 }, { (uint32_t)w, (uint32_t)h } };
@@ -10466,6 +11870,7 @@ static const unsigned int* warp_render_impl(float alpha_in, int extra, const War
         vkCmdDraw(s_cmd, (uint32_t)d.count, 1, (uint32_t)d.first, 0);
     }
     vkCmdEndRenderPass(s_cmd);
+    rp_keep_main_done(msN);   /* 30.10.2026: как в кадре A */
     pp_ts(1);
     if (aaModeB) aa_run(aaModeB, w, h, aoFrameB || volB);   /* 25.10.2026: сглаживание - до SSAO, свечения и дымки */
     pp_ts(13);
@@ -10493,10 +11898,15 @@ static const unsigned int* warp_render_impl(float alpha_in, int extra, const War
         out.imageExtent = { (uint32_t)w, (uint32_t)h, 1 };
         vkCmdCopyImageToBuffer(s_cmd, s_colImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, s_rbBuf, 1, &out);
     }
-    if (!cmdSubmitWait()) { rlog("[VKR] warp submit/hang\n"); return nullptr; }
-    test_gpu_slow(extra);
+    pp_ts(5);                 /* 29.10.2026: после копии кадра B - для строки perf: (pp_ts_split) */
+    const int asyncNow = asyncReq && s_asyncMode && shFrameB && !s_carryMesh;   /* 29.10.2026 (async): как у кадра A */
+    bool subOk = cmdSubmitAsync(1);
+    if (subOk && !asyncNow) subOk = cmdWaitPending() != 0;
+    if (!subOk) { rlog("[VKR] warp submit/hang\n"); rp_keep_forget(); return nullptr; }   /* 30.10.2026: rp_keep_forget */
+    if (!asyncNow) test_gpu_slow(extra);
     s_lastShared = shFrameB ? 1 : 0;
-    pp_ts_read();
+    if (asyncNow) s_pendKind = 2;   /* метки - после забора (dcvk_after_fence) */
+    else pp_ts_read(2);
     QueryPerformanceCounter(&t1);
     g_vk_last_rec_ms = (double)(s_vk_last_tq0.QuadPart - t0.QuadPart) * 1000.0 / (double)qpf.QuadPart;
     { static long n = 0; static double acc = 0;
@@ -10516,15 +11926,35 @@ static const unsigned int* warp_render_impl(float alpha_in, int extra, const War
  * пишет следующий кадр. dcvk_warp_pt_ok - снимок всё тот же: не заменён новым кадром A, не удержан (dcvk_warp_drop). */
 static WarpIn s_wiPub;
 static unsigned long long s_wiPubFrame = ~0ull;
+/* 30.10.2026: камера снимка стоит - поворот и глаз как у stand в warp_pc_make: мир между тактами не сдвигается, кадр новый только
+ * от анимации (main.cpp DC_ANIM_HZ). Пивот не в счёт: он двигает только её вершины (в типе Original это её корпус под камерой
+ * игры), кроме телепорта (dt > 700 - warp_pc_make пропускает). Пары кусков (двери) и ячейки захвата со своим кадром B - нет, как было */
+static int s_wiPubCamSt = 0;
+static int warp_cam_stands(const WarpIn& in) {
+    if (!in.cams || in.fn == in.fr) return 0;
+    double Q[9];
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 3; c++)
+            Q[r * 3 + c] = (double)in.Nn[r * 3] * in.Nr[c * 3] + (double)in.Nn[r * 3 + 1] * in.Nr[c * 3 + 1] + (double)in.Nn[r * 3 + 2] * in.Nr[c * 3 + 2];
+    double q[4]; wq_from_m(Q, q);
+    const double ang = 2.0 * acos(q[3] > 1.0 ? 1.0 : q[3]);
+    double de = 0.0, dt = 0.0;
+    for (int i = 0; i < 3; i++) { de += (double)(in.en3[i] - in.er[i]) * (in.en3[i] - in.er[i]); dt += (double)(in.tn[i] - in.tr[i]) * (in.tn[i] - in.tr[i]); }
+    return ang < 1e-6 && de < 0.05 * 0.05 && dt <= 700.0 * 700.0;
+}
 extern "C" int dcvk_warp_pub(unsigned long long* frame) {
     if (s_warp_en < 0) { const char* e = getenv("DC_FRAME_WARP"); s_warp_en = (e && *e == '0') ? 0 : 1; }
-    s_wiPubFrame = ~0ull;
+    s_wiPubFrame = ~0ull; s_wiPubCamSt = 0;
     if (!s_warp_en || !s_wsnap.valid || s_wsnap.dropped || !s_wsnap.world || !s_wsnap.vcopy || s_wsnap.nverts <= 0) return 0;
     warp_in_take(&s_wiPub);
     s_wiPubFrame = s_wsnap.frame;
     if (frame) *frame = s_wsnap.frame;
+    int scapB = 0;
+    for (size_t i = 0; i < s_wsnap.scaps.size() && !scapB; i++) if (s_wsnap.scaps[i].ab == 2) scapB = 1;
+    s_wiPubCamSt = !s_wsnap.pairs && !scapB && warp_cam_stands(s_wiPub);
     return 1;
 }
+extern "C" int dcvk_warp_pub_camst(void) { return s_wiPubCamSt; }
 extern "C" int dcvk_warp_pt_ok(unsigned long long frame) {
     return s_wiPubFrame == frame && s_wsnap.frame == frame && s_wsnap.valid && !s_wsnap.dropped && s_wsnap.world && s_wsnap.vcopy;
 }

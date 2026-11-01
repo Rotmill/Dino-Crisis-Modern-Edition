@@ -62,7 +62,8 @@ layout(binding = 4, std140) uniform ShadowUBO {
     vec4 bq[16];      // кватернион вершин кости в виде кадра A
     vec4 bt[16];      // xyz - перенос, w > 0.5 - есть
     // 26.10.2026: ПАРЫ КУСКОВ (gpu_vk_raster.cpp pair_pc_make, ячейки 664..): кадры между тактами без нашей камеры (двери)
-    vec4 pq;          // x > 0.5 - пары вместо камеры, y - проход кадра A & 3, z - число кусков
+    vec4 pq;          // x > 0.5 - пары вместо камеры, y - проход кадра A & 3, z - число кусков; 29.10.2026: w > 0.5 - строки
+                      // актёров (враги, NPC) в pr[] вместо пар: по две на узел (gpu_vk_raster.cpp actor_warp_make)
     vec4 pr[768];     // по три строки на кусок: xyz - строка матрицы на эту долю пути, w - сдвиг
 } sh;
 
@@ -97,6 +98,7 @@ void main() {
         vec3 p = vec3((in_pos.x - pc.wp.x) * w / pc.wp.w, (in_pos.y - pc.wp.y) * w / pc.wp.z, w);
         bool actor = (int(round(in_info.w)) & 16) != 0;
         const vec3 pa = p;                                          // her point of frame A
+        bool arw = false;                                           // 29.10.2026 (разбор 2): вершину сдвинула строка актёра
         const bool pairs = sh.pq.x > 0.5;
         const bool hturn = !pairs && actor && sh.hc.w > 0.5 && !(pc.wd.w > 0.5);
         if (pairs) {
@@ -127,6 +129,14 @@ void main() {
                 const int bi = int(-in_rep.w + 0.5) - 1;
                 if (bi >= 0 && bi < 16 && sh.bt[bi].w > 0.5) p = qrot(sh.bq[bi], p) + sh.bt[bi].xyz;   // 25.10: all 15 bones
             }
+            // 29.10.2026: ВРАГИ И NPC - узел актёра (in_rep.w = -(65 + слот * 24 + узел), без F_ACTOR) идёт долей пути от позы этого
+            // такта к позе следующего (gpu_vk_raster.cpp actor_warp_make): pr[2r] - кватернион, pr[2r + 1] - перенос, w > 0.5 - есть;
+            // её доворот и ход пивота им не добавляются, дальше - только камера
+            if (!actor && sh.pq.w > 0.5 && in_rep.w < -64.5) {
+                const int ar = int(-in_rep.w + 0.5) - 65;
+                // 30.10.2026: строки 240..275 - куски туннеля (piece_warp_make), тот же счёт
+                if (ar >= 0 && ar < 276 && sh.pr[ar * 2 + 1].w > 0.5) { p = qrot(sh.pr[ar * 2], p) + sh.pr[ar * 2 + 1].xyz; arw = true; }
+            }
             if (hturn) p = sh.hc.xyz + qrot(sh.hq, p - sh.hc.xyz);
             if (actor) p += pc.wd.xyz;                              // Regina rides with the camera pivot
             p = qrot(pc.wq, p) + pc.wt.xyz;
@@ -147,7 +157,12 @@ void main() {
         // НОВОЙ проекции, и внутри крупных полигонов пола значения разъезжались
         // — по кадру шли чёрные квадраты. Фрагментная ступень вернёт её назад
         // тем же кватернионом: карта теней снята в старом пространстве.
-        if (needView) v_view = (pairs || hturn) ? pa : p;   // 19.10: her point of frame A as is (dc_raster.frag shadowViewPoint)
+        // 29.10.2026 (разбор 2): карта теней снята с позы кадра A - вершина, сдвинутая строкой актёра, отдаёт для тени свою точку
+        // кадра A через камеру (shadowViewPoint снимет камеру), иначе тень на теле ехала бы и прыгала назад раз в такт. Только когда
+        // фрагмент берёт тень (как dc_raster.frag: лампы в кадре и не F_CHAR или DC_SHADOW_SELF=1); без неё - сдвинутая (вспышка, свет)
+        const bool arsh = arw && sh.cfg.x > 0.5 && ((int(round(in_info.w)) & 8388608) == 0 || sh.cfg2.x > 0.5);
+        const vec3 pv = arsh ? qrot(pc.wq, pa) + pc.wt.xyz : p;
+        if (needView) v_view = (pairs || hturn) ? pa : pv;  // 19.10: her point of frame A as is (dc_raster.frag shadowViewPoint)
                                                              // 26.10: и у пар кусков - камера кадра B единичная
         // 18.09.2026 (вечер): v_view здесь НЕ обнуляется. Кадр B рисует вершины
         // прошлого кадра, и v_view посчитан выше в ЕГО видовом пространстве —

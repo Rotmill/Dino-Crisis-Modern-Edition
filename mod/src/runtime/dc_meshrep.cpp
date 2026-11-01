@@ -61,6 +61,7 @@ int dcvk_mesh_ok(void);
 int dcvk_mesh_add(const void* verts, int nv, const uint32_t* idx, int ni);
 int dcvk_mesh_draw(int mesh, const float* inst, const float* bones, int nb, int occ);
 void dcvk_rep_tex_drop(int idx);            // 06.10.2026: подхват на лету — картинка и меш снятой модели уходят
+void dcvk_rep_tex_pin(int idx, int pin);    // 01.11.2026: картинку можно освобождать (её место не вшито навсегда)
 void dcvk_mesh_drop(int mesh);
 void dc_actor_bbox_note(float x0, float y0, float x1, float y1);
 void dc_shadow_note_k(const float* fx, const float* fy, const float* w, int kind, int semi);
@@ -499,6 +500,11 @@ struct Entry {
     std::vector<GVtx> gpv;
     std::vector<uint32_t> gpi;
     bool prepped = false;
+    // 01.11.2026 (текстуры без пределов): места картинок, вшитые в копию на видеокарте (по m.texs; пусто - копию не сверять).
+    // Модель не больше DC_MESH_KEEP вершин держит склейку (gpv, gpi; в slot - номер материала): картинку можно освободить,
+    // сменилось место - копия перестраивается из склейки (gpu_draw)
+    std::vector<int> gslot;
+    bool gsaid = false;
     // 06.10.2026: the crosshair's body (the game's assembler does not run for a model from mods): the model's own triangles,
     // a big model thinned on a grid - vertices in model space with their bones (pick_build, parse thread)
     std::vector<float> pk_pos, pk_jw;
@@ -1814,30 +1820,85 @@ struct RG { uint32_t lo, hi, hdr; Entry* e; };
 std::vector<RG> s_rg;
 uint32_t s_rg_sig = 0;
 std::unordered_set<uint64_t> s_walk_done;
-void room_table(const uint8_t* R) {
+// 01.11.2026 (моддер в Discord: «Whenever I leave a room, the original model comes back instead of the modded one»): таблица
+// строилась заново только при смене заголовка блока комнаты. Дверь пишет новую комнату частями: обход, попавший на
+// недописанный блок, строил таблицу по началу цепочки групп (дальше - остатки прежней комнаты, цепочка рвётся, ключи групп -
+// по недописанным данным), и до следующей комнаты остальные группы оставались родными. Теперь в подписи и каждая группа
+// цепочки (group_sig: заголовок, первая и последняя записи) - комната дописалась, таблица строится заново.
+// DC_ROOM_TABLE_SIG=0 - как было (только заголовок)
+int room_sig_full() {
+    static int on = -1;
+    if (on < 0) { const char* v = getenv("DC_ROOM_TABLE_SIG"); on = (v && *v == '0') ? 0 : 1; }
+    return on;
+}
+// 01.11.2026: картинки моделей комнаты (её групп и видов врагов kinds\) - в очередь декода при входе в комнату, а не в первый
+// кадр, где модель видна (до готовности всех картинок модель рисуется родной). DC_MESH_PRELOAD=0 - как было
+int preload_on() {
+    static int on = -1;
+    if (on < 0) { const char* v = getenv("DC_MESH_PRELOAD"); on = (v && *v == '0') ? 0 : 1; }
+    return on;
+}
+uint32_t group_end(const uint8_t* R, uint32_t hdr) {
+    const uint32_t tri = rd32(R + hdr) & 0x1FFFFFu, gnt = rd16(R + hdr + 8), gnq = rd16(R + hdr + 10);
+    return tri + gnt * 40u + gnq * 52u;
+}
+// цепочка групп блока комнаты: f(заголовок группы) -> конец её данных (там - заголовок следующей)
+template <class F> void room_chain(const uint8_t* R, F f) {
     const uint32_t base = 0x100000u;
-    uint64_t h = fnv(kFnv0, R + base, 0x30);
-    h = fnv(h, R + base + 0x28, 24);
-    const uint32_t sig = (uint32_t)(h ^ (h >> 32));
-    if (sig == s_rg_sig) return;
-    s_rg_sig = sig;
-    s_rg.clear();
     const uint32_t p7 = rd32(R + base + 7 * 4), p8 = rd32(R + base + 8 * 4);
     const uint32_t nt = rd16(R + base + 0x24);
     if (p7 != 0x80100028u || p8 != p7 + nt * 40u) return;
-    auto add = [&](uint32_t hdr) {
-        const uint32_t tri = rd32(R + hdr) & 0x1FFFFFu, gnt = rd16(R + hdr + 8), gnq = rd16(R + hdr + 10);
-        const uint32_t end = tri + gnt * 40u + gnq * 52u;
-        RG g{tri, end, hdr, group_entry(R, hdr, 0)};
-        s_rg.push_back(g);
-        return end;
-    };
-    uint32_t pos = add(base + 0x1C);
+    uint32_t pos = f(base + 0x1C);
     for (int guard = 0; guard < 4096 && pos + 12 <= 0x160000u; guard++) {
         const uint32_t a = rd32(R + pos), b = rd32(R + pos + 4);
         const uint32_t t = rd16(R + pos + 8), q = rd16(R + pos + 10);
         if (a != (0x80000000u | (pos + 12)) || b != a + t * 40u || t > 5000 || q > 5000 || t + q == 0) break;
-        pos = add(pos);
+        pos = f(pos);
+    }
+}
+void room_table(const uint8_t* R) {
+    const uint32_t base = 0x100000u;
+    uint64_t h = fnv(kFnv0, R + base, 0x30);
+    h = fnv(h, R + base + 0x28, 24);
+    if (room_sig_full())
+        room_chain(R, [&](uint32_t hdr) { const uint32_t gs = group_sig(R, hdr, 0); h = fnv(h, (const uint8_t*)&gs, 4); return group_end(R, hdr); });
+    const uint32_t sig = (uint32_t)(h ^ (h >> 32));
+    if (sig == s_rg_sig) return;
+    s_rg_sig = sig;
+    s_rg.clear();
+    room_chain(R, [&](uint32_t hdr) {
+        const uint32_t end = group_end(R, hdr);
+        RG g{rd32(R + hdr) & 0x1FFFFFu, end, hdr, group_entry(R, hdr, 0)};
+        s_rg.push_back(g);
+        return end;
+    });
+    int rep = 0;
+    for (const RG& g : s_rg)
+        if (g.e) { rep++; if (preload_on()) ready(g.e); }
+    if (s_log) {
+        static int n = 0;
+        if (n < 200) { n++; fprintf(stderr, "meshrep: room table %08x - %d groups, %d from mods%c", sig, (int)s_rg.size(), rep, 10); }
+    }
+}
+// 01.11.2026: виды врагов этой комнаты (kinds\) - их картинки в очередь, когда комната сменилась (дверь, загрузка сохранения);
+// модель, ещё не разобранная потоком разбора, - в следующих кадрах
+std::vector<Entry*> s_pre;
+int s_pre_room = -1;
+void preload_kinds() {
+    const int rm = dc_room_current();
+    if (rm != s_pre_room) {
+        s_pre_room = rm;
+        s_pre.clear();
+        const char* rn = dc_room_name(rm);
+        if (rn)
+            for (auto& kv : s_actor_room)
+                for (Entry* x : kv.second)
+                    if (x && !_stricmp(x->only_room.c_str(), rn)) s_pre.push_back(x);
+    }
+    for (size_t i = 0; i < s_pre.size();) {
+        Entry* x = s_pre[i];
+        if (x->dead.load() || x->state.load() == -1 || ready(x)) { s_pre[i] = s_pre.back(); s_pre.pop_back(); }
+        else i++;
     }
 }
 
@@ -1931,6 +1992,8 @@ void rl_swap() {
     s_ctx.clear();                                                // персонажи и группы комнаты — по новым записям
     s_rg.clear();
     s_rg_sig = 0;
+    s_pre.clear();                                                // 01.11.2026: предзагрузка - по новым записям
+    s_pre_room = -1;
     s_on = s_ent.empty() ? 0 : 1;
     fprintf(stderr, "mods: meshes picked up - %d new or changed, %d kept, %d gone%c", fresh, kept, gone, 10);
     if (s_rl_again.exchange(false)) rl_start();
@@ -2298,6 +2361,7 @@ extern "C" void dc_meshrep_otc(uint32_t madr) {
     if (s_rl_state.load() == 2) rl_swap();       // 06.10.2026: подхват на лету — новый список моделей с новой сборкой
     if (!s_retired.empty()) rl_reap();
     if (s_on <= 0) return;
+    if (!s_actor_room.empty() && preload_on() && on()) preload_kinds();   // 01.11.2026: картинки видов врагов комнаты - заранее
     const int o = ot_of(madr);
     if (s_log) {
         static int n = 0;
@@ -2318,19 +2382,38 @@ int gpu_env() {
     if (on < 0) { const char* e = getenv("DC_MESH_GPU"); on = (e && *e == '0') ? 0 : 1; }
     return on;
 }
+// 01.11.2026: склейку модели держать после загрузки, если вершин не больше DC_MESH_KEEP (по умолчанию 262144, ~12 МБ; 0 - не
+// держать, как было): тогда её картинки можно освобождать (gpu_vk_raster.cpp, без пределов) - копия перестроится
+int keep_max() {
+    static int n = -2;
+    if (n == -2) { const char* v = getenv("DC_MESH_KEEP"); n = v ? atoi(v) : 262144; if (n < 0) n = 0; }
+    return n;
+}
 void gpu_build(Entry* e) {
     e->gpu = -1;
-    if (!gpu_env() || !dcvk_mesh_ok() || !e->prepped) return;
+    e->gslot.clear();
+    const RMesh& m = e->mesh;
+    if (!gpu_env() || !dcvk_mesh_ok() || !e->prepped) return;   // путь процессора берёт места картинок каждый кадр
     // 06.10.2026 (2): вершины склеены в потоке разбора (gpu_prep, в slot — номер материала); здесь — номер картинки растра
     // (ready(e): все картинки модели уже на месте) и загрузка в видеопамять
-    const RMesh& m = e->mesh;
     std::vector<float> mslot(m.mats.size(), -1.f);
     for (size_t i = 0; i < m.mats.size(); i++)
         if (m.mats[i].tex >= 0 && (size_t)m.mats[i].tex < m.texs.size()) mslot[i] = (float)dcvk_rep_tex_slot(m.texs[(size_t)m.mats[i].tex].idx);
-    for (GVtx& g : e->gpv) g.slot = mslot[(size_t)g.slot];
-    e->gpu = dcvk_mesh_add(e->gpv.data(), (int)e->gpv.size(), e->gpi.data(), (int)e->gpi.size());
-    if (e->gpu >= 0)
+    const bool keep = e->gpv.size() <= (size_t)keep_max();   // 01.11.2026: склейка остаётся с номерами материалов
+    std::vector<GVtx> baked;
+    if (keep) baked = e->gpv;
+    std::vector<GVtx>& bv = keep ? baked : e->gpv;
+    for (GVtx& g : bv) g.slot = mslot[(size_t)g.slot];
+    e->gpu = dcvk_mesh_add(bv.data(), (int)bv.size(), e->gpi.data(), (int)e->gpi.size());
+    if (e->gpu >= 0 && !e->gsaid) {
+        e->gsaid = true;
         fprintf(stderr, "mods: %s - %d triangles on the video card (%d vertices)%c", e->rel.c_str(), (int)(e->gpi.size() / 3), (int)e->gpv.size(), 10);
+    }
+    if (e->gpu >= 0 && keep) {                   // 01.11.2026: места вшиты - запомнить (картинки можно освобождать)
+        for (const RTex& t : m.texs) e->gslot.push_back(dcvk_rep_tex_slot(t.idx));
+        return;
+    }
+    if (e->gpu >= 0) for (const RTex& t : m.texs) dcvk_rep_tex_pin(t.idx, 1);   // 01.11.2026: склейки нет - места навсегда
     std::vector<GVtx>().swap(e->gpv);            // копия в видеопамяти; при отказе — путь процессора по e->mesh
     std::vector<uint32_t>().swap(e->gpi);
     e->prepped = false;
@@ -2339,6 +2422,19 @@ void gpu_build(Entry* e) {
 // экземпляр в кадр: 9 vec4 + кости (dc_mesh_common.glsl). occ — персонаж (тень, рамка Регины)
 bool gpu_draw(const Inst& in, float H, float OFX, float OFY, float wsx, float dox, float doy, float zmul, float flags) {
     Entry* e = in.e;
+    if (e->gpu >= 0 && !e->gslot.empty()) {      // 01.11.2026: картинка модели уходила и вернулась на другое место - копию заново
+        const RMesh& m = e->mesh;
+        bool same = true;
+        for (size_t i = 0; i < m.texs.size() && i < e->gslot.size(); i++)
+            if (dcvk_rep_tex_slot(m.texs[i].idx) != e->gslot[i]) same = false;   // и отметка «рисуется» картинкам
+        if (!same) {
+            dcvk_mesh_drop(e->gpu);              // её экземпляров в кадрах нет: картинка ушла, когда модель давно не рисовали
+            e->gpu = -2;
+            e->gslot.clear();
+            static int n = 0;
+            if (n < 20) { n++; fprintf(stderr, "mods: %s - its pictures came back to other places, the copy on the video card is rebuilt%c", e->rel.c_str(), 10); }
+        }
+    }
     if (e->gpu == -2 && ready(e)) gpu_build(e);
     if (e->gpu < 0) return false;
     float I[36];

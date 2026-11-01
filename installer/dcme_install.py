@@ -50,6 +50,25 @@ import traceback
 import zipfile
 import zlib
 
+
+def _under_wine():
+    """Wine, Proton, Winlator: ntdll exports wine_get_version (as IsWine() in Setup.cs)."""
+    try:
+        import ctypes
+        return hasattr(ctypes.WinDLL('ntdll'), 'wine_get_version')
+    except (ImportError, OSError):
+        return False
+
+
+# 29.10.2026 (Steam Deck, setup under wine-7.0: "unimplemented function KERNEL32.dll.CopyFile2 called in 64-bit code"
+# right after step 4): Python 3.12 copies through CopyFile2 (shutil.copy2, and copytree and move with it), and older Wine
+# has only a stub of it that kills the process. Under Wine shutil takes its older way (copyfile + copystat, the dates
+# stay), as before Python 3.12; on Windows nothing changes.
+if os.name == 'nt' and _under_wine():
+    import _winapi
+    if hasattr(_winapi, 'CopyFile2'):
+        del _winapi.CopyFile2
+
 # The recompiler framework. The commit is pinned: the mod patch is made against exactly it and does not apply to
 # another. A ZIP of the commit rather than a clone: no Git for the user, and the archive holds the same files as a clone
 # (line endings as in the repository - the patch is made against that state).

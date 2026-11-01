@@ -57,6 +57,10 @@ layout(constant_id = 0) const int DC_REP_N = 512;
 layout(constant_id = 1) const bool DC_F_SHADOW = true;   // GRAPHICS -> Shadows: тени ламп и луна (без опции sh.cfg.x = 0)
 layout(constant_id = 2) const bool DC_F_MATER  = true;   // GRAPHICS -> Materials: отражение пола, блики, свет светящихся текстур
                                                          // (без опции rfc.w, spare.y, spare.x/w = 0), рельеф металла
+// 30.10.2026 (план скорости, пункт 15): без Materials рельеф металла у вспышки (поздний вызов metalRelief в блоке вспышки)
+// держит производные текстуры живыми через весь шейдер. В кадре без вспышки программа берёт конвейеры с false
+// (gpu_vk_raster.cpp s_pipesNF): вызова нет, регистров меньше (RGA, gfx1035: 75 -> 62). Ветка там и так не идёт (flp.w = 0).
+layout(constant_id = 4) const bool DC_F_FLASH_RELIEF = true;
 // 28.10.2026: полная маска выборок конвейера MSAA (2x - 3, 4x - 15, 8x - 255) для одного текселя на пиксель (main,
 // DC_SAMPLE_LOOP). 0 - тексель на каждую выборку, как было (DC_MSAA_FAST=0).
 #ifdef DC_SAMPLE_LOOP
@@ -225,6 +229,12 @@ uint vramFetch(int x, int y) {
     return texelFetch(vramTex, ivec2(x & 1023, y & 511), 0).r;
 }
 
+// 31.10.2026: КАРТА РЕШЁТКИ (pt_renderer.c dc_dithc_stage) - строки 512..1023 текстуры VRAM, 8 мест по 256x256. Слово:
+// 0 вне зоны и прозрачный, 1 в зоне, 2 вне построенного окна (считать по соседям, как было), 0x8000 | цвет - вне зоны.
+uint dithcFetch(int s, int u, int v) {
+    return texelFetch(vramTex, ivec2((s & 3) * 256 + (u & 255), 512 + (s >> 2) * 256 + (v & 255)), 0).r;
+}
+
 uint sampleTexel(int u, int v, int tpage, int cx, int cy) {
     int tpx = (tpage & 15) * 64;
     int tpy = ((tpage >> 4) & 1) * 256;
@@ -250,6 +260,24 @@ uint sampleWin(int u, int v, int iy, int iz, int tpage) {
         v = (v & ~(twmy * 8)) | ((twoy & twmy) * 8);
     }
     return sampleTexel(u, v, tpage, iy & 0x3FF, iz & 0x3FF);
+}
+
+// 31.10.2026: HD-ТЕКСТУРА ИЗ mods И АНИМАЦИЯ ЛИЦ. Строки 1024..1535 текстуры VRAM - маска лиц (gpu.c dc_facehd_stage):
+// бит на полубайт слова VRAM, который анимация лица (глаза, рот) сейчас изменила. Такой тексель берётся родным из VRAM.
+bool faceLive(int u, int v, int iy, int iz, int tpage) {
+    u &= 255; v &= 255;
+    int twmx = (iy >> 10) & 31, twox = (iy >> 15) & 31;
+    int twmy = (iz >> 10) & 31, twoy = (iz >> 15) & 31;
+    if ((twmx | twmy) != 0) {
+        u = (u & ~(twmx * 8)) | ((twox & twmx) * 8);
+        v = (v & ~(twmy * 8)) | ((twoy & twmy) * 8);
+    }
+    int mode = (tpage >> 7) & 3;
+    int wx = (tpage & 15) * 64 + (mode == 0 ? (u >> 2) : mode == 1 ? (u >> 1) : u);
+    uint m = texelFetch(vramTex, ivec2(wx & 1023, 1024 + ((((tpage >> 4) & 1) * 256 + v) & 511)), 0).r;
+    if (mode == 0) return ((m >> uint(u & 3)) & 1u) != 0u;
+    if (mode == 1) return ((m >> uint((u & 1) * 2)) & 3u) != 0u;
+    return m != 0u;
 }
 
 vec3 t5to8(uint t) {
@@ -561,7 +589,12 @@ bool texelPath(const int flags, const int pass_blend, out vec3 rgb8, out vec3 al
         int u = int(tuv.x), v = int(tuv.y);
         int zc = (flags >> 10) & 4095;
         vec3 cell8 = vec3(float(zc & 15), float((zc >> 4) & 15), float((zc >> 8) & 15)) * 17.0;
-        uint texel = sampleWin(u, v, iy, iz, v_info.x);
+        // 31.10.2026: место карты решётки 1..8 (0 - нет): у F_DLATT биты 20..23 поля CLUT x, у F_SUBST биты 16..19 флагов.
+        // Слово карты вместо текселя и dzone (до ~50 чтений VRAM); слово 2 и место 0 - тексель и зона по соседям, как было
+        const int ds = ((flags & F_DLATT) != 0) ? ((iy >> 20) & 15) : ((flags & F_SUBST) != 0) ? ((flags >> 16) & 15) : 0;
+        const uint dw = (ds > 0) ? dithcFetch(ds - 1, u, v) : 2u;
+        const bool dmap = dw != 2u;
+        uint texel = dmap ? ((dw == 1u) ? 0u : dw) : sampleWin(u, v, iy, iz, v_info.x);
         vec3 t8;
         if ((flags & F_DLATT) != 0) {
             // PURE CHECKER (14.09.2026 evening, final): a fine dither grille whose
@@ -570,7 +603,7 @@ bool texelPath(const int flags, const int pass_blend, out vec3 rgb8, out vec3 al
             // (punched parity see-through, the other parity filled whatever the
             // texel), outside it (frame) the texture as drawn.
             int ph = ((flags & F_DPH) != 0) ? 1 : 0;
-            if (dzone(u, v, texel, iy, iz, v_info.x)) {
+            if (dmap ? (dw == 1u) : dzone(u, v, texel, iy, iz, v_info.x)) {
                 if (((u + v) & 1) == ph) return false;
                 t8 = cell8;
             } else {
@@ -587,7 +620,7 @@ bool texelPath(const int flags, const int pass_blend, out vec3 rgb8, out vec3 al
             // 16..19 / 20..23, chain-link CLUT (x/16-48, y-496) in bits 20..23 of the CLUT
             // fields, scale x4 in flags bits 11..15 - the chain-link runs at S x the
             // grille's UV rate so its cells match the real chain-link next to it.
-            if (dzone(u, v, texel, iy, iz, v_info.x)) {
+            if (dmap ? (dw == 1u) : dzone(u, v, texel, iy, iz, v_info.x)) {
                 int scx = (((iy >> 20) & 15) + 48) * 16, scy = ((iz >> 20) & 15) + 496;
                 int wu = ((v_info.x >> 16) & 15) * 16, wv = ((v_info.x >> 20) & 15) * 16;
                 float sc = float((flags >> 11) & 31) * 0.25;
@@ -650,13 +683,16 @@ bool texelPath(const int flags, const int pass_blend, out vec3 rgb8, out vec3 al
         vec3 t8;
         bool hifont_done = false;
         if (v_rep >= 0) {                     // 06.10.2026: и в проходах свечения/отражения (меш из mods)
-            vec4 rc = TEX_D(repTex[DC_REPI(v_rep)], g_ruv, g_dRx, g_dRy);
-            if (rc.a < 0.5) return false;
+            vec4 rc = TEX_D(repTex[DC_REPI(v_rep & 4095)], g_ruv, g_dRx, g_dRy);
             vec2 ruv = texelUV();
-            uint rtx = sampleWin(int(ruv.x), int(ruv.y), iy, iz, v_info.x);
-            texel_blend = (rtx & 0x8000u) != 0u;
-            t8 = rc.rgb * 255.0;
-            hifont_done = true;   // дальше — как у готового текселя
+            // 31.10.2026: слот +4096 - тексель, изменённый анимацией лица, родной (выборка картинки - до ветки, в общем потоке)
+            if (v_rep < 4096 || !faceLive(int(ruv.x), int(ruv.y), iy, iz, v_info.x)) {
+                if (rc.a < 0.5) return false;
+                uint rtx = sampleWin(int(ruv.x), int(ruv.y), iy, iz, v_info.x);
+                texel_blend = (rtx & 0x8000u) != 0u;
+                t8 = rc.rgb * 255.0;
+                hifont_done = true;   // дальше — как у готового текселя
+            }
         } else
         if ((flags & F_HIFONT) != 0) {
             // page-relative texel -> atlas coordinate (the atlas covers the
@@ -1212,7 +1248,7 @@ void main() {
         float fd = length(toF);
         if (fd < sh.flp.w) {
 #ifndef DC_FX_PASS
-            if (!DC_F_MATER && metalHere) metalRelief(alb8, v_vpt, v_nrm, dVx, dVy, dUx, dUy, mN, mShine, mRough);
+            if (!DC_F_MATER && DC_F_FLASH_RELIEF && metalHere) metalRelief(alb8, v_vpt, v_nrm, dVx, dVy, dUx, dUy, mN, mShine, mRough);
 #endif
             float fa = 1.0 - fd / sh.flp.w;
             fa *= fa;

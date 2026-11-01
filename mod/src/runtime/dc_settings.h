@@ -127,9 +127,10 @@ typedef struct {
     char         value_num[24]; /* текст числа (INT/FLOAT) */
     const char **choices;       /* ENUM: все значения — колонка держится под самое широкое */
     int          bind_dev;      /* BIND: устройство */
-    int          bind_n;        /* BIND: входов назначено */
-    int          bind_code[4];  /* BIND: коды входов (dc_binds.h) — для значков геймпада */
-    const char  *bind_lbl[4];   /* BIND: подписи входов — ключи атласа */
+    int          bind_n;        /* BIND: входов в строке (назначенные, за ними неизменные) */
+    int          bind_fixed;    /* BIND: из них последние - неизменные (Esc..., dcb_fixed; 01.11) */
+    int          bind_code[6];  /* BIND: коды входов (dc_binds.h) — для значков геймпада */
+    const char  *bind_lbl[6];   /* BIND: подписи входов — ключи атласа */
     int          capturing;     /* BIND: эта строка ждёт новую клавишу/кнопку */
     float        num_v, num_lo, num_hi;   /* 11.10: INT/FLOAT - значение и пределы для ползунка */
 } DcMenuRow;
@@ -137,6 +138,7 @@ int  dc_menu_page(void);
 int  dc_menu_page_count(void);
 const char *dc_menu_page_key(int page);
 int  dc_menu_rows(DcMenuRow *out, int max);   /* строки текущей вкладки по порядку */
+const char *dc_bind_title(int mode, int act);  /* 01.11: подпись действия; Move Left/Right -> Turn Left/Right у танкового движения */
 int  dc_menu_sel_opt(void);                   /* выбранная строка — индекс в таблице */
 int  dc_menu_sel_type(void);                  /* 04.10 (6): тип выбранной строки (DcOptType) или -1 */
 const char *dc_menu_note_key(void);           /* сообщение (ключ) или NULL; звать раз в кадр */

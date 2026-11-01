@@ -34,6 +34,15 @@ static int kb_1015(void) {
 }
 int dcb_kb_layout_1015(void) { return kb_1015(); }
 
+/* ⭐ 01.11.2026 (игрок: «почему не назначена кнопка Cancel? сделай Cancel на Q, убери его из открытия инвентаря, пусть
+ * останется Tab»): у современной раскладки клавиатуры Q - «назад» (△ игры: на экранах игры и в окнах текста - назад, в мире
+ * игра его не берёт - проверено на сейве у сетки), инвентарь - Tab / I / M. DC_KB_CANCEL_Q=0 - Q снова инвентарь, как было. */
+static int kb_cancel_q(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = SDL_getenv("DC_KB_CANCEL_Q"); v = (e && *e == '0') ? 0 : 1; }
+    return v;
+}
+
 int dcb_default_tpl(int mode, int dev) {
     if (mode != DCB_ORIG) return DCB_TPL_MODERN;
     if (dev == DCB_PAD) return DCB_TPL_ORIG;
@@ -112,9 +121,10 @@ static int tpl_get(int mode, int tpl, int dev, int act, int *o) {
             case DCB_AIM: ADD(MR); break;          case DCB_FIRE: ADD(ML); break;
             case DCB_TARGET: if (orig) { ADD(DCB_WHEEL_UP); ADD(DCB_WHEEL_DOWN); ADD(DCB_MOUSE(SDL_BUTTON_MIDDLE)); ADD(K(B)); } break;
             case DCB_ACTION: ADD(K(E)); ADD(K(F)); ADD(K(RETURN)); break;
-            case DCB_INVENTORY: ADD(K(TAB)); ADD(K(I)); ADD(K(M)); ADD(K(Q)); break;
+            case DCB_INVENTORY: ADD(K(TAB)); ADD(K(I)); ADD(K(M)); if (!kb_cancel_q()) ADD(K(Q)); break;
+            case DCB_CANCEL: if (kb_cancel_q()) ADD(K(Q)); break;   /* 01.11: Q - назад (и Esc - всегда) */
             case DCB_PAUSE: ADD(K(P)); break;      case DCB_OPTIONS: ADD(K(BACKSPACE)); break;
-            default: break;                         /* бег переключением, отмена (Esc - всегда) */
+            default: break;                         /* бег переключением */
             }
         }
         return n;
@@ -266,9 +276,18 @@ int dcb_norm(int code) {
 }
 
 /* пары, которые шаблоны делят намеренно: ✕ — действие и выстрел, B — инвентарь в мире и «назад» на экранах */
-static int shared_pair(int a, int b) {
-    return (a == DCB_ACTION && b == DCB_FIRE) || (a == DCB_FIRE && b == DCB_ACTION) ||
-           (a == DCB_INVENTORY && b == DCB_CANCEL) || (a == DCB_CANCEL && b == DCB_INVENTORY);
+/* 01.11.2026 (сверка Controls с игрой): «инвентарь в мире и назад на экранах» - правило кнопки геймпада; у клавиатуры его нет,
+ * клавиша обоих действий жала ○ и △ игры сразу, а строки молча показывали её в обоих. Теперь на клавиатуре клавиша, отданная
+ * Inventory или Cancel, снимается со второго («taken from another action»). DC_KB_PAIR_PAD_ONLY=0 - как было. */
+static int kb_pair_pad_only(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = SDL_getenv("DC_KB_PAIR_PAD_ONLY"); v = (e && *e == '0') ? 0 : 1; }
+    return v;
+}
+static int shared_pair(int a, int b, int dev) {
+    if ((a == DCB_ACTION && b == DCB_FIRE) || (a == DCB_FIRE && b == DCB_ACTION)) return 1;
+    if (dev == DCB_KB && kb_pair_pad_only()) return 0;
+    return (a == DCB_INVENTORY && b == DCB_CANCEL) || (a == DCB_CANCEL && b == DCB_INVENTORY);
 }
 
 /* правка: тип игры и устройство уходят в свою раскладку (копия шаблона, с которого начинали) */
@@ -290,7 +309,7 @@ int dcb_assign(int mode, int dev, int act, int code, int add) {
     code = dcb_norm(code);
     int moved = -1;
     for (int a = 0; a < DCB_COUNT; a++) {                 /* тот же вход у другого действия — снять */
-        if (a == act || shared_pair(a, act)) continue;
+        if (a == act || shared_pair(a, act, dev)) continue;
         int *c = s_cust[m][dev][a];
         for (int k = 0; k < DCB_MAX; k++) if (c[k] == code) {
             for (int j = k; j < DCB_MAX - 1; j++) c[j] = c[j + 1];
@@ -341,6 +360,7 @@ static const CodeLbl k_lbl[] = {
     { K(1), "1" }, { K(2), "2" }, { K(3), "3" }, { K(4), "4" }, { K(5), "5" }, { K(6), "6" }, { K(7), "7" },
     { K(8), "8" }, { K(9), "9" }, { K(0), "0" },
     { K(SPACE), "Space" }, { K(RETURN), "Enter" }, { K(TAB), "Tab" }, { K(BACKSPACE), "Backspace" },
+    { K(ESCAPE), "Esc" },                     /* 01.11: только подпись неизменной клавиши (dcb_fixed), назначить нельзя */
     { DCB_SHIFT, "Shift" }, { DCB_CTRL, "Ctrl" }, { DCB_ALT, "Alt" }, { K(CAPSLOCK), "Caps Lock" },
     { K(UP), "\xE2\x86\x91" }, { K(DOWN), "\xE2\x86\x93" }, { K(LEFT), "\xE2\x86\x90" }, { K(RIGHT), "\xE2\x86\x92" },
     { K(HOME), "Home" }, { K(END), "End" },
@@ -374,7 +394,23 @@ const char *dcb_code_label(int code) {
 int dcb_code_ok(int dev, int code) {
     code = dcb_norm(code);
     if (dev == DCB_PAD ? !DCB_IS_PAD(code) : DCB_IS_PAD(code)) return 0;
+    if (code == K(ESCAPE)) return 0;                /* 01.11: Esc - неизменная клавиша (отмена ожидания, «назад») */
     return dcb_code_label(code) != NULL;            /* только входы из списка: у них есть подпись */
+}
+
+/* ⭐ 01.11.2026 (игрок: «а где Escape? на который открывается OPTION меню»): входы, которые не переназначаются, - для
+ * строк назначений и списка своей раскладки (приглушённо, после назначенных). Клавиатура (main.cpp pad_from_keyboard_b):
+ * Esc - в мире меню OPTION, на экранах игры и в окнах текста - назад; Backspace на экранах меню игры - назад
+ * (dc_bs_menu_screen, DC_BS_BACK). DC_BIND_FIXED_SHOW=0 - не показывать, как было. */
+int dcb_fixed(int dev, int act, int *out) {
+    static int show = -1, bs = -1;
+    if (show < 0) { const char *e = SDL_getenv("DC_BIND_FIXED_SHOW"); show = (e && *e == '0') ? 0 : 1; }
+    if (bs < 0) { const char *e = SDL_getenv("DC_BS_BACK"); bs = (e && *e == '0') ? 0 : 1; }
+    int n = 0;
+    if (!show || dev != DCB_KB) return 0;
+    if (act == DCB_OPTIONS) out[n++] = K(ESCAPE);
+    if (act == DCB_CANCEL) { out[n++] = K(ESCAPE); if (bs) out[n++] = K(BACKSPACE); }
+    return n;
 }
 
 int dcb_code_pad_icon(int code) {

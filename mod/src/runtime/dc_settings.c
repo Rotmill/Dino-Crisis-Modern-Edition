@@ -8,11 +8,16 @@
 #include <string.h>
 #include <math.h>
 #include <stdarg.h>
+#include <SDL.h>
 
 /* 10.10.2026: строка назначения DC_OPT_BIND: lo - действие DCB_*, hi - устройство; тип игры, чью раскладку правят, -
  * строка «Для типа игры» вверху подстраницы (dcb_edit_mode: при входе - текущий тип, переключается там же) */
 #define BIND_DEV(o)  (((int)((o)->hi + 0.5f)) & 1)
 #define BIND_MODE(o) ((void)(o), dcb_edit_mode())
+/* ⭐ 01.11.2026 (сверка Controls, игрок: «Tank ... делаем»): main.cpp - танковое ли движение у типа игры (подписи Turn Left /
+ * Turn Right); DC_ROW_TITLE помечает подписи строк, которые меню подставляет на ходу, - menu_strings.py берёт их в атлас */
+int dc_bind_turn_titles(int orig);
+#define DC_ROW_TITLE(s) (s)
 
 static const DcOpt  *s_opts;
 static int           s_count;
@@ -164,10 +169,16 @@ static const char *const s_tr8[][DC_LANG_COUNT] = {
       "メニューとインターフェースの言語", "菜单和界面语言", "Lingua dei menu e dell'interfaccia", "لغة القوائم والواجهة" },
     { "Display Mode", "Режим отображения", "Anzeigemodus", "Modo de pantalla", "Mode d'affichage",
       "Modo de exibição", "表示モード", "显示模式", "Modalità schermo", "وضع العرض" },
-    { "Windowed, borderless or fullscreen", "Окно, без рамки или во весь экран", "Fenster, randlos oder Vollbild",
-      "Ventana, sin bordes o pantalla completa", "Fenêtré, sans bordure ou plein écran",
-      "Janela, sem bordas ou tela cheia", "ウィンドウ、ボーダーレス、フルスクリーン", "窗口、无边框或全屏",
-      "Finestra, senza bordi o schermo intero", "نافذة، أو بلا حواف، أو ملء الشاشة" },
+    { "Windowed, borderless or fullscreen. F11 or Alt+Enter: fullscreen on / off",
+      "Окно, без рамки или во весь экран. F11 или Alt+Enter - во весь экран и обратно",
+      "Fenster, randlos oder Vollbild. F11 oder Alt+Enter: Vollbild an / aus",
+      "Ventana, sin bordes o pantalla completa. F11 o Alt+Enter: pantalla completa sí / no",
+      "Fenêtré, sans bordure ou plein écran. F11 ou Alt+Entrée : plein écran oui / non",
+      "Janela, sem bordas ou tela cheia. F11 ou Alt+Enter: tela cheia sim / não",
+      "ウィンドウ、ボーダーレス、フルスクリーン。F11 か Alt+Enter でフルスクリーンの切り替え",
+      "窗口、无边框或全屏。F11 或 Alt+Enter：切换全屏",
+      "Finestra, senza bordi o schermo intero. F11 o Alt+Invio: schermo intero sì / no",
+      "نافذة، أو بلا حواف، أو ملء الشاشة. F11 أو Alt+Enter: تشغيل ملء الشاشة وإيقافه" },
     { "Window Size", "Размер окна", "Fenstergröße", "Tamaño de la ventana", "Taille de la fenêtre",
       "Tamanho da janela", "ウィンドウサイズ", "窗口大小", "Dimensioni finestra", "حجم النافذة" },
     { "Size of the game window in windowed mode", "Размер окна игры в оконном режиме",
@@ -516,16 +527,16 @@ static const char *const s_tr8[][DC_LANG_COUNT] = {
       "الضغط على العصا اليسرى (L3): تبديل - تركض ريجينا حتى تتوقف أو ترفع السلاح؛ ضغط مستمر - فقط ما دامت مضغوطة" },
     { "Mouse Look", "Обзор мышью", "Kamera per Maus", "Cámara con el ratón", "Caméra à la souris",
       "Câmera com o mouse", "マウスで視点操作", "鼠标视角", "Visuale col mouse", "النظر بالماوس" },
-    { "On: the mouse turns the camera and the cursor is hidden while you play. Off: the cursor stays free - handy when playing with a gamepad",
-      "Вкл - мышь поворачивает камеру, курсор во время игры скрыт. Выкл - курсор свободен: удобно, если играете на геймпаде",
-      "An: Die Maus dreht die Kamera, der Mauszeiger ist beim Spielen ausgeblendet. Aus: Der Mauszeiger bleibt frei - praktisch beim Spielen mit Gamepad",
-      "Sí: el ratón gira la cámara y el cursor se oculta durante la partida. No: el cursor queda libre, útil si juegas con mando",
-      "Oui : la souris tourne la caméra et le curseur est masqué pendant la partie. Non : le curseur reste libre, pratique pour jouer à la manette",
-      "Sim: o mouse gira a câmera e o cursor fica oculto durante o jogo. Não: o cursor fica livre, útil ao jogar com controle",
-      "オン:マウスでカメラを回し、プレイ中はカーソルを隠します。オフ:カーソルは自由なまま。ゲームパッドで遊ぶときに便利です",
-      "开：用鼠标转动镜头，游戏时隐藏光标。关：光标保持自由，适合用手柄游玩",
-      "Sì: il mouse ruota la telecamera e il cursore è nascosto mentre giochi. No: il cursore resta libero, comodo se giochi con un controller",
-      "تشغيل: يدير الماوس الكاميرا ويختفي المؤشر أثناء اللعب. إيقاف: يبقى المؤشر حرا - مفيد عند اللعب بوحدة التحكم" },
+    { "Only in the Modern game type. On: the mouse turns the camera and the cursor is hidden while you play. Off: the cursor stays free - handy when playing with a gamepad",
+      "Только в современном типе игры. Вкл - мышь поворачивает камеру, курсор во время игры скрыт. Выкл - курсор свободен: удобно, если играете на геймпаде",
+      "Nur in der modernen Spielart. An: Die Maus dreht die Kamera, der Mauszeiger ist beim Spielen ausgeblendet. Aus: Der Mauszeiger bleibt frei - praktisch beim Spielen mit Gamepad",
+      "Solo en el tipo de juego moderno. Sí: el ratón gira la cámara y el cursor se oculta durante la partida. No: el cursor queda libre, útil si juegas con mando",
+      "Uniquement en type de jeu moderne. Oui : la souris tourne la caméra et le curseur est masqué pendant la partie. Non : le curseur reste libre, pratique pour jouer à la manette",
+      "Só no tipo de jogo moderno. Sim: o mouse gira a câmera e o cursor fica oculto durante o jogo. Não: o cursor fica livre, útil ao jogar com controle",
+      "モダンタイプのみ。オン:マウスでカメラを回し、プレイ中はカーソルを隠します。オフ:カーソルは自由なまま。ゲームパッドで遊ぶときに便利です",
+      "仅限现代类型。开：用鼠标转动镜头，游戏时隐藏光标。关：光标保持自由，适合用手柄游玩",
+      "Solo nel tipo Moderno. Sì: il mouse ruota la telecamera e il cursore è nascosto mentre giochi. No: il cursore resta libero, comodo se giochi con un controller",
+      "في النمط الحديث فقط. تشغيل: يدير الماوس الكاميرا ويختفي المؤشر أثناء اللعب. إيقاف: يبقى المؤشر حرا - مفيد عند اللعب بوحدة التحكم" },
     { "Stick Dead Zone", "Мёртвая зона стика", "Stick-Totzone", "Zona muerta del stick", "Zone morte du stick",
       "Zona morta do analógico", "スティックのデッドゾーン", "摇杆死区", "Zona morta dello stick", "المنطقة الميتة للعصا" },
     { "How far to tilt the right stick before the camera starts to move",
@@ -876,16 +887,16 @@ static const char *const s_tr8[][DC_LANG_COUNT] = {
       "显示并修改哪种游戏类型的按键：现代或原版，各有自己的方案。游戏类型本身在“游戏”标签中选择",
       "Di quale tipo di gioco mostrare e cambiare i tasti: Moderno od Originale, ognuno ha il suo schema. Il tipo di gioco si sceglie nella scheda GIOCO",
       "أزرار أي نمط تعرض وتغير: الحديث أو الأصلي - لكل منهما مخططه. ويختار نمط اللعب نفسه في تبويب اللعبة" },
-    { "Classic keys: WASD or the arrows walk, Shift runs, Caps Lock runs without holding, Q or X turns around, the right mouse button aims and the left one shoots",
-      "Классические клавиши: WASD или стрелки - ходьба, Shift - бег, Caps Lock - бег без удержания, Q или X - разворот, правая кнопка мыши - прицел, левая - выстрел",
-      "Klassische Tasten: WASD oder die Pfeiltasten zum Gehen, Umschalt zum Laufen, Feststelltaste zum Laufen ohne Halten, Q oder X zum Umdrehen, rechte Maustaste zielt, linke schießt",
-      "Teclas clásicas: WASD o las flechas para caminar, Mayús para correr, Bloq Mayús para correr sin mantener, Q o X para darse la vuelta; el botón derecho del ratón apunta y el izquierdo dispara",
-      "Touches classiques : WASD ou les flèches pour marcher, Maj pour courir, Verr. Maj pour courir sans maintenir, Q ou X pour faire demi-tour ; le clic droit vise et le clic gauche tire",
-      "Teclas clássicas: WASD ou as setas para andar, Shift para correr, Caps Lock para correr sem segurar, Q ou X para dar meia-volta; o botão direito do mouse mira e o esquerdo atira",
-      "クラシック:WASDか矢印キーで移動、Shiftでダッシュ、Caps Lockで押さずにダッシュ、QかXで振り向き、右クリックで構え、左クリックで撃ちます",
-      "经典按键：WASD 或方向键移动，Shift 奔跑，Caps Lock 无需按住即可奔跑，Q 或 X 转身，鼠标右键瞄准，左键射击",
-      "Tasti classici: WASD o le frecce per camminare, Shift per correre, Bloc Maiusc per correre senza tenere premuto, Q o X per voltarsi, il tasto destro del mouse mira e il sinistro spara",
-      "مفاتيح كلاسيكية: WASD أو الأسهم للمشي، Shift للركض، Caps Lock للركض دون الضغط المستمر، Q أو X للاستدارة، زر الماوس الأيمن للتصويب والأيسر لإطلاق النار" },
+    { "Classic keys: WASD or the arrows walk, Shift runs, Caps Lock is Run (Toggle), Q or X turns around, the right mouse button aims and the left one shoots",
+      "Классические клавиши: WASD или стрелки - ходьба, Shift - бег, Caps Lock - бег переключением, Q или X - разворот, правая кнопка мыши - прицел, левая - выстрел",
+      "Klassische Tasten: WASD oder die Pfeiltasten zum Gehen, Umschalt zum Laufen, Feststelltaste für Laufen (umschalten), Q oder X zum Umdrehen, rechte Maustaste zielt, linke schießt",
+      "Teclas clásicas: WASD o las flechas para caminar, Mayús para correr, Bloq Mayús para Correr (alternar), Q o X para darse la vuelta; el botón derecho del ratón apunta y el izquierdo dispara",
+      "Touches classiques : WASD ou les flèches pour marcher, Maj pour courir, Verr. Maj pour Courir (bascule), Q ou X pour faire demi-tour ; le clic droit vise et le clic gauche tire",
+      "Teclas clássicas: WASD ou as setas para andar, Shift para correr, Caps Lock para Correr (alternar), Q ou X para dar meia-volta; o botão direito do mouse mira e o esquerdo atira",
+      "クラシック:WASDか矢印キーで移動、Shiftでダッシュ、Caps Lockでダッシュ切替、QかXで振り向き、右クリックで構え、左クリックで撃ちます",
+      "经典按键：WASD 或方向键移动，Shift 奔跑，Caps Lock 切换奔跑，Q 或 X 转身，鼠标右键瞄准，左键射击",
+      "Tasti classici: WASD o le frecce per camminare, Shift per correre, Bloc Maiusc per Corsa (alterna), Q o X per voltarsi, il tasto destro del mouse mira e il sinistro spara",
+      "مفاتيح كلاسيكية: WASD أو الأسهم للمشي، Shift للركض، Caps Lock للركض (تبديل)، Q أو X للاستدارة، زر الماوس الأيمن للتصويب والأيسر لإطلاق النار" },
     { "As in today's remakes and remasters: WASD walk, Shift or Space runs, X turns around, the right mouse button aims and the left one shoots",
       "Как в нынешних ремейках и ремастерах: WASD - ходьба, Shift или пробел - бег, X - разворот, правая кнопка мыши - прицел, левая - выстрел",
       "Wie in heutigen Remakes und Remastern: WASD zum Gehen, Umschalt oder Leertaste zum Laufen, X zum Umdrehen, rechte Maustaste zielt, linke schießt",
@@ -926,16 +937,16 @@ static const char *const s_tr8[][DC_LANG_COUNT] = {
     { "Toggle Run Button", "Кнопка бега переключением", "Taste »Laufen umschalten«", "Botón de correr (alternar)",
       "Touche course (bascule)", "Botão de correr (alternar)", "ダッシュ切替ボタン", "切换奔跑按键", "Tasto corsa (alterna)",
       "زر الركض بالتبديل" },
-    { "How the Run (Toggle) button works - the left stick click (L3) in the Modern layout. Toggle: Regina runs until she stops or raises the weapon. Hold: only while it is held down",
-      "Как работает кнопка «Бег переключением» - в современной раскладке это нажатие левого стика (L3). Переключение - Регина бежит, пока не остановится или не поднимет оружие. Удержание - только пока кнопка нажата",
-      "So wirkt die Taste »Laufen umschalten« - im modernen Layout der Klick auf den linken Stick (L3). Umschalten: Regina läuft, bis sie stehen bleibt oder die Waffe hebt. Halten: nur solange sie gedrückt ist",
-      "Cómo funciona el botón Correr (alternar): en el esquema moderno es pulsar el stick izquierdo (L3). Alternar: Regina corre hasta que se detiene o alza el arma. Mantener: solo mientras lo mantienes pulsado",
-      "Fonctionnement de la touche Course (bascule) - le clic du stick gauche (L3) dans la disposition moderne. Bascule : Regina court jusqu'à s'arrêter ou lever son arme. Maintien : seulement tant qu'elle est enfoncée",
-      "Como funciona o botão Correr (alternar) - no modelo moderno é o clique do analógico esquerdo (L3). Alternar: Regina corre até parar ou erguer a arma. Segurar: só enquanto estiver pressionado",
-      "「ダッシュ切替」ボタンの動作(モダン配置では左スティック押し込み L3)。切り替え:止まるか武器を構えるまで走り続けます。長押し:押している間だけ走ります",
-      "“切换奔跑”按键的方式（现代方案中为按下左摇杆 L3）。切换：瑞吉娜持续奔跑，直到停下或举起武器。按住：仅在按住时奔跑",
-      "Come funziona il tasto Corsa (alterna), cioè la pressione dello stick sinistro (L3) nello schema Moderno. Alterna: Regina corre finché non si ferma o alza l'arma. Tieni premuto: solo finché lo tieni premuto",
-      "كيف يعمل زر الركض (تبديل) - الضغط على العصا اليسرى (L3) في المخطط الحديث. تبديل: تركض ريجينا حتى تتوقف أو ترفع السلاح. ضغط مستمر: فقط ما دام مضغوطا" },
+    { "How the Run (Toggle) button works: L3 in the Modern gamepad layout, Caps Lock in the Original keyboard layout. Toggle: Regina runs until she stops or raises the weapon. Hold: only while it is held down",
+      "Как работает кнопка «Бег переключением»: L3 в современной раскладке геймпада, Caps Lock в оригинальной раскладке клавиатуры. Переключение - Регина бежит, пока не остановится или не поднимет оружие. Удержание - только пока кнопка нажата",
+      "So wirkt die Taste »Laufen umschalten«: L3 im modernen Gamepad-Layout, Caps Lock im originalen Tastatur-Layout. Umschalten: Regina läuft, bis sie stehen bleibt oder die Waffe hebt. Halten: nur solange sie gedrückt ist",
+      "Cómo funciona el botón Correr (alternar): L3 en el esquema moderno del mando, Caps Lock en el esquema original del teclado. Alternar: Regina corre hasta que se detiene o alza el arma. Mantener: solo mientras lo mantienes pulsado",
+      "Fonctionnement de la touche Course (bascule) : L3 dans la disposition moderne de la manette, Caps Lock dans la disposition originale du clavier. Bascule : Regina court jusqu'à s'arrêter ou lever son arme. Maintien : seulement tant qu'elle est enfoncée",
+      "Como funciona o botão Correr (alternar): L3 no modelo moderno do controle, Caps Lock no modelo original do teclado. Alternar: Regina corre até parar ou erguer a arma. Segurar: só enquanto estiver pressionado",
+      "「ダッシュ切替」ボタンの動作(モダンのゲームパッド配置では L3、オリジナルのキーボード配置では Caps Lock)。切り替え:止まるか武器を構えるまで走り続けます。長押し:押している間だけ走ります",
+      "“切换奔跑”按键的方式（现代手柄方案中为 L3，原版键盘方案中为 Caps Lock）。切换：瑞吉娜持续奔跑，直到停下或举起武器。按住：仅在按住时奔跑",
+      "Come funziona il tasto Corsa (alterna): L3 nello schema Moderno del gamepad, Caps Lock nello schema Originale della tastiera. Alterna: Regina corre finché non si ferma o alza l'arma. Tieni premuto: solo finché lo tieni premuto",
+      "كيف يعمل زر الركض (تبديل): L3 في المخطط الحديث لذراع التحكم، وCaps Lock في المخطط الأصلي للوحة المفاتيح. تبديل: تركض ريجينا حتى تتوقف أو ترفع السلاح. ضغط مستمر: فقط ما دام مضغوطا" },
     /* действия (строки подстраниц) и их группы */
     { "Movement", "Движение", "Bewegung", "Movimiento", "Déplacement", "Movimento", "移動", "移动", "Movimento", "الحركة" },
     { "Combat", "Бой", "Kampf", "Combate", "Combat", "Combate", "戦闘", "战斗", "Combattimento", "القتال" },
@@ -946,6 +957,9 @@ static const char *const s_tr8[][DC_LANG_COUNT] = {
       "الرجوع للخلف" },
     { "Move Left", "Влево", "Links", "Izquierda", "Gauche", "Esquerda", "左", "向左", "Sinistra", "التحرك يسارا" },
     { "Move Right", "Вправо", "Rechts", "Derecha", "Droite", "Direita", "右", "向右", "Destra", "التحرك يمينا" },
+    /* 01.11: Move Left / Move Right при танковом движении (opt_title) */
+    { "Turn Left", "Поворот влево", "Links drehen", "Girar a la izquierda", "Tourner à gauche", "Virar à esquerda", "左旋回", "向左转", "Gira a sinistra", "الاستدارة يسارا" },
+    { "Turn Right", "Поворот вправо", "Rechts drehen", "Girar a la derecha", "Tourner à droite", "Virar à direita", "右旋回", "向右转", "Gira a destra", "الاستدارة يمينا" },
     { "Run (Hold)", "Бег, пока держишь", "Laufen (halten)", "Correr (mantener)", "Courir (maintenir)", "Correr (segurar)",
       "押している間ダッシュ", "按住奔跑", "Corsa (tieni premuto)", "الركض (ضغط مستمر)" },
     { "Run (Toggle)", "Бег переключением", "Laufen (umschalten)", "Correr (alternar)", "Courir (bascule)", "Correr (alternar)",
@@ -990,6 +1004,17 @@ static const char *const s_tr8[][DC_LANG_COUNT] = {
       "このタブの設定をすべて初期値に戻します",
       "将此选项卡中的所有设置恢复为默认值", "Tutte le impostazioni di questa scheda tornano al valore predefinito",
       "تعود كل إعدادات هذا التبويب إلى قيمها الافتراضية" },
+    /* 01.11.2026: сброс вкладки CONTROLS - без выбора геймпада, раскладки - на своих страницах */
+    { "Every setting on this tab except Gamepad Device goes back to its default value. Button layouts have their own Restore Defaults",
+      "Все настройки этой вкладки, кроме выбора геймпада, вернутся к значениям по умолчанию. У раскладок кнопок - своя кнопка «Вернуть по умолчанию»",
+      "Alle Einstellungen dieser Registerkarte außer dem Gamepad-Gerät werden auf ihre Standardwerte zurückgesetzt. Tastenbelegungen haben ihr eigenes »Standard wiederherstellen«",
+      "Todos los ajustes de esta pestaña, salvo el dispositivo de mando, vuelven a su valor por defecto. Los esquemas de botones tienen su propio Restaurar valores",
+      "Tous les réglages de cet onglet, sauf la manette choisie, reviennent à leur valeur par défaut. Les dispositions des touches ont leur propre Rétablir par défaut",
+      "Todas as configurações desta aba, exceto o controle escolhido, voltam ao valor padrão. Os modelos de botões têm o próprio Restaurar padrão",
+      "このタブの設定を、使用するゲームパッド以外すべて初期値に戻します。ボタン配置はそれぞれのページの「初期設定に戻す」で戻します",
+      "将此选项卡中除手柄设备外的所有设置恢复为默认值。按键方案在各自页面中单独恢复默认",
+      "Tutte le impostazioni di questa scheda, tranne il gamepad scelto, tornano al valore predefinito. Gli schemi dei tasti hanno il proprio Ripristina predefiniti",
+      "تعود كل إعدادات هذا التبويب إلى قيمها الافتراضية ما عدا ذراع التحكم المختارة. ولمخططات الأزرار زر استعادة الافتراضيات الخاص بها" },
     { "Every setting on this tab except Language goes back to its default value",
       "Все настройки этой вкладки, кроме языка, вернутся к значениям по умолчанию",
       "Alle Einstellungen dieser Registerkarte außer der Sprache werden auf ihre Standardwerte zurückgesetzt",
@@ -1013,26 +1038,99 @@ static const char *const s_tr8[][DC_LANG_COUNT] = {
       "恢复此游戏类型的默认按键：现代类型用现代，原版类型用原版",
       "Torna ai tasti predefiniti di questo tipo di gioco: Moderno nel tipo Moderno, Originale in quello Originale",
       "العودة إلى الأزرار الافتراضية لنمط اللعب هذا: الحديثة في النمط الحديث، والأصلية في النمط الأصلي" },
-    { "Enter or click: press a new key or mouse button for this action. Shift+Enter: add one more. Delete: clear. Esc always works as Back",
-      "Enter или щелчок - нажмите новую клавишу или кнопку мыши для этого действия. Shift+Enter - добавить ещё одну. Delete - очистить. Esc всегда работает как «назад»",
-      "Enter oder Klick: neue Taste oder Maustaste für diese Aktion drücken. Umschalt+Enter: eine weitere hinzufügen. Entf: leeren. Esc wirkt immer als Zurück",
-      "Enter o clic: pulsa una nueva tecla o botón del ratón para esta acción. Mayús+Enter: añadir otra. Supr: borrar. Esc siempre funciona como Atrás",
-      "Entrée ou clic : appuyez sur une nouvelle touche ou un bouton de souris pour cette action. Maj+Entrée : en ajouter une. Suppr : effacer. Échap sert toujours de Retour",
-      "Enter ou clique: pressione uma nova tecla ou botão do mouse para esta ação. Shift+Enter: adicionar outra. Delete: limpar. Esc sempre funciona como Voltar",
-      "Enter またはクリック:この操作に割り当てる新しいキーかマウスボタンを押します。Shift+Enter:追加。Delete:消去。Esc は常に「戻る」です",
-      "Enter 或单击：为此动作按下新的按键或鼠标按钮。Shift+Enter：再添加一个。Delete：清除。Esc 始终用作返回",
-      "Invio o clic: premi un nuovo tasto o pulsante del mouse per questa azione. Shift+Invio: aggiungine un altro. Canc: cancella. Esc funziona sempre come Indietro",
-      "Enter أو النقر: اضغط مفتاحا جديدا أو زر ماوس لهذا الإجراء. Shift+Enter: إضافة واحد آخر. Delete: مسح. يعمل Esc دائما كرجوع" },
-    { "Press a new button for this action, add one more or clear it - see the buttons below. The left stick always moves Regina, the right one turns the camera",
-      "Нажмите новую кнопку для этого действия, добавьте ещё одну или очистите - кнопки внизу. Левый стик всегда двигает Регину, правый поворачивает камеру",
-      "Neue Taste für diese Aktion drücken, eine weitere hinzufügen oder leeren - siehe Tasten unten. Der linke Stick bewegt Regina immer, der rechte dreht die Kamera",
-      "Pulsa un botón nuevo para esta acción, añade otro o bórralo: mira los botones abajo. El stick izquierdo siempre mueve a Regina y el derecho gira la cámara",
-      "Appuyez sur un nouveau bouton pour cette action, ajoutez-en un ou effacez - voir les boutons en bas. Le stick gauche déplace toujours Regina, le droit tourne la caméra",
-      "Pressione um novo botão para esta ação, adicione outro ou limpe - veja os botões abaixo. O analógico esquerdo sempre move Regina, o direito gira a câmera",
-      "この操作に新しいボタンを割り当て、追加、または消去します(下のボタン参照)。左スティックは常に移動、右スティックはカメラです",
-      "为此动作按下新按钮、再添加一个或清除（见下方按钮）。左摇杆始终用于移动，右摇杆转动镜头",
-      "Premi un nuovo pulsante per questa azione, aggiungine un altro o cancellalo: vedi i pulsanti qui sotto. Lo stick sinistro muove sempre Regina, il destro ruota la telecamera",
-      "اضغط زرا جديدا لهذا الإجراء، أو أضف زرا آخر أو امسحه - انظر الأزرار أدناه. العصا اليسرى تحرك ريجينا دائما، واليمنى تدير الكاميرا" },
+    { "Enter or click: press a new key or mouse button for this action. Shift+Enter: add one more. Delete: clear. Esc is fixed: OPTION in the world, Back in menus",
+      "Enter или щелчок - нажмите новую клавишу или кнопку мыши для этого действия. Shift+Enter - добавить ещё одну. Delete - очистить. Esc закреплён: в мире - OPTION, в меню - «назад»",
+      "Enter oder Klick: neue Taste oder Maustaste für diese Aktion drücken. Umschalt+Enter: eine weitere hinzufügen. Entf: leeren. Esc ist fest: in der Spielwelt OPTION, in Menüs Zurück",
+      "Enter o clic: pulsa una nueva tecla o botón del ratón para esta acción. Mayús+Enter: añadir otra. Supr: borrar. Esc es fijo: OPTION al jugar, Atrás en los menús",
+      "Entrée ou clic : appuyez sur une nouvelle touche ou un bouton de souris pour cette action. Maj+Entrée : en ajouter une. Suppr : effacer. Échap est fixe : OPTION en jeu, Retour dans les menus",
+      "Enter ou clique: pressione uma nova tecla ou botão do mouse para esta ação. Shift+Enter: adicionar outra. Delete: limpar. Esc é fixo: OPTION no jogo, Voltar nos menus",
+      "Enter またはクリック:この操作に割り当てる新しいキーかマウスボタンを押します。Shift+Enter:追加。Delete:消去。Esc は固定:プレイ中は OPTION、メニューでは「戻る」",
+      "Enter 或单击：为此动作按下新的按键或鼠标按钮。Shift+Enter：再添加一个。Delete：清除。Esc 固定：游戏中打开 OPTION，菜单中为返回",
+      "Invio o clic: premi un nuovo tasto o pulsante del mouse per questa azione. Shift+Invio: aggiungine un altro. Canc: cancella. Esc è fisso: OPTION nel gioco, Indietro nei menu",
+      "Enter أو النقر: اضغط مفتاحا جديدا أو زر ماوس لهذا الإجراء. Shift+Enter: إضافة واحد آخر. Delete: مسح. Esc ثابت: OPTION أثناء اللعب، ورجوع في القوائم" },
+    /* 01.11: движение - только клавиша; Fire, Switch Target, Action / Confirm, Cancel - со своей строкой и без фразы про Esc
+     * (у геймпада - про стики), чтобы в две строки */
+    { "Enter or click: press a new key for this action. Shift+Enter: add one more. Delete: clear. Esc is fixed: OPTION in the world, Back in menus",
+      "Enter или щелчок - нажмите новую клавишу для этого действия. Shift+Enter - добавить ещё одну. Delete - очистить. Esc закреплён: в мире - OPTION, в меню - «назад»",
+      "Enter oder Klick: neue Taste für diese Aktion drücken. Umschalt+Enter: eine weitere hinzufügen. Entf: leeren. Esc ist fest: in der Spielwelt OPTION, in Menüs Zurück",
+      "Enter o clic: pulsa una nueva tecla para esta acción. Mayús+Enter: añadir otra. Supr: borrar. Esc es fijo: OPTION al jugar, Atrás en los menús",
+      "Entrée ou clic : appuyez sur une nouvelle touche pour cette action. Maj+Entrée : en ajouter une. Suppr : effacer. Échap est fixe : OPTION en jeu, Retour dans les menus",
+      "Enter ou clique: pressione uma nova tecla para esta ação. Shift+Enter: adicionar outra. Delete: limpar. Esc é fixo: OPTION no jogo, Voltar nos menus",
+      "Enter またはクリック:この操作に割り当てる新しいキーを押します。Shift+Enter:追加。Delete:消去。Esc は固定:プレイ中は OPTION、メニューでは「戻る」",
+      "Enter 或单击：为此动作按下新的按键。Shift+Enter：再添加一个。Delete：清除。Esc 固定：游戏中打开 OPTION，菜单中为返回",
+      "Invio o clic: premi un nuovo tasto per questa azione. Shift+Invio: aggiungine un altro. Canc: cancella. Esc è fisso: OPTION nel gioco, Indietro nei menu",
+      "Enter أو النقر: اضغط مفتاحا جديدا لهذا الإجراء. Shift+Enter: إضافة واحد آخر. Delete: مسح. Esc ثابت: OPTION أثناء اللعب، ورجوع في القوائم" },
+    { "Enter or click: press a new key or mouse button for this action. Shift+Enter: add one more. Delete: clear. Without aiming it also opens doors and picks up items",
+      "Enter или щелчок - нажмите новую клавишу или кнопку мыши для этого действия. Shift+Enter - добавить ещё одну. Delete - очистить. Без прицела тоже открывает двери и подбирает предметы",
+      "Enter oder Klick: neue Taste oder Maustaste für diese Aktion drücken. Umschalt+Enter: eine weitere hinzufügen. Entf: leeren. Ohne Zielen öffnet es auch Türen und hebt Gegenstände auf",
+      "Enter o clic: pulsa una nueva tecla o botón del ratón para esta acción. Mayús+Enter: añadir otra. Supr: borrar. Sin apuntar también abre puertas y recoge objetos",
+      "Entrée ou clic : appuyez sur une nouvelle touche ou un bouton de souris pour cette action. Maj+Entrée : en ajouter une. Suppr : effacer. Sans viser, il ouvre aussi les portes et ramasse les objets",
+      "Enter ou clique: pressione uma nova tecla ou botão do mouse para esta ação. Shift+Enter: adicionar outra. Delete: limpar. Sem mirar, também abre portas e pega itens",
+      "Enter またはクリック:この操作に割り当てる新しいキーかマウスボタンを押します。Shift+Enter:追加。Delete:消去。構えていないときは、ドアを開けたりアイテムを拾ったりもします",
+      "Enter 或单击：为此动作按下新的按键或鼠标按钮。Shift+Enter：再添加一个。Delete：清除。未瞄准时也可开门和拾取物品",
+      "Invio o clic: premi un nuovo tasto o pulsante del mouse per questa azione. Shift+Invio: aggiungine un altro. Canc: cancella. Senza mirare apre anche le porte e raccoglie gli oggetti",
+      "Enter أو النقر: اضغط مفتاحا جديدا أو زر ماوس لهذا الإجراء. Shift+Enter: إضافة واحد آخر. Delete: مسح. دون تصويب يفتح أيضا الأبواب ويلتقط الأغراض" },
+    { "Enter or click: press a new key or mouse button for this action. Shift+Enter: add one more. Delete: clear. Original game type only: switches enemies while aiming",
+      "Enter или щелчок - нажмите новую клавишу или кнопку мыши для этого действия. Shift+Enter - добавить ещё одну. Delete - очистить. Только в оригинальном типе игры: при прицеле переключает врага",
+      "Enter oder Klick: neue Taste oder Maustaste für diese Aktion drücken. Umschalt+Enter: eine weitere hinzufügen. Entf: leeren. Nur in der originalen Spielart: wechselt beim Zielen den Gegner",
+      "Enter o clic: pulsa una nueva tecla o botón del ratón para esta acción. Mayús+Enter: añadir otra. Supr: borrar. Solo en el tipo de juego original: cambia de enemigo al apuntar",
+      "Entrée ou clic : appuyez sur une nouvelle touche ou un bouton de souris pour cette action. Maj+Entrée : en ajouter une. Suppr : effacer. Uniquement en type de jeu original : change d'ennemi en visant",
+      "Enter ou clique: pressione uma nova tecla ou botão do mouse para esta ação. Shift+Enter: adicionar outra. Delete: limpar. Só no tipo de jogo original: troca de inimigo ao mirar",
+      "Enter またはクリック:この操作に割り当てる新しいキーかマウスボタンを押します。Shift+Enter:追加。Delete:消去。オリジナルタイプのみ:構え中に狙う敵を切り替えます",
+      "Enter 或单击：为此动作按下新的按键或鼠标按钮。Shift+Enter：再添加一个。Delete：清除。仅限原版类型：瞄准时切换敌人",
+      "Invio o clic: premi un nuovo tasto o pulsante del mouse per questa azione. Shift+Invio: aggiungine un altro. Canc: cancella. Solo nel tipo Originale: mentre miri cambia nemico",
+      "Enter أو النقر: اضغط مفتاحا جديدا أو زر ماوس لهذا الإجراء. Shift+Enter: إضافة واحد آخر. Delete: مسح. في النمط الأصلي فقط: يبدل العدو أثناء التصويب" },
+    { "Enter or click: press a new key or mouse button for this action. Shift+Enter: add one more. Delete: clear. In game menus: left click confirms, the wheel moves the selection",
+      "Enter или щелчок - нажмите новую клавишу или кнопку мыши для этого действия. Shift+Enter - добавить ещё одну. Delete - очистить. В меню игры: левый щелчок - подтвердить, колесо - выбор",
+      "Enter oder Klick: neue Taste oder Maustaste für diese Aktion drücken. Umschalt+Enter: eine weitere hinzufügen. Entf: leeren. In Spielmenüs: Linksklick bestätigt, das Mausrad bewegt die Auswahl",
+      "Enter o clic: pulsa una nueva tecla o botón del ratón para esta acción. Mayús+Enter: añadir otra. Supr: borrar. En los menús del juego: clic izquierdo confirma, la rueda mueve la selección",
+      "Entrée ou clic : appuyez sur une nouvelle touche ou un bouton de souris pour cette action. Maj+Entrée : en ajouter une. Suppr : effacer. Dans les menus du jeu : clic gauche valide, la molette déplace la sélection",
+      "Enter ou clique: pressione uma nova tecla ou botão do mouse para esta ação. Shift+Enter: adicionar outra. Delete: limpar. Nos menus do jogo: clique esquerdo confirma, a roda move a seleção",
+      "Enter またはクリック:この操作に割り当てる新しいキーかマウスボタンを押します。Shift+Enter:追加。Delete:消去。ゲームのメニューでは、左クリックで決定、ホイールで選択",
+      "Enter 或单击：为此动作按下新的按键或鼠标按钮。Shift+Enter：再添加一个。Delete：清除。游戏菜单中：左键确认，滚轮移动选项",
+      "Invio o clic: premi un nuovo tasto o pulsante del mouse per questa azione. Shift+Invio: aggiungine un altro. Canc: cancella. Nei menu del gioco: clic sinistro conferma, la rotellina sposta la selezione",
+      "Enter أو النقر: اضغط مفتاحا جديدا أو زر ماوس لهذا الإجراء. Shift+Enter: إضافة واحد آخر. Delete: مسح. في قوائم اللعبة: النقر الأيسر للتأكيد، والعجلة لتحريك التحديد" },
+    { "Enter or click: press a new key or mouse button for this action. Shift+Enter: add one more. Delete: clear. In game menus right click also goes back",
+      "Enter или щелчок - нажмите новую клавишу или кнопку мыши для этого действия. Shift+Enter - добавить ещё одну. Delete - очистить. В меню игры правый щелчок - тоже назад",
+      "Enter oder Klick: neue Taste oder Maustaste für diese Aktion drücken. Umschalt+Enter: eine weitere hinzufügen. Entf: leeren. In Spielmenüs geht auch Rechtsklick zurück",
+      "Enter o clic: pulsa una nueva tecla o botón del ratón para esta acción. Mayús+Enter: añadir otra. Supr: borrar. En los menús del juego, el clic derecho también vuelve atrás",
+      "Entrée ou clic : appuyez sur une nouvelle touche ou un bouton de souris pour cette action. Maj+Entrée : en ajouter une. Suppr : effacer. Dans les menus du jeu, le clic droit revient aussi en arrière",
+      "Enter ou clique: pressione uma nova tecla ou botão do mouse para esta ação. Shift+Enter: adicionar outra. Delete: limpar. Nos menus do jogo, o clique direito também volta",
+      "Enter またはクリック:この操作に割り当てる新しいキーかマウスボタンを押します。Shift+Enter:追加。Delete:消去。ゲームのメニューでは右クリックでも戻ります",
+      "Enter 或单击：为此动作按下新的按键或鼠标按钮。Shift+Enter：再添加一个。Delete：清除。游戏菜单中右键也可返回",
+      "Invio o clic: premi un nuovo tasto o pulsante del mouse per questa azione. Shift+Invio: aggiungine un altro. Canc: cancella. Nei menu del gioco anche il clic destro torna indietro",
+      "Enter أو النقر: اضغط مفتاحا جديدا أو زر ماوس لهذا الإجراء. Shift+Enter: إضافة واحد آخر. Delete: مسح. في قوائم اللعبة يعود النقر الأيمن أيضا للخلف" },
+    { "Press a new button for this action, add one more or clear it - see the buttons below. The left stick always moves Regina, the right one turns the camera in the Modern game type",
+      "Нажмите новую кнопку для этого действия, добавьте ещё одну или очистите - кнопки внизу. Левый стик всегда двигает Регину, правый поворачивает камеру в современном типе игры",
+      "Neue Taste für diese Aktion drücken, eine weitere hinzufügen oder leeren - siehe Tasten unten. Der linke Stick bewegt Regina immer, der rechte dreht in der modernen Spielart die Kamera",
+      "Pulsa un botón nuevo para esta acción, añade otro o bórralo: mira los botones abajo. El stick izquierdo siempre mueve a Regina y el derecho gira la cámara en el tipo de juego moderno",
+      "Appuyez sur un nouveau bouton pour cette action, ajoutez-en un ou effacez - voir les boutons en bas. Le stick gauche déplace toujours Regina, le droit tourne la caméra en type de jeu moderne",
+      "Pressione um novo botão para esta ação, adicione outro ou limpe - veja os botões abaixo. O analógico esquerdo sempre move Regina, o direito gira a câmera no tipo de jogo moderno",
+      "この操作に新しいボタンを割り当て、追加、または消去します(下のボタン参照)。左スティックは常に移動、右スティックはモダンタイプでカメラです",
+      "为此动作按下新按钮、再添加一个或清除（见下方按钮）。左摇杆始终用于移动，现代类型中右摇杆转动镜头",
+      "Premi un nuovo pulsante per questa azione, aggiungine un altro o cancellalo: vedi i pulsanti qui sotto. Lo stick sinistro muove sempre Regina, il destro ruota la telecamera nel tipo Moderno",
+      "اضغط زرا جديدا لهذا الإجراء، أو أضف زرا آخر أو امسحه - انظر الأزرار أدناه. العصا اليسرى تحرك ريجينا دائما، واليمنى تدير الكاميرا في النمط الحديث" },
+    /* 01.11: Fire, Switch Target геймпада - со своей строкой */
+    { "Press a new button for this action, add one more or clear it - see the buttons below. Without aiming it also opens doors and picks up items",
+      "Нажмите новую кнопку для этого действия, добавьте ещё одну или очистите - кнопки внизу. Без прицела тоже открывает двери и подбирает предметы",
+      "Neue Taste für diese Aktion drücken, eine weitere hinzufügen oder leeren - siehe Tasten unten. Ohne Zielen öffnet es auch Türen und hebt Gegenstände auf",
+      "Pulsa un botón nuevo para esta acción, añade otro o bórralo: mira los botones abajo. Sin apuntar también abre puertas y recoge objetos",
+      "Appuyez sur un nouveau bouton pour cette action, ajoutez-en un ou effacez - voir les boutons en bas. Sans viser, il ouvre aussi les portes et ramasse les objets",
+      "Pressione um novo botão para esta ação, adicione outro ou limpe - veja os botões abaixo. Sem mirar, também abre portas e pega itens",
+      "この操作に新しいボタンを割り当て、追加、または消去します(下のボタン参照)。構えていないときは、ドアを開けたりアイテムを拾ったりもします",
+      "为此动作按下新按钮、再添加一个或清除（见下方按钮）。未瞄准时也可开门和拾取物品",
+      "Premi un nuovo pulsante per questa azione, aggiungine un altro o cancellalo: vedi i pulsanti qui sotto. Senza mirare apre anche le porte e raccoglie gli oggetti",
+      "اضغط زرا جديدا لهذا الإجراء، أو أضف زرا آخر أو امسحه - انظر الأزرار أدناه. دون تصويب يفتح أيضا الأبواب ويلتقط الأغراض" },
+    { "Press a new button for this action, add one more or clear it - see the buttons below. Original game type only: switches enemies while aiming",
+      "Нажмите новую кнопку для этого действия, добавьте ещё одну или очистите - кнопки внизу. Только в оригинальном типе игры: при прицеле переключает врага",
+      "Neue Taste für diese Aktion drücken, eine weitere hinzufügen oder leeren - siehe Tasten unten. Nur in der originalen Spielart: wechselt beim Zielen den Gegner",
+      "Pulsa un botón nuevo para esta acción, añade otro o bórralo: mira los botones abajo. Solo en el tipo de juego original: cambia de enemigo al apuntar",
+      "Appuyez sur un nouveau bouton pour cette action, ajoutez-en un ou effacez - voir les boutons en bas. Uniquement en type de jeu original : change d'ennemi en visant",
+      "Pressione um novo botão para esta ação, adicione outro ou limpe - veja os botões abaixo. Só no tipo de jogo original: troca de inimigo ao mirar",
+      "この操作に新しいボタンを割り当て、追加、または消去します(下のボタン参照)。オリジナルタイプのみ:構え中に狙う敵を切り替えます",
+      "为此动作按下新按钮、再添加一个或清除（见下方按钮）。仅限原版类型：瞄准时切换敌人",
+      "Premi un nuovo pulsante per questa azione, aggiungine un altro o cancellalo: vedi i pulsanti qui sotto. Solo nel tipo Originale: mentre miri cambia nemico",
+      "اضغط زرا جديدا لهذا الإجراء، أو أضف زرا آخر أو امسحه - انظر الأزرار أدناه. في النمط الأصلي فقط: يبدل العدو أثناء التصويب" },
     /* значения: подписи клавиш (английские, кроме мыши и пробела), «нажмите…», «не назначено» */
     { "Space", "Пробел", "Leertaste", "Espacio", "Espace", "Espaço", "スペース", "空格", "Spazio", "مسافة" },
     { "LMB", "ЛКМ", "LMT", "Clic izdo.", "Clic gauche", "Botão esq.", "左クリック", "鼠标左键", "Clic sx", "الزر الأيسر" },
@@ -1082,6 +1180,17 @@ static const char *const s_tr8[][DC_LANG_COUNT] = {
       "Appuyez sur une touche ou un bouton de souris - Échap annule", "Pressione uma tecla ou botão do mouse - Esc cancela",
       "キーかマウスボタンを押してください - Esc で取消", "请按下按键或鼠标按钮 - Esc 取消",
       "Premi un tasto o un pulsante del mouse - Esc per annullare", "اضغط مفتاحا أو زر ماوس - Esc للإلغاء" },
+    /* 01.11: ожидание клавиши на строках движения - мышь там не назначается */
+    { "Press a key - Esc to cancel",
+      "Нажмите клавишу - Esc отмена",
+      "Taste drücken - Esc bricht ab",
+      "Pulsa una tecla - Esc cancela",
+      "Appuyez sur une touche - Échap annule",
+      "Pressione uma tecla - Esc cancela",
+      "キーを押してください - Esc で取消",
+      "请按下按键 - Esc 取消",
+      "Premi un tasto - Esc per annullare",
+      "اضغط مفتاحا - Esc للإلغاء" },
     { "Press a gamepad button - wait 5 s to cancel", "Нажмите кнопку геймпада - отмена через 5 с",
       "Gamepad-Taste drücken - Abbruch nach 5 s", "Pulsa un botón del mando - se cancela en 5 s",
       "Appuyez sur un bouton de la manette - annulation après 5 s", "Pressione um botão do controle - cancela em 5 s",
@@ -1171,6 +1280,15 @@ static int   s_val_x, s_val_x2;   /* зона значения: левая ст�
 /* Сообщение внизу («Настройки сохранены», «Применится после перезапуска»). */
 static char  s_note[128];
 static int   s_note_frames;
+/* ⭐ 01.11.2026 (сверка Controls): срок сообщения - 3 с по часам, а не 180 кадров: у игрока сотни кадров в секунду, и
+ * «Assigned», «This key cannot be assigned» пропадали за доли секунды. Ожидание клавиши висит, пока ждём, как было.
+ * DC_MENU_NOTE_MS=0 - как было (180 кадров). */
+static Uint32 s_note_until;
+static int note_ms_on(void) {
+    static int en = -1;
+    if (en < 0) { const char *e = getenv("DC_MENU_NOTE_MS"); en = (e && *e == '0') ? 0 : 1; }
+    return en;
+}
 
 /* ---- вспомогательное ------------------------------------------------------ */
 
@@ -1233,6 +1351,15 @@ static void note_en(const char *en) {
     s_note_key = en;
     snprintf(s_note, sizeof s_note, "%s", dc_tr(en));
     s_note_frames = 180;
+    s_note_until = SDL_GetTicks() + 3000u;
+}
+/* показывать ли сообщение в этом кадре (01.11: по часам, note_ms_on) */
+static int note_live(void) {
+    if (s_note_frames <= 0) return 0;
+    if (s_cap_opt >= 0 || !note_ms_on()) { s_note_frames--; return 1; }
+    if ((Sint32)(SDL_GetTicks() - s_note_until) < 0) return 1;
+    s_note_frames = 0;
+    return 0;
 }
 void dc_menu_note(const char *text_en) { note_en(text_en); }
 
@@ -1280,7 +1407,21 @@ static void value_text(const DcOpt *o, char *out, size_t n) {
             size_t u = strlen(out);
             snprintf(out + u, n - u, "%s%s", i ? " / " : "", l ? dc_tr(l) : "?");
         }
-        if (!k) snprintf(out, n, "%s", "-");
+        int nall = k;
+        {   /* 01.11: и неизменные (Esc...), кроме назначенных */
+            int f[2];
+            const int nf = dcb_fixed(BIND_DEV(o), (int)(o->lo + 0.5f), f);
+            for (int j = 0; j < nf; j++) {
+                int dup = 0;
+                for (int i = 0; i < k; i++) if (c[i] == f[j]) dup = 1;
+                if (dup) continue;
+                const char *l = dcb_code_label(f[j]);
+                size_t u = strlen(out);
+                snprintf(out + u, n - u, "%s%s", nall ? " / " : "", l ? dc_tr(l) : "?");
+                nall++;
+            }
+        }
+        if (!nall) snprintf(out, n, "%s", "-");
         break; }
     case DC_OPT_DEVICE: {                             /* 04.10 (6): «2. PS5 Controller» / «Auto» */
         const int slot = (int)(v + 0.5f);
@@ -1302,6 +1443,20 @@ static const char *opt_hint(const DcOpt *o) {
         if (idx >= 0 && idx < cnt) return o->hints[idx];
     }
     return o->hint;
+}
+
+/* ⭐ 01.11.2026 (сверка Controls, игрок: «Tank ... делаем»): подпись действия. У танкового движения типа игры A / D и стрелки
+ * поворачивают Регину - строки Move Left / Move Right называются Turn Left / Turn Right (подстраницы назначений - тип из
+ * «For Game Type», список своей раскладки dc_splash.cpp - текущий тип). main.cpp dc_bind_turn_titles, DC_TANK_TITLES=0 - как было. */
+const char *dc_bind_title(int mode, int act) {
+    if ((act == DCB_LEFT || act == DCB_RIGHT) && dc_bind_turn_titles(mode == DCB_ORIG))
+        return act == DCB_LEFT ? DC_ROW_TITLE("Turn Left") : DC_ROW_TITLE("Turn Right");
+    return dcb_act_title(act);
+}
+static const char *opt_title(const DcOpt *o) {
+    const int act = (int)(o->lo + 0.5f);
+    if (o->type == DC_OPT_BIND && (act == DCB_LEFT || act == DCB_RIGHT)) return dc_bind_title(BIND_MODE(o), act);
+    return o->title;
 }
 
 static void opt_adjust(const DcOpt *o, int dir) {
@@ -1445,12 +1600,26 @@ void dc_menu_open_sub(int page) {
     s_cap_opt = -1;
 }
 
+/* ⭐ 01.11.2026 (сверка Controls, пункт 7: «несовпадение с текстом - правь текст»): движение мышь не берёт (main.cpp bc_kb,
+ * маска 0) - в пояснении строк движения и в сообщении ожидания только клавиша, а кнопка мыши и колесо на эти строки не
+ * назначаются («This key cannot be assigned»). DC_BIND_MOVE_NOMOUSE=0 - как было. */
+static int bind_move_nomouse_on(void) {
+    static int en = -1;
+    if (en < 0) { const char *e = getenv("DC_BIND_MOVE_NOMOUSE"); en = (e && *e == '0') ? 0 : 1; }
+    return en;
+}
+static int bind_kb_move(const DcOpt *o) {           /* строка клавиатуры Move Forward .. Move Right */
+    const int act = (int)(o->lo + 0.5f);
+    return BIND_DEV(o) == DCB_KB && act >= DCB_FWD && act <= DCB_RIGHT;
+}
+
 /* строка назначения: начать ожидание входа (add — добавить к прежним) */
 static void bind_start(int opt, int add) {
     if (opt < 0 || opt >= s_count || s_opts[opt].type != DC_OPT_BIND) return;
     s_cap_opt = opt; s_cap_add = add;
     /* строки сообщений — каждая своим вызовом: menu_strings.py берёт их отсюда в атлас */
     if (BIND_DEV(&s_opts[opt]) == DCB_PAD) note_en("Press a gamepad button - wait 5 s to cancel");
+    else if (bind_move_nomouse_on() && bind_kb_move(&s_opts[opt])) note_en("Press a key - Esc to cancel");
     else note_en("Press a key or a mouse button - Esc to cancel");
     s_note_frames = 100000;                           /* висит, пока ждём */
 }
@@ -1462,6 +1631,7 @@ void dc_menu_capture_input(int code) {
     s_cap_opt = -1;
     if (!code) { note_en("Unchanged"); return; }
     if (!dcb_code_ok(dev, code)) { note_en("This key cannot be assigned"); return; }
+    if (bind_move_nomouse_on() && bind_kb_move(o) && DCB_IS_MOUSE(code)) { note_en("This key cannot be assigned"); return; }
     const int moved = dcb_assign(BIND_MODE(o), dev, act, code, add);
     if (moved >= 0) note_en("Assigned - taken from another action");
     else note_en("Assigned");
@@ -1651,7 +1821,7 @@ void dc_menu_draw(void) {
         /* подпись — не длиннее, чем до левой стрелки: режем с многоточием */
         {
             char title[128];
-            snprintf(title, sizeof title, "%s", dc_tr(o->title));
+            snprintf(title, sizeof title, "%s", dc_tr(opt_title(o)));
             int maxw = left_box - 10 - x0;
             if (dc_font_text_width(title) > maxw) {
                 size_t n = strlen(title);
@@ -1713,8 +1883,7 @@ void dc_menu_draw(void) {
     }
 
     const int help_y = hint_y + 2 * (lh + 2) + 2;
-    if (s_note_frames > 0) {
-        s_note_frames--;
+    if (note_live()) {
         dc_ui_text(x0, help_y, s_note, COL_VALUE, 0);
     } else {
         /* Строка управления — группы через три пробела. Не влезает (длинные
@@ -1801,9 +1970,9 @@ int dc_menu_rows(DcMenuRow *out, int max) {
         if (!opt_on_page(i)) continue;
         const DcOpt *o = &s_opts[i];
         DcMenuRow *r = &out[n++];
-        r->opt = i; r->type = o->type; r->title = o->title; r->hint = opt_hint(o);
+        r->opt = i; r->type = o->type; r->title = opt_title(o); r->hint = opt_hint(o);
         r->value_key = NULL; r->value_num[0] = 0; r->choices = NULL;
-        r->bind_dev = 0; r->bind_n = 0; r->capturing = 0;
+        r->bind_dev = 0; r->bind_n = 0; r->bind_fixed = 0; r->capturing = 0;
         const float v = o->get ? o->get() : 0.0f;
         r->num_v = v; r->num_lo = o->lo; r->num_hi = o->hi;   /* 11.10: ползунок числовой строки */
         switch (o->type) {
@@ -1819,6 +1988,17 @@ int dc_menu_rows(DcMenuRow *out, int max) {
             const int k = dcb_get(BIND_MODE(o), r->bind_dev, (int)(o->lo + 0.5f), c);
             for (int j = 0; j < k && j < 4; j++) { r->bind_code[j] = c[j]; r->bind_lbl[j] = dcb_code_label(c[j]); }
             r->bind_n = (k < 4) ? k : 4;
+            {   /* 01.11: неизменные входы (Esc...) - следом, кроме уже назначенных */
+                int f[2];
+                const int nf = dcb_fixed(r->bind_dev, (int)(o->lo + 0.5f), f);
+                for (int j = 0; j < nf && r->bind_n < 6; j++) {
+                    int dup = 0;
+                    for (int q = 0; q < r->bind_n; q++) if (r->bind_code[q] == f[j]) dup = 1;
+                    if (dup) continue;
+                    r->bind_code[r->bind_n] = f[j]; r->bind_lbl[r->bind_n] = dcb_code_label(f[j]);
+                    r->bind_n++; r->bind_fixed++;
+                }
+            }
             r->capturing = (s_cap_opt == i);
             break; }
         case DC_OPT_BOOL:
@@ -1844,8 +2024,7 @@ int dc_menu_rows(DcMenuRow *out, int max) {
 }
 
 const char *dc_menu_note_key(void) {
-    if (s_note_frames <= 0) return NULL;
-    s_note_frames--;
+    if (!note_live()) return NULL;
     return s_note_key;
 }
 

@@ -41,6 +41,10 @@ extern "C" int ptvk_device_integrated(void) { return s_vkIntegrated; }
 /* 24.10.2026: производитель выбранной видеокарты (PCI: 0x8086 Intel, 0x10DE NVIDIA, 0x1002 AMD) - main.cpp dsh_prepare */
 static uint32_t s_vkVendor = 0;
 extern "C" unsigned ptvk_device_vendor(void) { return s_vkVendor; }
+/* 30.10.2026 (GitHub #16, Steam Deck): драйвер выбранной видеокарты (VkDriverId: 3 - Mesa RADV; 0 - неизвестен, Vulkan ниже
+ * 1.2) - gpu_vk_raster.cpp ms_radv_fix */
+static uint32_t s_vkDriverId = 0;
+extern "C" unsigned ptvk_device_driver_id(void) { return s_vkDriverId; }
 /* 24.10.2026: видеопамять (VK_EXT_memory_budget, если есть): сколько занято игрой и сколько ей даёт система в кучах своей памяти
  * видеокарты (DEVICE_LOCAL), и их размер. У встроенной своей памяти бывает 512 МБ: сверх неё система гоняет образы туда-обратно,
  * и всё встаёт (игрок: со сглаживанием на встроенной Radeon игра на 20 % скорости). 1 - занято и бюджет известны, 0 - только размер. */
@@ -147,6 +151,7 @@ extern "C" int ptvk_init(void)
         const int score = gq ? type : -1;              /* 18.10.2026: discrete > integrated > virtual */
         vlog("[VK]  - %s  Vulkan %u.%u  graphics+compute=%s  score %d\n", props.deviceName,
              VK_API_VERSION_MAJOR(props.apiVersion), VK_API_VERSION_MINOR(props.apiVersion), gq ? "yes" : "no", score);
+        uint32_t drvId = 0;
         {   /* 23.10.2026 (GitHub #2: a crash after the shader preparation on Intel UHD 630 with nothing to go by): every
              * device and its driver into the game's log - pt_vk.txt is off in a release (dc_boot.c) */
             VkPhysicalDeviceDriverProperties drv{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES };
@@ -159,9 +164,10 @@ extern "C" int ptvk_init(void)
                     VK_API_VERSION_MAJOR(props.apiVersion), VK_API_VERSION_MINOR(props.apiVersion), VK_API_VERSION_PATCH(props.apiVersion),
                     drv.driverName[0] ? drv.driverName : "?", drv.driverInfo, props.driverVersion, props.vendorID, props.deviceID,
                     gq ? "yes" : "no");
+            drvId = (uint32_t)drv.driverID;
         }
         if (score > bestScore) { bestScore = score; s_phys = pd; s_vkIntegrated = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
-                                 s_vkVendor = props.vendorID;
+                                 s_vkVendor = props.vendorID; s_vkDriverId = drvId;
                                  snprintf(s_vkDev, sizeof s_vkDev, "%s", props.deviceName); }
         else if (!s_vkDev[0]) snprintf(s_vkDev, sizeof s_vkDev, "%s", props.deviceName);
     }
@@ -353,13 +359,27 @@ extern "C" void ptvk_mark_lost(int vkresult) {
     if (InterlockedExchange(&s_vkLost, 1) == 0)
         fprintf(stderr, "render: Vulkan device lost (VkResult %d) - Vulkan graphics are off until the game restarts\n", vkresult);
 }
+/* 29.10.2026: долгое ожидание забора - кто ждёт и чего (gpu_vk_raster.cpp: номера отправок, поток задания показа, замки) */
+static void (*s_waitNote)(VkFence) = nullptr;
+extern "C" void ptvk_set_wait_note(void (*fn)(VkFence)) { s_waitNote = fn; }
+/* 29.10.2026 (async, разбор 3): проба DC_TEST_SWAP_LOST_VK=1 (main.cpp test_lost) - с «потерей» устройства вывода теряется и
+ * Vulkan, как при настоящем сбросе драйвера: следующее ожидание забора дожидается его (видеокарта и правда закончила) и
+ * кончается потерей */
+static volatile LONG s_testLoseNext = 0;
+extern "C" void ptvk_test_lose_next(void) { InterlockedExchange(&s_testLoseNext, 1); }
 extern "C" int ptvk_wait_fence(VkFence f) {
     if (s_vkLost) return 0;
     for (int sec = 0; ; sec++) {
         const VkResult r = vkWaitForFences(s_device, 1, &f, VK_TRUE, 1000000000ULL);
+        if (r == VK_SUCCESS && s_testLoseNext && InterlockedExchange(&s_testLoseNext, 0)) {
+            fprintf(stderr, "render: test - the Vulkan device is lost too (DC_TEST_SWAP_LOST_VK)\n");
+            ptvk_mark_lost((int)VK_ERROR_DEVICE_LOST);
+            return 0;
+        }
         if (r == VK_SUCCESS) return 1;
         if (r != VK_TIMEOUT || sec >= 60) { ptvk_mark_lost((int)r); return 0; }
-        if (sec == 3) fprintf(stderr, "render: the graphics card has been busy for 4 s - still waiting\n");
+        if (sec == 3) { fprintf(stderr, "render: the graphics card has been busy for 4 s - still waiting\n"); fflush(stderr); }   /* 29.10.2026: журнал в буфере - сразу */
+        if ((sec == 3 || sec == 12) && s_waitNote) s_waitNote(f);
     }
 }
 static void beginCmd() {
@@ -390,6 +410,11 @@ static void imgBarrier(VkImage img, VkImageLayout from, VkImageLayout to,
 
 // ---------------- PS1 VRAM image (R16_UINT 1024x512) ----------------
 static const int      VRAM_W = 1024, VRAM_H = 512;
+/* 31.10.2026: строки 512..1023 текстуры и буфера - карта решётки (pt_renderer.c dc_dithc_stage, dc_raster.frag dithcFetch);
+ * VRAM как была - строки 0..511, её читают по маске y & 511. DC_DITHC=0 - текстура 1024x512, как было. */
+extern "C" int dc_dithc_enabled(void);
+extern "C" int dc_facehd_enabled(void);   /* gpu.c: 31.10.2026 маска лиц при HD-текстурах из mods - строки 1024..1535 */
+static int vramImgH() { return dc_facehd_enabled() ? 1536 : dc_dithc_enabled() ? 1024 : VRAM_H; }
 static VkImage        s_vramImg = VK_NULL_HANDLE;
 static VkDeviceMemory s_vramMem = VK_NULL_HANDLE;
 static VkImageView    s_vramView = VK_NULL_HANDLE;
@@ -413,7 +438,7 @@ static bool ensureVramImage() {
     if (!s_vkReady || s_vramImgFailed) return false;
     VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
     ici.imageType = VK_IMAGE_TYPE_2D; ici.format = VK_FORMAT_R16_UINT;
-    ici.extent = { (uint32_t)VRAM_W, (uint32_t)VRAM_H, 1 }; ici.mipLevels = 1; ici.arrayLayers = 1;
+    ici.extent = { (uint32_t)VRAM_W, (uint32_t)vramImgH(), 1 }; ici.mipLevels = 1; ici.arrayLayers = 1;
     ici.samples = VK_SAMPLE_COUNT_1_BIT; ici.tiling = VK_IMAGE_TILING_OPTIMAL;
     ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -446,7 +471,7 @@ static bool ensureVramImage() {
     r = vkCreateSampler(s_device, &sci, nullptr, &s_vramSamp);
     if (r != VK_SUCCESS) return vramFail("the sampler", r);
     // Persistent staging buffer (uploads happen every traced frame).
-    if (!createBuf((VkDeviceSize)VRAM_W * VRAM_H * 2, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+    if (!createBuf((VkDeviceSize)VRAM_W * vramImgH() * 2, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, s_vramStaging) || !s_vramStaging.map)
         return vramFail("the upload buffer", VK_ERROR_OUT_OF_DEVICE_MEMORY);
     s_vramImgReady = true;

@@ -85,6 +85,7 @@ void dc_splash_shader_done(void);
  * правый верх строки копирайта Capcom в логических координатах (0 - не мешает). hit: логическая точка над ссылкой. */
 void dc_splash_feedback_present(struct SDL_Renderer *r, int logical_w, int logical_h, int show, int hover, float kx, float ky);
 int  dc_splash_feedback_hit(float lx, float ly);
+int  dc_splash_feedback_visible(void);   /* 29.10.2026: блок виден или ещё гаснет (main.cpp, DC_VK_ASYNC) */
 /* 26.10.2026: кадр между тактами - тот же блок, что нарисовал прошлый dc_splash_feedback_present (ничего не считает заново) */
 void dc_splash_feedback_again(struct SDL_Renderer *r, int logical_w, int logical_h);
 

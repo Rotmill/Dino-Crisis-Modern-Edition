@@ -1,4 +1,4 @@
-DINO CRISIS - Modern Edition v1.06
+DINO CRISIS - Modern Edition v1.07
 
 Dino Crisis (PS1) for Windows: over-the-shoulder camera, widescreen,
 modern graphics.
@@ -45,7 +45,7 @@ INSTALL
 KNOWN ISSUES
 
   Integrated graphics. At the first start the game turns its graphics
-  down once: Shadows off, Anti-Aliasing SMAA.
+  down once: Shadows off, Ambient Occlusion Low, Anti-Aliasing SMAA.
   You can change them in Modern Options > Graphics.
 
   Windows 11 Smart App Control. If setup stops at "Recompiling the game

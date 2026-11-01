@@ -140,7 +140,12 @@ static const LogKeep s_keep[] = {
     { "raster: options in the shader*", 4 }, { "raster: pipelines for*", 4 },   /* 25.10.2026: lean pipelines by the options */
     { "[VKR] post: MSAA up to*", 1 }, { "canvas: *", 4 },
     { "hz: *", 12 },                   /* 28.10.2026: was 4 - the lines on G-Sync / FreeSync and on V-Sync with no refresh grid come 3rd to 6th (main.cpp) */
-    { "shaders: *", 12 }, { "pipecache: *", 4 }, { "post: SSAO *", 2 }, { "post: MSAA *", 4 },
+    { "shaders: *", 12 }, { "pipecache: *", 4 }, { "post: SSAO *", 4 }, { "post: MSAA *", 4 },   /* 31.10.2026: SSAO 2 -> 4 (quarter resolution, split depth) */
+    /* 31.10.2026 (v1.07): which speed paths are on - the 1x raster thread, AMD render passes, the shadow block, frames without a flash, the animation cap */
+    { "sw1x: the 1x software raster runs*", 1 }, { "sw1x: off*", 1 },
+    { "raster: render passes keep image layouts*", 1 }, { "raster: shadow and light data block*", 1 },
+    { "raster: pipelines without the flash relief*", 2 }, { "raster: frames without a flash*", 1 },
+    { "anim cap: *", 2 },
     { "graphics: *", 4 },              /* 24.10.2026: the first start check - lowered for a weak graphics card or not (main.cpp) */
     { "vram: *", 12 },                 /* 24.10.2026: video memory in use and what the system gives (gpu_vk_raster.cpp, main.cpp) */
     { "mods: textures - all*", 1 },    /* 24.10.2026: the places for mod textures are fewer on Intel (gpu_vk_raster.cpp) */
@@ -150,6 +155,8 @@ static const LogKeep s_keep[] = {
     { "cdrom: subchannel*", 4 }, { "game: stopped for good*", 2 },   /* 23.10.2026: LibCrypt discs (cdrom.c, main.cpp) */
     /* 23.10.2026: does the machine keep up - frames per second, frames skipped to stay in real time, the sound running dry */
     { "perf: *", 30 }, { "audio: queue*", 12 }, { "preload: *", 1 },
+    { "async: *", 34 }, { "[VKR] async*", 2 },   /* 29.10.2026: frames without waiting for the GPU (DC_VK_ASYNC=1) - next to every perf: line */
+    { "tick frames: *", 16 },          /* 01.11.2026: at 120+ the tick frames go by the present job when the GPU does not keep up, and back (DC_HZ_JOB, main.cpp) */
     /* the gamepads */
     { "pad: SDL sees *", 2 }, { "pad:   [*", 8 }, { "pad: the chosen gamepad*", 4 }, { "pad: gamecontrollerdb*", 1 },
     /* where the run is */

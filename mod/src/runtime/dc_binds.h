@@ -83,6 +83,7 @@ int  dcb_norm(int code);                              /* правый/левый
 int  dcb_code_ok(int dev, int code);                  /* вход можно назначить на этом устройстве */
 const char *dcb_code_label(int code);                 /* подпись входа — английская строка (ключ атласа меню) */
 int  dcb_code_pad_icon(int code);                     /* значок схемы геймпада DCS_* или -1 */
+int  dcb_fixed(int dev, int act, int *out);           /* 01.11: неизменные входы действия (Esc...), до 2; число */
 const char *dcb_act_title(int act);                   /* подпись действия — ключ атласа меню */
 const char *dcb_act_key(int act);                     /* имя действия в dc_user.cfg */
 unsigned dcb_serial(void);                            /* растёт при любой смене назначений — кэшам ввода */

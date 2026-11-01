@@ -142,4 +142,13 @@ else()
     # чужой toml11 каркаса (comments.hpp) зовёт std::terminate без #include <exception> - MSVC тянул его сам
     target_compile_options(DinoCrisisME PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include exception>")
     target_link_options(DinoCrisisME PRIVATE -mwindows)
+    # 30.10.2026 (план скорости, пункт 5): -fno-auto-import - Clang берёт внешние глобальные напрямую, без лишней загрузки
+    # адреса из .refptr (пролог каждого блока: g_psx_irq_hot, i_stat, i_mask, g_psx_vb_cycles; база RAM в помощниках
+    # памяти). Данные из DLL без dllimport с ним не компонуются (явная ошибка, не тихая поломка); у игры таких нет -
+    # сборка дева этим Clang с флагом компонуется, картинка бит в бит. Только C и C++ (не windres). План сборки игрока
+    # (mod\build\game.plan.json) берёт флаг при следующем rebuild.ps1 (шаг 8c). -DDC_BUILD_NOAUTOIMPORT=OFF - как было.
+    option(DC_BUILD_NOAUTOIMPORT "MinGW: -fno-auto-import, direct access to globals" ON)
+    if(DC_BUILD_NOAUTOIMPORT)
+        target_compile_options(DinoCrisisME PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:-fno-auto-import>")
+    endif()
 endif()

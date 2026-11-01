@@ -360,7 +360,9 @@ const PtBodyPrim *pt_body_at(int i) {
 #define PGEO_HASH 65536u
 #define PGEO_PROBE 4u
 typedef struct { uint64_t key; uint32_t stamp; int n; float fx[4], fy[4], w[4]; uint8_t player; uint32_t ctx;
-                 int pass; int8_t bone[4]; uint32_t ptag[4]; } PGeoEnt;   /* 20.10: bone - её кость вершины (-1 - нет) */           /* 25.09 ночь: pass — проход сборки (g_dc_pass_id), см. pt_shx_take */
+                 int pass; int8_t bone[4]; uint32_t ptag[4];
+                 int16_t arow[4];   /* 29.10.2026: строка актёра вершины (враги, NPC: слот * 24 + узел; -1 - нет) */
+                 } PGeoEnt;   /* 20.10: bone - её кость вершины (-1 - нет) */           /* 25.09 ночь: pass — проход сборки (g_dc_pass_id), см. pt_shx_take */
                                                                          /* 26.10: ptag - метка куска вершины (пары кусков, 0 - нет) */
 /* WHOSE BODY (2026-08-23). Every skinned character - Regina AND the
  * dinosaurs - comes through the assembler pool, so "pool primitive" does not
@@ -373,6 +375,7 @@ typedef struct { uint64_t key; uint32_t stamp; int n; float fx[4], fy[4], w[4]; 
  * into F_ACTOR (the fade) for her and nothing for anyone else. */
 int g_pgeo_last_player = 0;
 int g_pgeo_last_bone[4] = { -1, -1, -1, -1 };   /* 20.10: её кости вершин последнего поданного из пула полигона */
+int g_pgeo_last_arow[4] = { -1, -1, -1, -1 };   /* 29.10.2026: строки актёров (враги, NPC) вершин того же полигона (-1 - нет) */
 int g_pps_last_bone = -1;                       /* 20.10: кость последнего узнанного реестром (кисть / оружие / волосы) */
 uint32_t g_pgeo_last_ctx = 0;          /* 25.09: владелец кости последнего поданного из пула полигона (F_CHAR) */
 /* 26.10.2026: метки кусков вершин последнего поданного из сборки полигона (pt_poolgeom_prim_uv; 0 - нет). Его точные координаты
@@ -420,6 +423,7 @@ static int pool_bone_is_regina(const float trN[3]) {
  * тактами двигает вершины рук, кистей (с оружием) и головы на долю пути от позы этого такта к позе следующего относительно
  * корпуса (gpu_vk_raster.cpp arm_warp_make, dc_raster.vert). Кадры тактов - ровно позы игры. DC_ARM_WARP=0 - как было. */
 static int s_pool_cur_bone = -1;             /* её кость, которую сейчас переводит проектор (-1 - не её / не узнана) */
+static int s_pool_cur_arow = -1;             /* 29.10.2026: строка актёра 0..9 (слот * AW_NMAX + узел), -1 - не актёр / нет */
 #define SKEL_RING  4
 #define SKEL_BONES 16
 typedef struct { int pass; uint32_t mask; float rN[SKEL_BONES][9], trN[SKEL_BONES][3], vr[SKEL_BONES][9], vt[SKEL_BONES][3];
@@ -496,6 +500,123 @@ int pt_skel_get_delta(int pass, float D[9], float T[3]) {
     return 1;
 }
 void pt_bone_stat(long *node, long *pos, long *none, long *diff) { *node = s_bone_node; *pos = s_bone_pos; *none = s_bone_none; *diff = s_bone_diff; }
+/* ⭐ 29.10.2026 - ВРАГИ И NPC МЕЖДУ ТАКТАМИ: СНИМОК УЗЛОВ (руководитель: путь её костей - на слоты актёров 0..9; правило игрока
+ * - только доли пути между позами, которые посчитала сама игра, ничего своего). Кадры между тактами двигали врагов и NPC одной
+ * нашей камерой: поза и ход стояли тактом (30 Гц) - рывок раз в такт рядом с плавной Региной. Проектор (func_80073F10, хук
+ * pt_dc_proj: s8 - актёр 0xB7ACC + 608*k, s0 - узел) кладёт первую матрицу GTE каждого узла за проход в кольцо актёра (4 прохода
+ * по g_dc_pass_id, как её s_skel) - ту, которой игра перевела его вершины. Номер узла - место в цепочке актёра (+0x4C первый,
+ * +0x50 число, узел +0x34 следующий; узлы бывают и в памяти модов, memory.c dc_node_alloc_extra), родитель - узел +0x38 (корень
+ * - сам актёр); ещё модель +0x9C, вид +0x27, масштаб +0xA4 и переприцел прохода (dc_nots_get_delta) на первом его узле. Пустые
+ * слоты (модель 0 или 0 узлов, DC_NULL_MESH_GUARD) и больше AW_NMAX узлов - мимо (строка в журнал один раз). Вершина пула
+ * получает строку k * AW_NMAX + узел (PoolVtx.arow -> полигон сборщика PGeoEnt -> gpu.c -> растр), строки на кадр считает
+ * gpu_vk_raster.cpp actor_warp_make. Регина (слот 10) - свой путь, не трогается. DC_ACTOR_WARP=0 - как было (ни снимков, ни
+ * меток).
+ * Разбор 1: строка вершины - только у полигонов сборщика пула (их вершины метит этот хук своей пачкой). Реестр точных вершин PVX
+ * строк не несёт: его записи ставит окно проектора во время RTPT, до хука своей пачки (строка прошлой пачки - другого узла или
+ * актёра), и в то же окно попадает первый RTPT вложения узла (func_80075094) - такие полигоны стоят позой такта. Ещё в снимке
+ * номер загрузки сейва (g_savestate_loads) и подпись цепочки узлов: быстрая загрузка между проходами или пересобранный актёр -
+ * другой мир, позой такта. */
+#define AW_SLOTS 10
+#define AW_NMAX  24
+#define AW_RING  4
+typedef struct { int pass, bad, nn, kind, dh, last, load; uint32_t model, mask, sig; int32_t scl[3];
+                 uint32_t node[AW_NMAX]; int8_t par[AW_NMAX];
+                 float vr[AW_NMAX][9], vt[AW_NMAX][3], dD[9], dT[3]; } ActSnap;
+static ActSnap s_act[AW_RING][AW_SLOTS];
+int pt_actor_warp_on(void) {                 /* 29.10: враги и NPC между тактами (умолч. 1; gpu_vk_raster.cpp - тот же ответ) */
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DC_ACTOR_WARP"); v = (e && *e == '0') ? 0 : 1; }
+    return v;
+}
+/* разбор 1: DC_ACTORWARP_DBG=1 - счёт полигонов актёров 0..9, поданных по-вершинным поиском (строк нет - позой такта); его
+ * прирост - в строке actorwarp: (gpu_vk_raster.cpp actor_warp_make) */
+long g_aw_vtxn = 0;
+static int aw_dbg_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DC_ACTORWARP_DBG"); v = (e && *e == '1') ? 1 : 0; }
+    return v;
+}
+/* место по адресу игры: RAM консоли или память модов (узлы за пулом игры); NULL - не там */
+static const uint8_t *aw_at(uint32_t a, uint32_t len) {
+    const uint32_t p = a & 0x1FFFFFFFu;
+    if (p >= 0x10000u && p + len <= 0x200000u) { const uint8_t *r = memory_get_ram_ptr(); return r ? r + p : NULL; }
+    if (p >= 0x01000000u) { extern const uint8_t *memory_mod_ptr(uint32_t phys, uint32_t len); return memory_mod_ptr(p, len); }
+    return NULL;
+}
+static uint32_t aw_u32(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
+/* узел s0 актёра s8 в этом проходе -> строка k * AW_NMAX + узел; -1 - не слот 0..9, пустой слот, узел не из его цепочки */
+static int aw_capture(uint32_t s8, uint32_t s0, const float *r9, const float *tr3) {
+    const uint32_t c = s8 & 0x1FFFFFFFu;
+    if (c < 0xB7ACCu || c >= 0xB7ACCu + (uint32_t)AW_SLOTS * 608u || (c - 0xB7ACCu) % 608u) return -1;
+    const int k = (int)((c - 0xB7ACCu) / 608u);
+    static int init = 0;
+    if (!init) { init = 1; for (int i = 0; i < AW_RING; i++) for (int j = 0; j < AW_SLOTS; j++) s_act[i][j].pass = -1; }
+    extern int g_dc_pass_id;
+    const int pass = g_dc_pass_id;
+    ActSnap *s = &s_act[pass & (AW_RING - 1)][k];
+    if (s->pass != pass) {                       /* первый узел актёра за проход - его цепочка и данные */
+        s->pass = pass; s->bad = 1; s->mask = 0; s->last = 0; s->nn = 0;
+        { extern int g_savestate_loads; s->load = g_savestate_loads; }   /* разбор 1: загрузка сейва между проходами - другой мир */
+        const uint8_t *ac = aw_at(c, 0xB0u);
+        if (!ac) return -1;
+        s->model = aw_u32(ac + 0x9C); s->nn = (int)aw_u32(ac + 0x50); s->kind = ac[0x27];
+        for (int i = 0; i < 3; i++) s->scl[i] = (int32_t)aw_u32(ac + 0xA4 + 4 * i);
+        if (!s->model || s->nn <= 0) return -1;  /* пустой слот: сетка 0 */
+        if (s->nn > AW_NMAX) {
+            static int said = 0;
+            if (!said) { said = 1; fprintf(stderr, "actorwarp: slot %d has %d nodes, more than %d - shown at the tick pose%c", k, s->nn, AW_NMAX, 10); }
+            return -1;
+        }
+        uint32_t n = aw_u32(ac + 0x4C), sig = 2166136261u;   /* разбор 1: sig - адреса узлов цепочки (пересобран - другой актёр) */
+        for (int i = 0; i < s->nn; i++) {
+            const uint8_t *np = aw_at(n, 172u);
+            if (!np) return -1;
+            s->node[i] = n & 0x1FFFFFFFu;
+            sig = (sig ^ s->node[i]) * 16777619u;
+            const uint32_t pa = aw_u32(np + 0x38) & 0x1FFFFFFFu;
+            int pi = -2;
+            if (pa == c) pi = -1;                /* корень: родитель - сам актёр */
+            else for (int j = 0; j < i; j++) if (s->node[j] == pa) { pi = j; break; }
+            if (pi < -1) {                       /* родитель не раньше узла в цепочке - счёт сверху вниз не сойдётся */
+                static int said2 = 0;
+                if (!said2) { said2 = 1; fprintf(stderr, "actorwarp: slot %d node %d parent %08X is not before it in the chain - shown at the tick pose%c", k, i, pa, 10); }
+                return -1;
+            }
+            s->par[i] = (int8_t)pi;
+            n = aw_u32(np + 0x34);
+        }
+        s->sig = sig;
+        { extern int dc_nots_get_delta(float D[9], float T[3]); s->dh = dc_nots_get_delta(s->dD, s->dT); }
+        s->bad = 0;
+    }
+    if (s->bad) return -1;
+    const uint32_t nd = s0 & 0x1FFFFFFFu;
+    int f = -1;
+    for (int i = 0; i < s->nn; i++) { const int j = (s->last + i) % s->nn; if (s->node[j] == nd) { f = j; break; } }
+    if (f < 0) return -1;
+    s->last = f;
+    if (!(s->mask & (1u << f))) {                /* узел за проход - первая запись */
+        memcpy(s->vr[f], r9, 9 * sizeof(float)); memcpy(s->vt[f], tr3, 3 * sizeof(float));
+        s->mask |= 1u << f;
+    }
+    return k * AW_NMAX + f;
+}
+/* gpu_vk_raster.cpp warp_in_take: актёр k прохода pass -> маска снятых узлов (0 - нет в проходе); nmax - вместимость читателя;
+ * load - номер загрузки сейва, sig - подпись цепочки узлов (разбор 1) */
+unsigned pt_act_get(int pass, int k, int nmax, unsigned *model, int *kind, int *nn, int *scl, signed char *par,
+                    float *r, float *t, int *dh, float *D, float *T, int *load, unsigned *sig) {
+    if (k < 0 || k >= AW_SLOTS || nmax != AW_NMAX) return 0;
+    const ActSnap *s = &s_act[pass & (AW_RING - 1)][k];
+    if (s->pass != pass || s->bad || !s->mask) return 0;
+    *model = s->model; *kind = s->kind; *nn = s->nn; *dh = s->dh; *load = s->load; *sig = s->sig;
+    for (int i = 0; i < 3; i++) scl[i] = (int)s->scl[i];
+    for (int f = 0; f < s->nn; f++) {
+        par[f] = (signed char)s->par[f];
+        if (s->mask & (1u << f)) { memcpy(r + f * 9, s->vr[f], 9 * sizeof(float)); memcpy(t + f * 3, s->vt[f], 3 * sizeof(float)); }
+    }
+    if (s->dh) { memcpy(D, s->dD, 9 * sizeof(float)); memcpy(T, s->dT, 3 * sizeof(float)); }
+    return s->mask;
+}
 static PGeoEnt s_pgeo[PGEO_HASH];
 static uint32_t s_pgeo_stamp = 1;   /* tentatively declared above the body-steady block */
 /* ⭐ 19.10.2026 (игрок: «прицел - ускорить»): «враг под перекрестием» (dc_aim_geom_any - перекрестие краснеет) и «чьё тело под
@@ -1337,6 +1458,9 @@ int pt_poolgeom_vtxn(const uint32_t *packed, int n, float *fx, float *fy, float 
         if (i == 0) cx = e->ctx;
     }
     for (int i = n; i < 4; i++) g_pgeo_last_bone[i] = -1;
+    for (int i = 0; i < 4; i++) g_pgeo_last_arow[i] = -1;   /* 29.10.2026 (разбор 1): по-вершинному поиску строк актёров нет -
+                                                              * позой такта (записи PVX - строка прошлой пачки, вложения узлов) */
+    if (aw_dbg_on() && pt_actor_warp_on() && cx >= 0xB7ACCu && cx < 0xB7ACCu + (uint32_t)AW_SLOTS * 608u) g_aw_vtxn++;
     for (int i = 0; i < 4; i++) g_pgeo_last_ptag[i] = 0u;   /* 26.10: координаты - точные проекции, метку найдёт pgxp_pair_of */
     g_pvxn_hit++;
     g_pgeo_last_player = pl;
@@ -1384,7 +1508,7 @@ static uint64_t pgeo_key_uv(const uint32_t *packed, int n, uint32_t tpage, const
     return h ? h : 1;
 }
 static void pgeo_put(uint64_t key, int n, const float *fx, const float *fy, const float *w, int player, uint32_t ctx,
-                     const int *bone, const uint32_t *ptag) {
+                     const int *bone, const uint32_t *ptag, const int *arow) {
     uint32_t h = (uint32_t)((key ^ (key >> 29)) & (PGEO_HASH - 1u));
     PGeoEnt *e = 0;
     for (uint32_t i = 0; i < PGEO_PROBE; i++) {
@@ -1399,6 +1523,9 @@ static void pgeo_put(uint64_t key, int n, const float *fx, const float *fy, cons
     for (int i = 0; i < n; i++) { e->fx[i] = fx[i]; e->fy[i] = fy[i]; e->w[i] = w[i]; }
     for (int i = 0; i < 4; i++) e->bone[i] = (int8_t)((bone && i < n) ? bone[i] : -1);   /* 20.10 */
     for (int i = 0; i < 4; i++) e->ptag[i] = (ptag && i < n) ? ptag[i] : 0u;             /* 26.10 */
+    { int sl = -1, mix = 0;                      /* 29.10.2026: строки актёров (враги, NPC); разбор 1: два слота в полигоне - нет строк */
+      for (int i = 0; arow && i < n; i++) if (arow[i] >= 0) { const int s = arow[i] / AW_NMAX; if (sl < 0) sl = s; else if (s != sl) mix = 1; }
+      for (int i = 0; i < 4; i++) e->arow[i] = (int16_t)((arow && i < n && !mix) ? arow[i] : -1); }
 }
 /* 25.09 ночь: проход сборки полигонов персонажа, пришедших в поток этого кадра (pt_poolgeom_prim) — по нему
  * pt_shx_take берёт не нарисованные игрой части того же кадра; -1 — таких не было (сброс в pt_poolgeom_frame) */
@@ -1533,6 +1660,7 @@ int pt_poolgeom_prim_uv(const uint32_t *packed, int n, uint32_t tpage, const uin
     g_pgeo_last_ctx = e->ctx;
     for (int i = 0; i < 4; i++) g_pgeo_last_bone[i] = i < n ? e->bone[i] : -1;   /* 20.10 */
     for (int i = 0; i < 4; i++) g_pgeo_last_ptag[i] = i < n ? e->ptag[i] : 0u;   /* 26.10 */
+    for (int i = 0; i < 4; i++) g_pgeo_last_arow[i] = i < n ? e->arow[i] : -1;   /* 29.10 */
     return 1;
 }
 /* ⭐ 25.09.2026 — ПЕРСОНАЖ ЛИ ЭТО (флаг F_CHAR: окклюдер тени; «персонаж» тень от ламп на себя не получает). В сцене на
@@ -1633,6 +1761,7 @@ typedef struct { uint32_t addr, gen; int mx, my, mz, mid;
                  uint32_t ctx;           /* WHOSE bone: 0xB928C = Regina, 0xB7ACC+608k = an enemy */
                  int8_t bone;            /* 20.10: её кость (-1 - не её / не узнана) */
                  uint32_t ptag;          /* 26.10: метка куска (gte.cpp g_dc_pair_last - проекция этой вершины; 0 - нет) */
+                 int16_t arow;           /* 29.10.2026: строка актёра (враги, NPC: слот * 24 + узел; -1 - нет) */
 } PoolVtx;
 extern uint32_t g_dc_pair_last;          /* 26.10.2026: gte.cpp - метка последней проекции (пары кусков у дверей) */
 #define PV_HASH (1 << 16)
@@ -1655,6 +1784,7 @@ static float s_pool_vrN[4][9], s_pool_vtrN[4][3];  /* camera-removed native (B /
 static uint32_t s_pool_vctx[4];                    /* which character each pool vertex belongs to */
 static int   s_pool_vplayer[4];                    /* owner of each pool vertex's bone */
 static int   s_pool_vbone[4] = { -1, -1, -1, -1 }; /* 20.10: её кость каждой вершины пула (-1 - нет) */
+static int   s_pool_varow[4] = { -1, -1, -1, -1 }; /* 29.10.2026: строка актёра каждой вершины пула (враги, NPC; -1 - нет) */
 static uint32_t s_pool_vtag[4];                    /* 26.10: метка куска каждой вершины пула (пары кусков у дверей) */
 
 /* Room library (DC_ROOM_LIBRARY): rooms exported from the game, matched to the view by the triangle votes of the
@@ -2423,6 +2553,7 @@ static void pv_store(uint32_t addr, int mx, int my, int mz, int mid,
     slot->player = (uint8_t)s_pool_cur_player;
     slot->ctx = s_pool_cur_ctx;
     slot->bone = (int8_t)s_pool_cur_bone;    /* 20.10 */
+    slot->arow = (int16_t)s_pool_cur_arow;   /* 29.10: хук своей пачки (pt_dc_proj) - строка её узла */
     slot->ptag = g_dc_pair_last;             /* 26.10: хук идёт сразу за RTPT этих вершин - метка их прогона */
     memcpy(slot->r, r9, sizeof(slot->r));
     memcpy(slot->tr, tr3, sizeof(slot->tr));
@@ -2635,6 +2766,8 @@ void pt_dc_proj(CPUState *cpu, uint32_t modelPtr, uint32_t poolPtr) {
     /* 20.10: её кость и снимок её костей этого прохода (кадры между тактами - руки, кисти с оружием, голова) */
     s_pool_cur_bone = (s_pool_cur_player && pt_arm_warp_mode()) ? pool_bone_index(cpu->gpr[16], trN) : -1;
     if (s_pool_cur_bone >= 0) { extern int g_dc_pass_id; skel_put(g_dc_pass_id, s_pool_cur_bone, rN, trN, r9, tr3); }
+    /* 29.10.2026: враги и NPC (слоты 0..9) - узел и снимок прохода для кадров между тактами (aw_capture) */
+    s_pool_cur_arow = (!s_pool_cur_player && pt_actor_warp_on()) ? aw_capture(cpu->gpr[30], cpu->gpr[16], r9, tr3) : -1;
     /* phase forensics (DC_PHASEDBG=1): the FIRST player bone batch of each
      * display flip — the builder-slot camera Rc in force at the projection
      * instant, the composite row0, and the camera-removed world root. If the
@@ -2784,6 +2917,7 @@ void pt_dc_poolprim(CPUState *cpu, uint32_t prim, uint32_t poolBase,
                      memcpy(s_pool_vtrN[k], pv->trN, sizeof(s_pool_vtrN[k]));
                      s_pool_vplayer[k] = pv->player;
                      s_pool_vbone[k] = pv->bone;
+                     s_pool_varow[k] = pv->arow;
                      s_pool_vtag[k] = pv->ptag;
                      s_pool_vctx[k] = pv->ctx; }
         uint32_t xy = cpu->read_word(pkt + pxy[k]);
@@ -2838,7 +2972,7 @@ void pt_dc_poolprim(CPUState *cpu, uint32_t prim, uint32_t poolBase,
                 uint32_t uvw[4];                         /* 04.10 (2): слова UV пакета (GT: +12/+24/+36/+48), как их читает gpu.c */
                 for (int k = 0; k < nv; k++) uvw[k] = cpu->read_word(pkt + 12u + 12u * (uint32_t)k);
                 pgeo_put(pgeo_key_uv(packed, nv, (uint32_t)(tpage & 0x1FFu), uvw), nv, fx, fy, fw,
-                         s_pool_vplayer[0], s_pool_vctx[0], s_pool_vbone, s_pool_vtag);
+                         s_pool_vplayer[0], s_pool_vctx[0], s_pool_vbone, s_pool_vtag, s_pool_varow);
                 g_pgeo_pub++;
             }
             /* ---- direct draw: keep the whole primitive, reconstructed ----
@@ -3794,6 +3928,54 @@ static int      s_rl_semi_n = 0;
  * пар нет вовсе (dc_pair_veto: повтор кадра, как было). DC_PAIR_ROOM=0 - как было. */
 static uint32_t s_rl_ptag = 0;                    /* метка пары для треугольников, которые сейчас выводит обход (0 - нет) */
 static uint32_t s_rl_semi_tag[RL_MAXSEMI];        /* у отложенных полупрозрачных - своя */
+/* ⭐ 30.10.2026 - КУСКИ ТУННЕЛЯ МЕЖДУ ТАКТАМИ (игрок: «Туда тиранозавра. Да.»). Погоня тиранозавра (комната 89, ST611) - беговая
+ * дорожка: камера стоит, а игра сама двигает куски туннеля 10001C (слоты 13, 14) и 1057E8 (15) ~400 ед. за такт мимо платформы
+ * 10AFB4 (8), раз в ~10 тактов кусок перескакивает назад на ~4000 (картинка повторяется). Кадры между тактами в Modern двигали
+ * только камеру, её кости и врагов: туннель стоял кадром A и прыгал раз в такт. Кусок, который обход рисует историей слота
+ * («hist»: кадр A - запись прошлого прохода, следующий такт - запись сейчас), кладёт обе записи и переприцел кадра A в кольцо по
+ * проходу кадра A (как снимки актёров), его вершины несут строку 240 + слот (цвет-альфа 64 + строка), долю пути считает
+ * gpu_vk_raster.cpp piece_warp_make тем же каналом строк, что у врагов. Только комнаты DC_PIECE_WARP_ROOMS (89, 90);
+ * DC_PIECE_WARP=0 - как было.
+ * ⭐ 31.10.2026 (игрок: «есть туннель, когда ты на лодке уплываешь, там тоже туннель. Ты его к нему то же самое применил?»):
+ * побег на лодке (комната 90) - та же дорожка: 10-11 кусков туннеля за окнами едут ~1000 ед. за такт и перескакивают назад на
+ * 3000; кадры между тактами отставали от следующего кадра игры на 0.73-0.78, с комнатой 90 в списке - 0.004-0.007 (сейвы лодки
+ * boat90_qs4/qs5, щелей нет). Платформа-лифт комнаты 92 - не дорожка: едет камера игры, кадры между тактами уже строят пары
+ * кусков (0.001-0.03), её в списке нет. */
+#define PW_SLOTS 36
+#define PW_RING  4
+typedef struct { int pass, passN, n; float D[9], T[3]; uint8_t ok[PW_SLOTS]; uint32_t gp[PW_SLOTS];
+                 float Ra[PW_SLOTS][9], Ta[PW_SLOTS][3], Rn[PW_SLOTS][9], Tn[PW_SLOTS][3]; } PwSnap;
+static PwSnap s_pw[PW_RING];
+static int s_rl_prow = -1;                        /* строка куска для треугольников, которые сейчас выводит обход (-1 - нет) */
+int pt_piece_warp_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DC_PIECE_WARP"); v = (e && *e == '0') ? 0 : 1; }
+    return v;
+}
+static int pw_room_on(void) {                     /* комната из DC_PIECE_WARP_ROOMS (по умолчанию 89 и 90) */
+    static int n = -1, rooms[16];
+    if (n < 0) { n = 0; const char *e = getenv("DC_PIECE_WARP_ROOMS"); if (!e) e = "89,90";
+                 while (*e && n < 16) { if (*e >= '0' && *e <= '9') { rooms[n++] = atoi(e); while (*e >= '0' && *e <= '9') e++; } else e++; } }
+    extern int dc_room_current(void);
+    const int r = dc_room_current();
+    for (int i = 0; i < n; i++) if (rooms[i] == r) return 1;
+    return 0;
+}
+/* gpu_vk_raster.cpp warp_in_take: куски кадра A (проход passA, следующий passN) -> их число (0 - нет); ok[] - слот есть */
+int pt_piece_get(int passA, int passN, int nmax, unsigned char *ok, unsigned *gp, float *D, float *T,
+                 float *Ra, float *Ta, float *Rn, float *Tn) {
+    if (nmax != PW_SLOTS) return 0;
+    const PwSnap *s = &s_pw[passA & (PW_RING - 1)];
+    if (s->n <= 0 || s->pass != passA || s->passN != passN) return 0;
+    memcpy(D, s->D, sizeof s->D); memcpy(T, s->T, sizeof s->T);
+    for (int k = 0; k < PW_SLOTS; k++) {
+        ok[k] = s->ok[k]; gp[k] = s->gp[k];
+        if (!s->ok[k]) continue;
+        memcpy(Ra + k * 9, s->Ra[k], sizeof s->Ra[k]); memcpy(Ta + k * 3, s->Ta[k], sizeof s->Ta[k]);
+        memcpy(Rn + k * 9, s->Rn[k], sizeof s->Rn[k]); memcpy(Tn + k * 3, s->Tn[k], sizeof s->Tn[k]);
+    }
+    return s->n;
+}
 static float    s_rl_liftm[36][3];                /* подъём записи в осях куска (rf_lift, rl_obj_lift) с прошлой сборки */
 static void rl_push_tagged(const float *vv, int semi, uint32_t tag) {
     if (!tag) { dcvk_push_tri(vv, semi, 1); return; }
@@ -3823,6 +4005,52 @@ static int rl_motion_cut(const float *Q, const float *c) {
     if ((Q[0] + Q[4] + Q[8] - 1.0f) * 0.5f < 0.9982f) return 1;
     const float x = Q[2] * 4000.f + c[0], y = Q[5] * 4000.f + c[1], z = (Q[8] - 1.0f) * 4000.f + c[2];
     return x * x + y * y + z * z > 400.f * 400.f;
+}
+/* ⭐ 31.10.2026 (игрок, комната 89, сцена победы над тиранозавром: «лифт вместе с Региной ... дрожат, не гладко идут»). Поездка
+ * лифта в сцене - та же беговая дорожка, что и в погоне (куски туннеля 10001C - слоты 13, 14 и 1057E8 - 15): камера сцены стоит,
+ * тело комнаты (кусок 13) едет ~400 ед. за такт и раз в 10 тактов вместе с остальными перескакивает назад на 3600 (картинка
+ * повторяется через 4000). Кадры между тактами под камерой игры строят пары кусков, а пару тела запрещала проверка смены ракурса
+ * (rl_motion_cut): ход 400 ед. за такт - ровно её порог (400.3 и 400.8 - «смена», 399.4..399.9 - нет), плюс перескок - 63 такта
+ * поездки из 158 шли повтором, туннель шёл рывками, и лифт с Региной на его фоне дрожал. Теперь в комнатах дорожки
+ * (DC_PIECE_WARP_ROOMS) в сцене под камерой игры чистый перенос тела, равный ходу прошлого такта, - не смена ракурса; перескок
+ * назад вдоль того же хода - тоже: пара тела идёт ходом прошлого такта (*wrap = 1, c заменён им). DC_TREAD_SCENE=0 - как было. */
+static int rl_sor(void);
+typedef struct { int pass, bk, res, wrap; uint32_t gp; float s[3], c[3]; } RlTread;
+static RlTread s_rl_tread = { -10, -1, 0, 0, 0u, { 0.f, 0.f, 0.f }, { 0.f, 0.f, 0.f } };
+static int rl_tread(int bk, uint32_t gp, const float *Q, float *c, int *wrap) {
+    static int en = -1; if (en < 0) { const char *e = getenv("DC_TREAD_SCENE"); en = (e && *e == '0') ? 0 : 1; }
+    extern int g_dc_dma_pass;
+    RlTread *t = &s_rl_tread;
+    *wrap = 0;
+    if (!en) return 0;
+    if (t->pass == g_dc_dma_pass && t->bk == bk && t->gp == gp) {      /* этот проход уже разобран */
+        if (t->wrap) for (int q = 0; q < 3; q++) c[q] = t->c[q];
+        *wrap = t->wrap; return t->res;
+    }
+    const int pure = (Q[0] + Q[4] + Q[8] - 1.0f) * 0.5f > 0.99995f;
+    const int have = t->pass == g_dc_dma_pass - 1 && t->bk == bk && t->gp == gp;
+    int res = 0;
+    if (pure && have && pw_room_on() && rl_sor()) {
+        const float sl = sqrtf(t->s[0] * t->s[0] + t->s[1] * t->s[1] + t->s[2] * t->s[2]);
+        const float j[3] = { c[0] - t->s[0], c[1] - t->s[1], c[2] - t->s[2] };
+        const float jl = sqrtf(j[0] * j[0] + j[1] * j[1] + j[2] * j[2]);
+        if (sl > 50.f) {
+            if (jl <= 4.f + 0.02f * sl) res = 1;                            /* ход прошлого такта */
+            else if (jl > 1500.f && j[0] * t->s[0] + j[1] * t->s[1] + j[2] * t->s[2] < -0.999f * jl * sl) {   /* перескок назад */
+                res = 1; *wrap = 1;
+                for (int q = 0; q < 3; q++) c[q] = t->s[q];
+                static int nlog = 0;
+                if (nlog < 6) { nlog++;
+                    fprintf(stderr, "tread scene: room %d pass %d - the treadmill jumped back %.0f, between ticks it keeps the last step %.0f (DC_TREAD_SCENE=0 off)%c",
+                            dc_room_current(), g_dc_dma_pass, jl, sl, 10); }
+            }
+        }
+    }
+    t->pass = g_dc_dma_pass; t->bk = bk; t->gp = gp; t->res = res; t->wrap = *wrap;
+    for (int q = 0; q < 3; q++) t->c[q] = c[q];
+    if (pure) { if (!*wrap) for (int q = 0; q < 3; q++) t->s[q] = c[q]; }
+    else t->pass = -10;
+    return res;
 }
 /* кусок едет как тело: Q·Ra = Rn, Q·Ta + c = Tn с допуском на целые числа игры */
 static int rl_moves_with(const float *Q, const float *c, const float *Ra, const float *Ta, const float *Rn, const float *Tn) {
@@ -3861,7 +4089,7 @@ static uint32_t rl_ptag_of(int slot, uint32_t key0, uint32_t gp, const float *Ra
 /* Pieces held back to be drawn after the room's body (see the walk). */
 #define RL_MAXOBJ 48
 typedef struct { float R[9], TR[3], Dm[9], Dt[3]; uint32_t tri, quad; int n_tri, n_quad; int plate; float dim;
-                 int ot_mode, ot_slot, ot_order; int glint; int live_k; uint32_t ptag; } RLObj;   /* glint: 12.10 - предмет (секция типа 2), блеск */   /* ot_*: порядок консоли для двойников (15.09 ночь) */
+                 int ot_mode, ot_slot, ot_order; int glint; int live_k; uint32_t ptag; int prow; } RLObj;   /* glint: 12.10 - предмет (секция типа 2), блеск; prow: 30.10 - s_rl_prow */   /* ot_*: порядок консоли для двойников (15.09 ночь) */
 static RLObj    s_rl_obj[RL_MAXOBJ];
 static int      s_rl_obj_n = 0;
 
@@ -6604,7 +6832,7 @@ extern int dc_tex_dither_pub2(uint16_t tpage, uint16_t cl, const int *u, const i
 typedef struct { float n[3], d; float p[4][3]; float mn[3], mx[3]; int nv, ax; uint32_t rec; } MtGreen;   /* rec (28.09): чья запись */
 typedef struct { uint32_t rec; int nv; float R[9], TR[3], D[9], T[3]; float h, ofx, ofy, wsx;
                  int world_space, is_object, npoly; float dim; const char *src;
-                 int ot_mode, ot_slot, ot_order; const uint8_t *mem; int live_k; uint32_t ptag; } MtDef;   /* mem (17.09 вечер): чья память записи */
+                 int ot_mode, ot_slot, ot_order; const uint8_t *mem; int live_k; uint32_t ptag; int prow; } MtDef;   /* mem (17.09 вечер): чья память записи; prow: 30.10 - s_rl_prow */
 static MtGreen  s_mt_g[MT_GMAX];
 static int      s_mt_gn = 0;
 static MtDef    s_mt_d[MT_DMAX];
@@ -8908,6 +9136,180 @@ static int emit_dbg_match(uint32_t gp) {
     if (g < 0) { const char *e = getenv("DC_EMIT_GP_DBG"); g = e ? (int)strtol(e, NULL, 16) : 0; }
     return g && (int)(gp & 0x1FFFFFu) == g;
 }
+/* ⭐ 31.10.2026 (игрок, комната 89, сцена победы над тиранозавром, шот приезда лифта: «по бокам геометрия от дверного прохода
+ * большого, которой не должно быть конкретно в этой сцене»). Вертикальные полосы у левого и правого края кадра - внутренние
+ * грани откосов большого проёма (тело комнаты, плоскости x = ±2250, z 2300..3000, y -5500..0, 14 граней): камера сцены стоит
+ * перед проёмом между откосами и смотрит сквозь него. Консоль рисует откосы раньше стен того же слота таблицы порядка, и стены
+ * их закрашивают (правый остаётся тонкой тёмной линией); у нас глубина оставляет их на виду. Теперь в комнате 89 под камерой
+ * игры в сцене (rl_sor), пока камера в пространстве куска стоит перед проёмом между откосами и смотрит сквозь него, эти грани
+ * не рисуются. Узнаём по геометрии, не по адресам. DC_LIFT_ARRIVAL_JAMBS=0 - как было. */
+static int shadow_inv3(const float m[9], float out[9]);
+static int lift_arrival_jamb(const uint8_t *ram, uint32_t rec, int nv, const float *R, const float *TR, const float *D, const float *T) {
+    static int en = -1; if (en < 0) { const char *e = getenv("DC_LIFT_ARRIVAL_JAMBS"); en = (e && *e == '0') ? 0 : 1; }
+    if (!en) return 0;
+    const int x0 = rrm_s16(ram, rec);
+    if (x0 != 2250 && x0 != -2250) return 0;
+    for (int k = 0; k < nv; k++) {
+        const uint32_t vo = rec + (uint32_t)k * 8u;
+        const int y = rrm_s16(ram, vo + 2), z = rrm_s16(ram, vo + 4);
+        if (rrm_s16(ram, vo) != x0 || y < -5500 || y > 0 || z < 2300 || z > 3000) return 0;
+    }
+    extern int dc_room_current(void);
+    if (dc_room_current() != 89 || !rl_sor()) return 0;
+    float Di[9], Ri[9];                                   /* камера в пространстве куска: D*(R*m + TR) + T = 0 */
+    if (!shadow_inv3(D, Di) || !shadow_inv3(R, Ri)) return 0;
+    float ev[3], c[3], f[3];
+    for (int i = 0; i < 3; i++) ev[i] = -(Di[i*3+0]*T[0] + Di[i*3+1]*T[1] + Di[i*3+2]*T[2]) - TR[i];
+    for (int i = 0; i < 3; i++) c[i] = Ri[i*3+0]*ev[0] + Ri[i*3+1]*ev[1] + Ri[i*3+2]*ev[2];
+    const float ax[3] = { Di[2], Di[5], Di[8] };          /* ось взгляда (0,0,1) вывода в виде игры, затем в куске */
+    for (int i = 0; i < 3; i++) f[i] = Ri[i*3+0]*ax[0] + Ri[i*3+1]*ax[1] + Ri[i*3+2]*ax[2];
+    const float fl = sqrtf(f[0]*f[0] + f[1]*f[1] + f[2]*f[2]);
+    if (fl < 1e-6f) return 0;
+    const int hit = fabsf(c[0]) < 2250.f && c[1] > -5500.f && c[1] < 0.f && c[2] < 2300.f && f[2] > 0.8f * fl;
+    if (hit) { extern uint64_t gpu_flip_seq(void);
+        static uint64_t last = 0; static int nlog = 0; const uint64_t now = gpu_flip_seq();
+        if ((!last || now - last > 30) && nlog < 8) { nlog++;
+            fprintf(stderr, "lift arrival: f=%llu room 89 - the jambs of the big doorway at the frame sides hidden, the scene camera stands in front of the doorway (%.0f, %.0f, %.0f) looking through it (DC_LIFT_ARRIVAL_JAMBS=0 off)%c",
+                    (unsigned long long)now, c[0], c[1], c[2], 10); }
+        last = now; }
+    return hit;
+}
+/* 31.10.2026 (отзыв: Steam Deck и ноутбук со встроенной видеокартой - у забора и сетки вдаль ровно 30 кадров; игрок:
+ * «Да, делай А»): КАРТА РЕШЁТКИ ОДИН РАЗ НА ТЕКСТУРУ. Пиксель решётки F_DITHER (F_DLATT, F_SUBST) в dc_raster.frag решал
+ * «в зоне шахматки или нет» по соседям текселя (dzone: 4 или 24 соседа, каждый - два зависимых чтения VRAM, до ~50 чтений
+ * на пиксель). Теперь те же правила считаются здесь один раз на текстуру (страница + палитра), в окне UV её полигонов
+ * (+2 текселя), и лежат в текстуре VRAM ниже её строк (строки 512..1023, 8 мест по 256x256): шейдер читает одно слово.
+ * Слово: 0 - вне зоны, прозрачный; 1 - в зоне; 2 - вне окна (шейдер считает по соседям, как было); 0x8000 | цвет - вне
+ * зоны, непрозрачный. Окно строится из того же снимка VRAM, что в этом кадре уходит в видеокарту (dc_dithc_stage из
+ * dcvk_render), и перестраивается, как только в окне источника (+4 текселя) изменился хоть один разобранный тексель, -
+ * картинка та же. Место (1..8) едет в вершине: у F_DLATT биты 20..23 поля CLUT x, у F_SUBST биты 16..19 флагов. Другой
+ * текстуре место отдаётся, только если его не брали 4 кадра A (кадры B рисуют вершины кадра A). DC_DITHC=0 - как было. */
+#define DITHC_N 8
+typedef struct {
+    int on, fresh;                 /* место занято; блок места ещё не сброшен в «вне окна» */
+    uint16_t tp, cx, cy;           /* страница (биты 0..4, 7..8), палитра: x в словах VRAM, y */
+    int u0, v0, u1, v1;            /* UV полигонов (только растёт) */
+    int su0, sv0, sw, sh;          /* окно источника, из которого построена карта (sw = 0 - не построена) */
+    unsigned used;                 /* кадр A (s_dithc_frame), в котором место брали */
+} DithcSlot;
+static DithcSlot s_dithc[DITHC_N];
+static uint16_t s_dithc_src[DITHC_N][256 * 256];   /* разобранные тексели окна источника, из которых построена карта */
+static unsigned s_dithc_frame = 1;
+static int s_dithc_on = -1, s_dithc_nlog = 0;
+int dc_dithc_enabled(void) {
+    if (s_dithc_on < 0) { const char *e = getenv("DC_DITHC"); s_dithc_on = (e && *e == '0') ? 0 : 1; }
+    return s_dithc_on;
+}
+static int dithc_slot(uint16_t tp, uint16_t cl, const int *u, const int *v, int n) {
+    if (!dc_dithc_enabled() || n < 1) return 0;
+    const uint16_t ktp = (uint16_t)(tp & 0x19Fu), kcx = (uint16_t)((cl & 0x3F) * 16), kcy = (uint16_t)((cl >> 6) & 0x1FF);
+    int u0 = 255, v0 = 255, u1 = 0, v1 = 0;
+    for (int k = 0; k < n; k++) {
+        const int a = u[k] < 0 ? 0 : u[k] > 255 ? 255 : u[k];
+        const int b = v[k] < 0 ? 0 : v[k] > 255 ? 255 : v[k];
+        u0 = a < u0 ? a : u0; u1 = a > u1 ? a : u1;
+        v0 = b < v0 ? b : v0; v1 = b > v1 ? b : v1;
+    }
+    int s = -1, fr = -1, old = -1;
+    for (int i = 0; i < DITHC_N; i++) {
+        const DithcSlot *d = &s_dithc[i];
+        if (d->on && d->tp == ktp && d->cx == kcx && d->cy == kcy) { s = i; break; }
+        if (!d->on) { if (fr < 0) fr = i; }
+        else if (d->used + 4u <= s_dithc_frame && (old < 0 || d->used < s_dithc[old].used)) old = i;
+    }
+    DithcSlot *d;
+    if (s < 0) {
+        s = (fr >= 0) ? fr : old;
+        if (s < 0) return 0;                       /* все места у текстур последних кадров - шейдер считает сам */
+        d = &s_dithc[s];
+        d->on = 1; d->fresh = 1; d->tp = ktp; d->cx = kcx; d->cy = kcy;
+        d->u0 = u0; d->v0 = v0; d->u1 = u1; d->v1 = v1; d->sw = 0;
+    } else {
+        d = &s_dithc[s];
+        d->u0 = u0 < d->u0 ? u0 : d->u0; d->u1 = u1 > d->u1 ? u1 : d->u1;
+        d->v0 = v0 < d->v0 ? v0 : d->v0; d->v1 = v1 > d->v1 ? v1 : d->v1;
+    }
+    d->used = s_dithc_frame;
+    return s + 1;
+}
+/* тексель страницы, как его берёт sampleTexel в dc_raster.frag (u, v - 0..255, окна у полигонов комнаты нет) */
+static uint16_t dithc_texel(const uint16_t *vr, int tp, int cx, int cy, int u, int v) {
+    const int tpx = (tp & 15) * 64, row = ((((tp >> 4) & 1) * 256 + v) & 511) * 1024, mode = (tp >> 7) & 3;
+    if (mode == 0) {
+        const int nib = (vr[row + ((tpx + (u >> 2)) & 1023)] >> ((u & 3) * 4)) & 15;
+        return vr[cy * 1024 + ((cx + nib) & 1023)];
+    }
+    if (mode == 1) {
+        const int b = (vr[row + ((tpx + (u >> 1)) & 1023)] >> ((u & 1) * 8)) & 255;
+        return vr[cy * 1024 + ((cx + b) & 1023)];
+    }
+    return vr[row + ((tpx + u) & 1023)];
+}
+/* кадр A (gpu_vk_raster.cpp dcvk_render, сразу за копией VRAM в промежуточный буфер): у мест, взятых за последние 4 кадра,
+ * окно источника сверяется со снимком vr, при разнице карта перестраивается в rows (строки 512..1023 буфера, шаг 1024).
+ * force - текстура VRAM новая: блоки всех мест заново. Возвращает маску мест, чьи блоки надо скопировать в видеокарту. */
+unsigned dc_dithc_stage(uint16_t *rows, const uint16_t *vr, int force) {
+    static uint16_t cur[256 * 256];
+    unsigned dirty = 0;
+    if (!dc_dithc_enabled()) return 0;                   /* DC_DITHC=0: буфер и текстура без строк карты */
+    for (int i = 0; i < DITHC_N && rows && vr; i++) {
+        DithcSlot *d = &s_dithc[i];
+        if (!d->on) continue;
+        if (force) d->fresh = 1;
+        if (d->used + 4u <= s_dithc_frame) continue;    /* давно не брали: сверим, когда возьмут снова */
+        int mu0 = d->u0 - 2, mw = d->u1 - d->u0 + 5, mv0 = d->v0 - 2, mh = d->v1 - d->v0 + 5;   /* окно карты */
+        if (mw >= 256) { mu0 = 0; mw = 256; }
+        if (mh >= 256) { mv0 = 0; mh = 256; }
+        int su0 = mu0 - 2, sw = mw + 4, sv0 = mv0 - 2, sh = mh + 4;   /* окно источника: ещё по 2 (соседи dzone) */
+        if (sw >= 256) { su0 = 0; sw = 256; }
+        if (sh >= 256) { sv0 = 0; sh = 256; }
+        su0 &= 255; sv0 &= 255;
+        for (int y = 0; y < sh; y++)
+            for (int x = 0; x < sw; x++)
+                cur[y * sw + x] = dithc_texel(vr, d->tp, d->cx, d->cy, (su0 + x) & 255, (sv0 + y) & 255);
+        const size_t nb = (size_t)sw * (size_t)sh * 2u;
+        if (!d->fresh && d->sw == sw && d->sh == sh && d->su0 == su0 && d->sv0 == sv0 && !memcmp(cur, s_dithc_src[i], nb))
+            continue;
+        uint16_t *blk = rows + (size_t)(i >> 2) * 256u * 1024u + (size_t)(i & 3) * 256u;   /* блок места, шаг строки 1024 */
+        const int fresh = d->fresh;
+        if (fresh) {
+            for (int y = 0; y < 256; y++)
+                for (int x = 0; x < 256; x++) blk[y * 1024 + x] = 2;
+            d->fresh = 0;
+        }
+#define DT(x, y) cur[((((y) - sv0) & 255) * sw) + (((x) - su0) & 255)]
+        for (int j = 0; j < mh; j++) {
+            const int y = (mv0 + j) & 255;
+            for (int k = 0; k < mw; k++) {
+                const int x = (mu0 + k) & 255;
+                const uint16_t t = DT(x, y);
+                int zone;
+                if (t) {                                /* dzone: непрозрачный - не меньше 2 прозрачных из 4 соседей */
+                    const int tr = (DT((x - 1) & 255, y) == 0) + (DT((x + 1) & 255, y) == 0) +
+                                   (DT(x, (y - 1) & 255) == 0) + (DT(x, (y + 1) & 255) == 0);
+                    zone = tr >= 2;
+                } else {                                /* прозрачный - не меньше 2 непрозрачных в радиусе 2 */
+                    int op = 0;
+                    for (int dy = -2; dy <= 2 && op < 2; dy++)
+                        for (int dx = -2; dx <= 2; dx++)
+                            if ((dx != 0 || dy != 0) && DT((x + dx) & 255, (y + dy) & 255) != 0) op++;
+                    zone = op >= 2;
+                }
+                blk[y * 1024 + x] = zone ? 1 : t ? (uint16_t)(0x8000u | (t & 0x7FFFu)) : 0;
+            }
+        }
+#undef DT
+        memcpy(s_dithc_src[i], cur, nb);
+        d->su0 = su0; d->sv0 = sv0; d->sw = sw; d->sh = sh;
+        dirty |= 1u << i;
+        if (s_dithc_nlog < 200) { s_dithc_nlog++;
+            fprintf(stderr, "dithc: slot %d page %d,%d mode %d clut %d,%d uv %d-%d,%d-%d map %dx%d %s (frame %u)%c", i + 1,
+                    (d->tp & 15) * 64, ((d->tp >> 4) & 1) * 256, (d->tp >> 7) & 3, d->cx, d->cy, d->u0, d->u1, d->v0, d->v1,
+                    mw, mh, fresh ? "built" : "rebuilt", s_dithc_frame, 10); }
+    }
+    s_dithc_frame++;
+    return dirty;
+}
 static void rl_emit_poly(const uint8_t *ram, uint32_t rec, int nv,
                          const float *R, const float *TR,
                          const float *D, const float *T,
@@ -8928,6 +9330,7 @@ static void rl_emit_poly(const uint8_t *ram, uint32_t rec, int nv,
     }
     if (!edrop && !uvn_keep && vs_skip(ram, rec, nv, h)) edrop = "vs_skip";   /* 16.09 вечер: вариант грани под другой ракурс */
     if (!edrop && rv_skip(rec, s_rl_ot_order)) edrop = "rv_skip";     /* 20.09: закрашенная версия — консоль рисует поверх неё другую секцию (rv_*) */
+    if (!edrop && lift_arrival_jamb(ram, rec, nv, R, TR, D, T)) edrop = "jamb89";   /* 31.10: откосы проёма в шоте приезда лифта (комната 89) */
     int va_state = (uvn_keep || edrop) ? 0 : va_check(ram, rec, nv);       /* 16.09 ночь: 2 — копия варианта ближнего слоя, который неподвижный ракурс показывает без неё (назад) */
     if (s_emit_dbg_on && (s_rl_target & 1)) {
         static uint32_t er[4096]; static uint8_t es[4096]; static int en = 0;
@@ -8963,7 +9366,7 @@ static void rl_emit_poly(const uint8_t *ram, uint32_t rec, int nv,
             d->world_space = world_space; d->is_object = is_object;
             d->npoly = s_rl_piece_npoly; d->dim = s_rl_dim; d->src = s_rl_emit_src;
             d->ot_mode = s_rl_ot_mode; d->ot_slot = s_rl_ot_slot; d->ot_order = s_rl_ot_order; d->live_k = s_rl_live_k;
-            d->ptag = s_rl_ptag;
+            d->ptag = s_rl_ptag; d->prow = s_rl_prow;
             return;
         }
     }
@@ -9496,6 +9899,7 @@ static void rl_emit_poly(const uint8_t *ram, uint32_t rec, int nv,
         if (mcls == 1) mt_green_add(vv3, nv, rec);
     }
     int sub_tp_hi = 0, sub_cx_hi = 0, sub_cy_hi = 0;      /* 15.09: параметры подстановки рабицы для растра */
+    int dsl_fl = 0;                                       /* 31.10.2026: место карты решётки у F_SUBST - биты 16..19 флагов вершины */
     { static int dith_on = -1;
       /* 14.09 (игрок: «двойная сетка у ящиков — оставить одну, высокого разрешения»):
        * ДЕ-ДИЗЕРИНГ. Текстура сетки, у которой поверх нарисованных прутьев ещё и
@@ -9559,12 +9963,14 @@ static void rl_emit_poly(const uint8_t *ram, uint32_t rec, int nv,
                   flags += 256.0f + 1024.0f + (float)(ssc4 << 11);
                   sub_tp_hi = ((swu >> 4) << 16) | ((swv >> 4) << 20);
                   sub_cx_hi = cx << 20; sub_cy_hi = cy << 20;
+                  dsl_fl = dithc_slot(tp, cl, uu, vv2, nv) << 16;     /* 31.10.2026: место карты решётки (dc_dithc_stage) */
               }
               s_rl_dither++;
           } else if (dval == 1) {
               if (!((int)flags & 256)) {
                   int z12 = (int)((dz15 >> 1) & 15u) | ((int)((dz15 >> 6) & 15u) << 4) | ((int)((dz15 >> 11) & 15u) << 8);
                   flags += 256.0f + 512.0f + (dph ? 4194304.0f : 0.0f) + (float)(z12 << 10);
+                  sub_cx_hi = dithc_slot(tp, cl, uu, vv2, nv) << 20;  /* 31.10.2026: место карты решётки - биты 20..23 CLUT x */
               }
               s_rl_dither++;
           } } }
@@ -9779,10 +10185,11 @@ static void rl_emit_poly(const uint8_t *ram, uint32_t rec, int nv,
                 o[0] = sx[idx[j]]; o[1] = sy[idx[j]];
                 o[2] = s->u;  o[3] = s->v;
                 o[4] = s->r;  o[5] = s->g;  o[6] = s->b;  o[7] = s_rl_glint ? rl_glint_at(s->x, s->y) : 0.0f;   /* 12.10: блеск предмета */
+                if (!s_rl_glint && s_rl_prow >= 0) o[7] = 64.f + (float)s_rl_prow;   /* 30.10: кусок туннеля - строка 240 + слот (s_pw) */
                 o[8] = (float)(tp | sub_tp_hi | tcls_bits);
                 o[9] = (float)(((cl & 0x3F) * 16) | sub_cx_hi);
                 o[10] = (float)(((cl >> 6) & 0x1FF) | sub_cy_hi);
-                o[11] = flags;
+                o[11] = flags + (float)dsl_fl;
                 /* A HAIR FURTHER AWAY THAN THE GAME'S OWN SURFACES.
                  * The panels, signs and readouts are coplanar decals: on the
                  * console they win because the ordering table draws them after
@@ -9910,7 +10317,7 @@ static void mt_flush(const uint8_t *ram) {
     if (s_mt_dn > 0) {
         float dim0 = s_rl_dim, pull0 = s_cur_plate_pull_units; int np0 = s_rl_piece_npoly; const char *src0 = s_rl_emit_src;
         int otm0 = s_rl_ot_mode, ots0 = s_rl_ot_slot, oto0 = s_rl_ot_order; const int lk0 = s_rl_live_k;
-        const uint32_t pt0 = s_rl_ptag;
+        const uint32_t pt0 = s_rl_ptag; const int pr0 = s_rl_prow;
         s_mt_flushing = 1;
         for (int i = 0; i < s_mt_dn; i++) {
             const MtDef *d = &s_mt_d[i];
@@ -9933,14 +10340,14 @@ static void mt_flush(const uint8_t *ram) {
                         if (si >= 0 && mt_green_in_frame(s_mt_sk_grn[si])) { hidden++; held++; continue; } }
             s_rl_dim = d->dim; s_rl_piece_npoly = d->npoly; s_rl_emit_src = d->src;
             s_rl_ot_mode = d->ot_mode; s_rl_ot_slot = d->ot_slot; s_rl_ot_order = d->ot_order; s_rl_live_k = d->live_k;
-            s_rl_ptag = d->ptag;
+            s_rl_ptag = d->ptag; s_rl_prow = d->prow;
             rl_emit_poly(dm, d->rec, d->nv, d->R, d->TR, d->D, d->T, d->h, d->ofx, d->ofy, d->wsx, d->world_space, d->is_object);
             kept++;
         }
         s_mt_flushing = 0;
         s_rl_dim = dim0; s_cur_plate_pull_units = pull0; s_rl_piece_npoly = np0; s_rl_emit_src = src0;
         s_rl_ot_mode = otm0; s_rl_ot_slot = ots0; s_rl_ot_order = oto0; s_rl_live_k = lk0;
-        s_rl_ptag = pt0;
+        s_rl_ptag = pt0; s_rl_prow = pr0;
     }
     { static int lh = -1, lk = -1, lhd = -1, n = 0;
       if ((hidden != lh || kept != lk || held != lhd) && n < 60 && s_rl_target == 1) { lh = hidden; lk = kept; lhd = held; n++;
@@ -10109,9 +10516,9 @@ static int rl_obj_lift(const uint8_t *ram, uint32_t gp, int px, int py, int pz, 
 static void rl_emit_walk_body(void);
 static void rl_emit_walk(void) {                         /* 06.10.2026: рамка обхода для ответов «раз на обход» (rl_sor) */
     s_rl_walkseq++; s_rl_in_walk = 1;
-    s_rl_ptag = 0;
+    s_rl_ptag = 0; s_rl_prow = -1;
     rl_emit_walk_body();
-    s_rl_ptag = 0;
+    s_rl_ptag = 0; s_rl_prow = -1;
     s_rl_in_walk = 0;
 }
 static void rl_emit_walk_body(void) {
@@ -10231,12 +10638,14 @@ static void rl_emit_walk_body(void) {
      * (dc_room_get_delta, memory.c) — комнату рисуем и там; в сценах/роликах по-прежнему ноль */
     { extern int dc_room_get_delta(float D[9], float T[3]);
       if (!dc_room_get_delta(D, T)) { s_rl_exit = 5; return; } }
+    int rl_dp_ok = 0;                                    /* 30.10: D - переприцел кадра A (Dp; куски туннеля s_pw) */
     if (s_rl_target == 1) {
         extern int dc_nots_get_delta_submit(float D[9], float T[3]);
         float Dp[9], Tp[3];
         if (dc_nots_get_delta_submit(Dp, Tp)) {
             for (int i = 0; i < 9; i++) D[i] = Dp[i];
             for (int i = 0; i < 3; i++) T[i] = Tp[i];
+            rl_dp_ok = 1;
         }
     }
     { extern int g_dc_passdbg, g_dc_pass_id, g_dc_dma_pass, g_dc_body_pass;
@@ -10454,6 +10863,7 @@ static void rl_emit_walk_body(void) {
      * мира без нашей камеры между тактами) и единичной дельтой - кадр строит камера игры. Перенос записи сейчас - с подъёмом прошлой
      * сборки (сверка в обходе). Смены ракурса или пары нет - кадрам этого такта пар нет (dc_pair_veto). */
     uint32_t room_tag = 0; float roomQ[9], roomC[3], room_tN[3] = { 0.f, 0.f, 0.f };
+    float roomCr[3] = { 0.f, 0.f, 0.f }, room_tNr[3] = { 0.f, 0.f, 0.f }; int room_wrap = 0;   /* 31.10: ход и перенос тела на деле (rl_tread) */
     {   static int pr_on = -1;
         if (pr_on < 0) { const char *epr = getenv("DC_PAIR_ROOM"); pr_on = (epr && *epr == '0') ? 0 : 1; }
         extern int g_dc_pair_track, g_dc_pass_id, g_dc_dma_pass;
@@ -10466,9 +10876,17 @@ static void rl_emit_walk_body(void) {
                 for (int q = 0; q < 3; q++)
                     room_tN[q] = passTc[q] - (passRc[q * 3] * s_rl_liftm[pass_bk][0] + passRc[q * 3 + 1] * s_rl_liftm[pass_bk][1] +
                                               passRc[q * 3 + 2] * s_rl_liftm[pass_bk][2]);
-                if (rl_motion(passR, passT, passRc, room_tN, roomQ, roomC) && !rl_motion_cut(roomQ, roomC)) {
-                    room_tag = rl_ptag_of(36, 0x524F4F4Du, 0u, passR, passT, passRc, room_tN);
-                    ok = room_tag != 0;
+                if (rl_motion(passR, passT, passRc, room_tN, roomQ, roomC)) {
+                    for (int q = 0; q < 3; q++) { roomCr[q] = roomC[q]; room_tNr[q] = room_tN[q]; }
+                    const uint32_t bkgp = rrm_u32(ram, S + 0x7CDCu + 136u * (uint32_t)pass_bk + 60u) & 0x1FFFFFFFu;
+                    const int tread = rl_tread(pass_bk, bkgp, roomQ, roomC, &room_wrap);
+                    if (room_wrap)                           /* перескок дорожки: цель пары тела - ход прошлого такта */
+                        for (int q = 0; q < 3; q++)
+                            room_tN[q] = roomQ[q * 3] * passT[0] + roomQ[q * 3 + 1] * passT[1] + roomQ[q * 3 + 2] * passT[2] + roomC[q];
+                    if (tread || !rl_motion_cut(roomQ, roomC)) {
+                        room_tag = rl_ptag_of(36, 0x524F4F4Du, 0u, passR, passT, passRc, room_tN);
+                        ok = room_tag != 0;
+                    }
                 }
             }
             if (!ok) dc_pair_veto(g_dc_dma_pass);
@@ -10572,9 +10990,24 @@ static void rl_emit_walk_body(void) {
     /* The sections are the 36 entries at ctx+0x7CDC. ctx+0x5FCC is the ACTOR
      * pool, 60 entries of 124 bytes - walking it as 54 sections of 136 read
      * misaligned actor slots (see memory.c for the arithmetic). */
+    /* 30.10.2026: куски туннеля между тактами (s_pw) - снимок этой сборки: комната из списка, проходы кадров A и N подряд;
+     * в Modern кадр A нарисован переприцелом Dp, в Original дельта единичная */
+    PwSnap *pw_cur = NULL;
+    { extern int g_dc_orig_mode;
+      if (pt_piece_warp_on() && s_rl_target == 1 && !s_rl_cont_build && (rl_dp_ok || g_dc_orig_mode) && pw_room_on()) {
+          extern int dc_nots_delta_pass(int prev);
+          const int pA = dc_nots_delta_pass(1), pN = dc_nots_delta_pass(0);
+          if (pN == pA + 1) {
+              pw_cur = &s_pw[pA & (PW_RING - 1)];
+              pw_cur->pass = pA; pw_cur->passN = pN; pw_cur->n = 0;
+              memset(pw_cur->ok, 0, sizeof pw_cur->ok);
+              for (int q = 0; q < 9; q++) pw_cur->D[q] = D[q];
+              for (int q = 0; q < 3; q++) pw_cur->T[q] = T[q];
+          }
+      } }
     for (int k = 0; k < 36; k++) {
         s_rl_live_k = -1;
-        s_rl_ptag = 0;
+        s_rl_ptag = 0; s_rl_prow = -1;
         uint32_t e = S + 0x7CDCu + 136u * (uint32_t)k;
         if (e + 136u > 0x200000u) break;
         /* DC_LAMP_DBG_ALL=1 (14.09 вечер): состояние ВСЕХ 36 слотов таблицы на каждом
@@ -10886,7 +11319,7 @@ static void rl_emit_walk_body(void) {
             s_rl_liftm[k][1] = R[1] * d0 + R[4] * d1 + R[7] * d2;
             s_rl_liftm[k][2] = R[2] * d0 + R[5] * d1 + R[8] * d2;
             if (room_tag && k == pass_bk &&                   /* подъём с прошлой сборки не тот: пара тела ведёт не туда - пар нет */
-                fabsf(TRcur[0] - room_tN[0]) + fabsf(TRcur[1] - room_tN[1]) + fabsf(TRcur[2] - room_tN[2]) > 6.0f) {
+                fabsf(TRcur[0] - room_tNr[0]) + fabsf(TRcur[1] - room_tNr[1]) + fabsf(TRcur[2] - room_tNr[2]) > 6.0f) {   /* 31.10: перенос на деле */
                 extern int g_dc_dma_pass;
                 dc_pair_veto(g_dc_dma_pass);
             }
@@ -11194,11 +11627,20 @@ static void rl_emit_walk_body(void) {
                   }
               }
           }
+          /* 30.10.2026: кусок туннеля между тактами (s_pw выше) - кадр A = история слота (R, TR), следующий такт = запись
+           * сейчас (уже в prevR/prevTR); история прошлого прохода, тот же жилец (hist), пары нет (room_tag) */
+          if (pw_cur && slot < PW_SLOTS && !room_tag && !strcmp(msrc, "hist") && s_rl_passno - s_rl_prevseen[slot] == 1) {
+              pw_cur->ok[slot] = 1; pw_cur->gp[slot] = gp; pw_cur->n++;
+              for (int q = 0; q < 9; q++) { pw_cur->Ra[slot][q] = R[q]; pw_cur->Rn[slot][q] = prevR[slot][q]; }
+              for (int q = 0; q < 3; q++) { pw_cur->Ta[slot][q] = TR[q]; pw_cur->Tn[slot][q] = prevTR[slot][q]; }
+              s_rl_prow = 240 + slot;
+          }
           if (s_rl_target == 1) { s_rl_prevgp[slot] = gp;
                                   s_rl_prevseen[slot] = s_rl_passno; }
           if (room_tag) {                                   /* 26.10.2026: чьей парой кусок едет между тактами (rl_ptag_of) */
               if (!strcmp(msrc, "hist"))                    /* кадр A - история, следующий такт - запись сейчас */
-                  s_rl_ptag = rl_moves_with(roomQ, roomC, R, TR, prevR[slot], prevTR[slot])
+                  s_rl_ptag = (rl_moves_with(roomQ, roomC, R, TR, prevR[slot], prevTR[slot]) ||
+                               (room_wrap && rl_moves_with(roomQ, roomCr, R, TR, prevR[slot], prevTR[slot])))   /* 31.10: перескочил с телом */
                               ? room_tag : rl_ptag_of(slot, 0x53454354u, gp, R, TR, prevR[slot], prevTR[slot]);
               else if (!strcmp(msrc, "ownrel") || !strcmp(msrc, "seedp") || !strcmp(msrc, "strobep") || !strcmp(msrc, "seedr"))
                   s_rl_ptag = room_tag;                     /* нарисован парой прохода - едет с телом */
@@ -11328,7 +11770,7 @@ static void rl_emit_walk_body(void) {
                 ob->n_tri = n_tri; ob->n_quad = n_quad;
                 ob->plate = 0; ob->dim = piece_dim;
                 ob->ot_mode = s_rl_ot_mode; ob->ot_slot = s_rl_ot_slot; ob->ot_order = s_rl_ot_order; ob->live_k = s_rl_live_k;
-                ob->ptag = s_rl_ptag;
+                ob->ptag = s_rl_ptag; ob->prow = s_rl_prow;
                 ob->glint = (ram[e + 46u] == 2) ? 1 : 0;   /* 12.10: предмет - блеск (rl_glint_*) */
             }
             pieces++;
@@ -11360,7 +11802,7 @@ static void rl_emit_walk_body(void) {
                 ob->n_tri = n_tri; ob->n_quad = n_quad;
                 ob->plate = 1; ob->dim = piece_dim;
                 ob->ot_mode = s_rl_ot_mode; ob->ot_slot = s_rl_ot_slot; ob->ot_order = s_rl_ot_order; ob->live_k = s_rl_live_k;
-                ob->ptag = s_rl_ptag;
+                ob->ptag = s_rl_ptag; ob->prow = s_rl_prow;
                 ob->glint = 0;
                 pieces++;
                 continue;
@@ -11376,7 +11818,7 @@ static void rl_emit_walk_body(void) {
         pieces++;
     }
     s_rl_live_k = -1;
-    s_rl_ptag = 0;
+    s_rl_ptag = 0; s_rl_prow = -1;
 
     /* ===== THE REST OF THE ROOM, DRAWN BY US =====================
      * The game keeps only the current shot up: its script destroys slots 0..20
@@ -11581,7 +12023,7 @@ static void rl_emit_walk_body(void) {
                     ob->n_tri = n_tri; ob->n_quad = n_quad;
                     ob->plate = 1; ob->dim = 1.f;
                     ob->ot_mode = s_rl_ot_mode; ob->ot_slot = s_rl_ot_slot; ob->ot_order = s_rl_ot_order; ob->live_k = s_rl_live_k;
-                    ob->ptag = 0u;
+                    ob->ptag = 0u; ob->prow = -1;
                     ob->glint = 0;
                     if (seen_n < 64) seen_gp[seen_n++] = gp;
                     drew++; pieces++;
@@ -11778,7 +12220,7 @@ static void rl_emit_walk_body(void) {
         s_rl_piece_npoly = ob->n_tri + ob->n_quad;
         s_rl_dim = (ob->dim > 0.f) ? ob->dim : 1.f;
         s_rl_ot_mode = ob->ot_mode; s_rl_ot_slot = ob->ot_slot; s_rl_ot_order = ob->ot_order; s_rl_live_k = ob->live_k;
-        s_rl_ptag = ob->ptag;
+        s_rl_ptag = ob->ptag; s_rl_prow = ob->prow;
         s_rl_glint = (ob->glint && rl_glint_frame_on())                          /* 12.10: блеск предмета (rl_glint_*) */
                      ? rl_glint_setup(ram, ob->tri, ob->n_tri, ob->quad, ob->n_quad, ob->R, ob->TR, ob->Dm, ob->Dt) : 0;
         for (int i = 0; i < ob->n_tri; i++)
@@ -11789,7 +12231,7 @@ static void rl_emit_walk_body(void) {
         s_rl_dim = 1.f;
       } }
     s_rl_live_k = -1;
-    s_rl_ptag = 0;
+    s_rl_ptag = 0; s_rl_prow = -1;
     mt_flush(ram);                          /* 14.09 вечер: отложенные решётки */
     if (s_rl_target == 1) f8_lists_merge(); /* 15.09: снимок списков F8 без мигания */
     if (s_rl_target == 1) {                 /* 15.09 ночь: сколько двойников ушло за победителя консоли */
@@ -16557,8 +16999,24 @@ void dc_shadow_draw(void) {
             for (int c = 1; c < nch; c++) { x0 = fminf(x0, chx[c]); x1 = fmaxf(x1, chx[c]); z0 = fminf(z0, chz[c]); z1 = fmaxf(z1, chz[c]); }
             if (x1 - x0 < 30000.f && z1 - z0 < 30000.f) { Fx = 0.5f * (x0 + x1); Fz = 0.5f * (z0 + z1); }
         }
-        const float F[3] = { floorf(Fx / Q + 0.5f) * Q, chy[0], floorf(Fz / Q + 0.5f) * Q };
+        float F[3] = { floorf(Fx / Q + 0.5f) * Q, chy[0], floorf(Fz / Q + 0.5f) * Q };
         const float mcut = stable ? 16000.f : 9000.f;
+        /* ⭐ 31.10.2026, игрок (слот 0 установленной USA, ST10E): «Немного пройти вперед, немного пройти назад ... картинка ярче,
+         * то темнее». Второй персонаж комнаты (актёр 1 в -7718,-9086) далеко от Регины (~14500,14200): разброс по осям меньше
+         * 30000, опора - середина, а до неё от обоих чуть больше 16000 - в карту не шёл никто (np = 0), слоя луны не было, и с ним
+         * пропадал лунный свет, ~20-25 % яркости улицы. Опора шагает по 1500 за серединой - на ходу луна то была, то нет. Теперь,
+         * если середина оставляет за краем первого (Регину; в сцене - первую группу заслонивших), опора - на нём, как до 23.10;
+         * в остальных кадрах всё как было. DC_MOON_KEEP_REGINA=0 - как было. */
+        {   static int keep = -1;
+            if (keep < 0) { const char *e = getenv("DC_MOON_KEEP_REGINA"); keep = (e && *e == '0') ? 0 : 1; }
+            const float rx = chx[0] - F[0], rz = chz[0] - F[2];
+            if (keep && stable && nch > 1 && rx*rx + rz*rz > mcut * mcut) {
+                F[0] = floorf(chx[0] / Q + 0.5f) * Q; F[2] = floorf(chz[0] / Q + 0.5f) * Q;
+                static int lr = -2; const int rr = dc_room_effective();
+                if (rr != lr) { lr = rr;
+                    fprintf(stderr, "shadow: moon anchored on Regina in room %d - the middle of the characters is %.0f units from her (DC_MOON_KEEP_REGINA=0 - as before)%c",
+                            rr, sqrtf(rx*rx + rz*rz), 10); }
+            } }
         const float Lm[3] = { F[0] + m[0] * Dm, F[1] + m[1] * Dm, F[2] + m[2] * Dm };
         const float ax[3] = { -m[0], -m[1], -m[2] };
         float need = 0.f, dmin = 1e30f, dmax = 0.f; int np = 0;
