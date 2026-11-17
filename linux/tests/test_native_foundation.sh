@@ -54,6 +54,7 @@ cp "$TMP/test-native-pack" "$TMP/nopak/"
 grep -q "dcme_data.pak not found" "$TMP/nopak.err"
 
 python3 -I "$ROOT/linux/tests/test_linux_installer.py"
+python3 -I "$ROOT/linux/tests/test_cli.py"
 
 cc -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -pthread \
   -I"$ROOT/mod/src/include" \

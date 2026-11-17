@@ -10,6 +10,9 @@ package carries. Nothing of the game comes with the mod - the program is recompi
 
 The same parameters as dcme_install.py (-RecompZip, -KeepBuildTree, -NoShortcut, -Lang ru, -DryRun); -Toolchain picks
 the compiler: auto (Clang when there is one - the compiler of the Windows release - else GCC), clang or gcc.
+--verbose prints every message and every line of every tool. The output is for a terminal only (dcme_cli.py): on a
+TTY the steps are redrawn in place with a spinner and progress bars; in a pipe or file, plain lines. The full technical
+log is always written (~/.local/state/dcme/, copied to <InstallPath>/install-log.txt at the end).
 
 Steps:
    1  checks the build tools (compiler, CMake, Ninja or make, pkg-config: sdl2, vulkan, libpng, libav*)
@@ -32,13 +35,26 @@ import shutil
 import struct
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dcme_install as W  # noqa: E402
 
+import dcme_cli  # noqa: E402
+
 L = W.L
-write_log = W.write_log
 InstallError = W.InstallError
+UI = None                                 # dcme_cli.Terminal of this run (main)
+
+
+def write_log(message, level='info'):
+    """Through dcme_install's write_log - which main() points at the terminal output (dcme_cli)."""
+    W.write_log(message, level)
+
+
+def summary(text):
+    if UI:
+        UI.summary(text)
 
 W.TOTAL_STEPS = 13
 
@@ -139,6 +155,8 @@ def test_prerequisites():
                              % (', '.join(missing), _hint()),
                              'Нет инструментов сборки: %s. Поставь их, например:\n      %s'
                              % (', '.join(missing), _hint())))
+    found = [os.path.basename(cc or '?'), 'cmake', 'ninja' if ninja else 'make']
+    summary(' · '.join(found) + ' · sdl2 · vulkan · libpng · ffmpeg')
     if not shutil.which('vulkaninfo'):
         write_log(L('vulkaninfo not found - make sure the Vulkan driver of your GPU is installed (mesa-vulkan-drivers, '
                     'nvidia-utils, ...)', 'нет vulkaninfo - проверь, что стоит драйвер Vulkan видеокарты'), 'warn')
@@ -321,19 +339,114 @@ def step_shortcut(game_dir):
         write_log(L('menu entry not created:', 'пункт меню не создан:') + ' %s' % e, 'warn')
 
 
+# ---------------------------------------------------------------- terminal output (dcme_cli)
+def _install_ui(ui):
+    """dcme_install's output calls go to the terminal object; the install logic itself is untouched."""
+    global UI
+    UI = ui
+
+    def write(message, level='info'):
+        ui.message(message, level)
+
+    def start_step(title):
+        W.S.step_no += 1
+        ui.step(W.S.step_no, W.TOTAL_STEPS, title)
+
+    def tool_state(key, state):
+        ui.logline('[tool] %s %s' % (key, state))
+
+    def run_tool(file, args=(), workdir=None, quiet=False, allow_failure=False):
+        """dcme_install.run_tool with the lines streamed to the terminal object (same exit code rules)."""
+        args = [str(a) for a in args]
+        ui.message('> %s %s' % (file, ' '.join(args)))
+        try:
+            p = subprocess.Popen([file] + args, cwd=workdir, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT)
+        except OSError as e:
+            why = e.strerror or str(e)
+            raise InstallError(L('"%s" did not start: %s' % (file, why), '«%s» не запустился: %s' % (file, why)))
+        out = []
+        import io
+        for line in io.TextIOWrapper(p.stdout, encoding='utf-8', errors='replace'):
+            line = line.rstrip('\n')
+            out.append(line)
+            if line.strip():
+                ui.tool_line(line, show=not quiet)
+        code = p.wait()
+        W.S.last_tool_exit = code
+        if code != 0 and not allow_failure:
+            ui.tool_tail = [x.strip()[:240] for x in out if x.strip()][-8:]
+            raise InstallError(L('"%s" exited with code %d' % (os.path.basename(file), code),
+                                 '«%s» завершился с кодом %d' % (os.path.basename(file), code)))
+        ui.sub = None
+
+    def get_file(url, dest, expected_size=0):
+        """dcme_install.get_file with a progress bar (Content-Length)."""
+        import ssl
+        import urllib.request
+        ui.message(L('downloading', 'скачиваю') + ' ' + url)
+        part = dest + '.part'
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'DinoCrisisME-setup'})
+            with urllib.request.urlopen(req, timeout=120, context=ssl.create_default_context()) as r, \
+                    open(part, 'wb') as f:
+                total = int(r.headers.get('Content-Length') or 0)
+                got = 0
+                while True:
+                    chunk = r.read(1 << 16)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    got += len(chunk)
+                    ui.progress(got, total, '%.1f MB' % (got / 1048576.0))
+            os.replace(part, dest)
+        except Exception as e:
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+            raise InstallError(L('Could not download %s: %s' % (url, e), 'Не удалось скачать %s: %s' % (url, e)))
+        size = os.path.getsize(dest)
+        if expected_size > 0 and size != expected_size:
+            raise InstallError(L('Size of %s (%d) does not match the expected %d.' % (dest, size, expected_size),
+                                 'Размер %s (%d) не совпал с ожидаемым (%d).' % (dest, size, expected_size)))
+        ui.progress(0, 0)
+        ui.message(L('received', 'получено') + ' ' + W.n0(size) + ' ' + L('bytes', 'байт'), 'ok')
+
+    W.write_log = write
+    W.start_step = start_step
+    W.tool_state = tool_state
+    W.run_tool = run_tool
+    W.get_file = get_file
+
+
+def _log_path():
+    base = os.environ.get('XDG_STATE_HOME') or os.path.expanduser('~/.local/state')
+    return os.path.join(base, 'dcme', 'install-%s.log' % time.strftime('%Y%m%d-%H%M%S'))
+
+
 def main(argv=None):
     W._setup_output()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    verbose = False
+    for flag in ('--verbose', '-verbose', '-Verbose', '-v'):
+        while flag in argv:
+            argv.remove(flag)
+            verbose = True
     try:
-        W.parse_args(sys.argv[1:] if argv is None else argv)
+        W.parse_args(argv)
     except W.UsageError as e:
-        write_log(str(e), 'err')
+        print('[ERROR] ' + str(e), file=sys.stderr)
         return 1
     W.S.ru = W.O.lang == 'ru'
     os.environ['PYTHONIOENCODING'] = 'utf-8'
+    ui = dcme_cli.Terminal(total_steps=W.TOTAL_STEPS, verbose=verbose, log_path=_log_path())
+    _install_ui(ui)
+    ui.tool_tail = []
     try:
-        write_log('==== Dino Crisis ME - ' + L('native Linux setup', 'установка для Linux') + ' ====', 'step')
-        write_log(L('disc image :', 'образ игры :') + ' ' + W.O.disc_path)
-        write_log(L('install to :', 'куда ставим:') + ' ' + W.O.install_path)
+        ui.header('Dino Crisis ME - ' + L('native Linux setup', 'установка для Linux'),
+                  [(L('disc', 'образ'), W.O.disc_path), (L('target', 'куда'), W.O.install_path),
+                   (L('log', 'журнал'), ui.log_path)])
         if not os.path.isfile(W.O.disc_path):
             raise InstallError(L('Disc image not found: ' + W.O.disc_path, 'Образ игры не найден: ' + W.O.disc_path))
         if os.path.getsize(W.O.disc_path) < 100 * 1024 * 1024:
@@ -344,9 +457,10 @@ def main(argv=None):
                                  'Рядом с установщиком нет папки mod - распакуй архив целиком.'))
         tools = test_prerequisites()
         W.S.version = W.find_game_version(tools)
+        summary(W.get_version_name(W.S.version))
         if W.O.dry_run:
-            write_log(L('-DryRun: checks passed, nothing was installed.',
-                        'Ключ -DryRun: проверки пройдены, установка не выполнялась.'), 'ok')
+            ui.done(L('Checks passed (dry run, nothing installed)', 'Проверки пройдены (ничего не установлено)'),
+                    [(L('disc', 'образ'), W.get_version_name(W.S.version)), (L('log', 'журнал'), ui.log_path)])
             return 0
         src_root = os.path.join(W.O.install_path, '.build-src')
         game_dir = W.O.install_path
@@ -365,22 +479,32 @@ def main(argv=None):
         step_shortcut(game_dir)
 
         if not W.O.keep_build_tree:
-            write_log(L('removing the build tree...', 'убираю дерево сборки...'))
+            ui.message(L('removing the build tree...', 'убираю дерево сборки...'))
             before = W.tree_size(src_root)
             W.remove_tree(src_root)
-            write_log(L('freed', 'освобождено') + ' ' + W.n0(W.round_half_up(before / 1048576)) + ' ' + L('MB', 'МБ'), 'ok')
-        write_log('==== ' + L('Done', 'Готово') + ' ====', 'step')
-        write_log(L('Run:', 'Запуск:') + ' ' + os.path.join(game_dir, 'DinoCrisisME.sh'), 'ok')
+            ui.message(L('build tree removed, freed', 'дерево сборки убрано, освобождено') + ' ' +
+                       W.n0(W.round_half_up(before / 1048576)) + ' ' + L('MB', 'МБ'), 'ok')
+        log_copy = os.path.join(game_dir, 'install-log.txt')
+        rows = [(L('play', 'запуск'), os.path.join(game_dir, 'DinoCrisisME.sh'))]
         if distrobox_name():
-            write_log(L('From SteamOS / Steam (Add a Non-Steam Game):', 'Из SteamOS / Steam (добавить стороннюю игру):')
-                      + ' ' + os.path.join(game_dir, 'DinoCrisisME-host.sh'), 'ok')
+            rows.append(('steam', os.path.join(game_dir, 'DinoCrisisME-host.sh') + '  ' +
+                         L('(Add a Non-Steam Game)', '(добавить стороннюю игру)')))
+        rows += [(L('folder', 'папка'), game_dir), (L('log', 'журнал'), log_copy)]
+        ui.done(L('Dino Crisis ME is installed', 'Dino Crisis ME установлен'), rows)
+        try:
+            ui.log.flush()
+            shutil.copyfile(ui.log_path, log_copy)
+        except (OSError, AttributeError):
+            pass
         return 0
     except InstallError as e:
-        write_log(str(e), 'err')
+        ui.fail(str(e), getattr(ui, 'tool_tail', ()))
         return 1
     except KeyboardInterrupt:
-        write_log(L('Interrupted.', 'Прервано.'), 'err')
-        return 1
+        ui.fail(L('Interrupted.', 'Прервано.'))
+        return 130
+    finally:
+        ui.close()
 
 
 if __name__ == '__main__':

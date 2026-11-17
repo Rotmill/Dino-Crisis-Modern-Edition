@@ -97,6 +97,17 @@ At the end setup checks the finished folder (`verify_layout`): the program, `dcm
 in `data/`; `dc_pak.c` looks for the pack next to the executable first (`DCME_DATA_PAK` overrides it), and says so on
 stderr when there is none.
 
+**Mouse look.** The camera reads the mouse while it owns it. SDL's relative mode is not available everywhere (gamescope
+in Game Mode, some Wayland compositors), so the grab falls back to SDL's warp emulation and then to its own way: the
+cursor is kept in the window and put back to the centre every frame. The log says which one is used
+(`mouse: the camera reads the mouse - ...`); `DC_MOUSE_MODE=relative|warp|centre` forces one, for example in
+`DinoCrisisME.sh`.
+
+**Setup output.** The setup is a terminal program only. On a terminal it redraws its steps in place (spinner, progress
+bars from the build's own `[n/m]`, `[OK]`/`[WARN]`/`[ERROR]`, one summary line per step); in a pipe, a file or with
+`TERM=dumb` it writes plain lines; `--verbose` prints every line of every tool; `NO_COLOR` turns colours off. The full
+technical log is always written to `~/.local/state/dcme/install-*.log` and copied to `<InstallPath>/install-log.txt`.
+
 ### How the port is put together
 
 - `mod/src/include/dc_win32_posix.h` + `mod/src/runtime/dc_win32_posix.c`: the Win32 subset the mod runtime uses
