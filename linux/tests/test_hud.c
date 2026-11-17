@@ -108,6 +108,50 @@ int main(int argc, char **argv)
     dc_hud_raster(&s, px);
     CHECK(lit(4, 4, 60, 12, RED) == 0 && lit(4, 13, 60, 19, RED) == 0);
 
+    /* ---- the rounds carried, learned at reloads ---- */
+    {
+        enum { BASE = 0x080000, SIZE = 0x1000, STACK = 0x0800, TIMER = 0x0900, OTHER = 0x0A00 };
+        static uint8_t ram[0x200000], prev[SIZE];
+        DcHudLearn l;
+        memset(&l, 0, sizeof l);
+        uint8_t *cur = ram + BASE;
+        cur[STACK - 1] = 0x31;                                 /* item kind next to the count */
+        cur[STACK] = 45;
+        cur[TIMER] = 250;
+        cur[OTHER] = 40;
+#define FRAME(dm) do { memcpy(prev, cur, SIZE); \
+                       cur[TIMER]--; if (dm > 0) cur[STACK] -= (uint8_t)(dm); \
+                       dc_hud_learn_step(&l, prev, cur, BASE, SIZE, dm, BASE + 0x0C00, BASE + 0x0C10); } while (0)
+        for (int i = 0; i < 30; i++) FRAME(0);
+        /* a reload one round per frame: the timer falls by 1 on the same frames */
+        for (int i = 0; i < 9; i++) FRAME(1);
+        CHECK(l.addr == 0);                                    /* stack and timer both still in */
+        for (int i = 0; i < 10; i++) FRAME(0);
+        CHECK(l.addr == BASE + STACK && l.tag_off == -1 && l.tag == 0x31);
+        CHECK(dc_hud_reserve(&l, ram, sizeof ram) == 45 - 9);
+        /* the stack runs out and another item takes its slot: hidden, then learned again */
+        cur[STACK - 1] = 0x07; cur[STACK] = 1;
+        for (int i = 0; i < 119; i++) CHECK(dc_hud_reserve(&l, ram, sizeof ram) == -1 && l.addr);
+        CHECK(dc_hud_reserve(&l, ram, sizeof ram) == -1 && l.addr);
+        CHECK(dc_hud_reserve(&l, ram, sizeof ram) == -1 && !l.addr);
+        /* one big reload (+6) where two cells drop by 6: needs the second reload to tell them apart */
+        memset(&l, 0, sizeof l);
+        cur[STACK - 1] = 0x31; cur[STACK] = 30; cur[OTHER] = 40;
+        memcpy(prev, cur, SIZE); cur[STACK] -= 6; cur[OTHER] -= 6;
+        dc_hud_learn_step(&l, prev, cur, BASE, SIZE, 6, 0, 0);
+        CHECK(l.addr == 0 && l.ncand == 2);
+        memcpy(prev, cur, SIZE); cur[STACK] -= 4;
+        dc_hud_learn_step(&l, prev, cur, BASE, SIZE, 4, 0, 0);
+        CHECK(l.addr == BASE + STACK);
+        /* a cell in the skipped range (the gun's own array) is never taken */
+        memset(&l, 0, sizeof l);
+        cur[0x0C05] = 50;
+        for (int k = 0; k < 2; k++) { memcpy(prev, cur, SIZE); cur[0x0C05] -= 2; cur[STACK] -= 2;
+                                      dc_hud_learn_step(&l, prev, cur, BASE, SIZE, 2, BASE + 0x0C00, BASE + 0x0C10); }
+        CHECK(l.addr == BASE + STACK);
+#undef FRAME
+    }
+
     if (argc > 1) {                                          /* preview: Fine, Caution (bleeding), Danger, empty gun */
         static uint32_t sheet[4 * DC_HUD_W * DC_HUD_H];
         const DcHudIn ins[4] = { world(1150, 0x20, 12), world(620, 0x10, 5), world(300, 0x30, 1), world(900, 0x20, 0) };

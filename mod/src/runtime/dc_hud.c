@@ -74,6 +74,71 @@ void dc_hud_tick(DcHudState *s, const DcHudIn *in, float dt, int always)
     s->in = *in;
 }
 
+/* ---------------------------------------------------------------- rounds carried (learned) */
+static int in_skip(uint32_t a, uint32_t lo, uint32_t hi) { return a >= lo && a <= hi; }
+
+static void learn_take(DcHudLearn *l, const uint8_t *prev, const uint8_t *cur, uint32_t base)
+{
+    const uint32_t a = l->cand[0], o = a - base;
+    /* the item's kind: the neighbour that held still and is not zero */
+    if (cur[o - 1] == prev[o - 1] && cur[o - 1] != 0) { l->tag_off = -1; l->tag = cur[o - 1]; }
+    else if (cur[o + 1] == prev[o + 1] && cur[o + 1] != 0) { l->tag_off = 1; l->tag = cur[o + 1]; }
+    else l->tag_off = 0;
+    l->addr = a;
+    l->bad = 0;
+}
+
+void dc_hud_learn_step(DcHudLearn *l, const uint8_t *prev, const uint8_t *cur, uint32_t base, uint32_t size,
+                       int mag_delta, uint32_t skip_lo, uint32_t skip_hi)
+{
+    if (l->addr) return;
+    if (mag_delta <= 0) {
+        /* no reload this frame: whatever moved is not the ammo item (a timer, a counter that fell with the reload) */
+        int k = 0;
+        for (int i = 0; i < l->ncand; i++) {
+            const uint32_t o = l->cand[i] - base;
+            if (cur[o] == prev[o]) l->cand[k++] = l->cand[i];
+        }
+        if (l->ncand && !k) l->events = 0;                     /* every candidate moved: start again at the next reload */
+        l->ncand = k;
+        if (l->ncand == 1 && l->events >= 2) learn_take(l, prev, cur, base);
+        return;
+    }
+    uint32_t found[DC_HUD_LEARN_MAX];
+    int nf = 0, over = 0;
+    for (uint32_t o = 1; o + 1 < size; o++) {
+        if (prev[o] < (uint8_t)mag_delta || prev[o] - cur[o] != mag_delta) continue;
+        const uint32_t a = base + o;
+        if (in_skip(a, skip_lo, skip_hi)) continue;
+        if (l->events) {                                        /* already learning: only the candidates still standing */
+            int keep = 0;
+            for (int i = 0; i < l->ncand && !keep; i++) keep = l->cand[i] == a;
+            if (!keep) continue;
+        }
+        if (nf == DC_HUD_LEARN_MAX) { over = 1; break; }
+        found[nf++] = a;
+    }
+    if (over) { l->ncand = 0; l->events = 0; return; }      /* too many: this reload says nothing */
+    if (!nf) { l->ncand = 0; l->events = 0; return; }
+    memcpy(l->cand, found, sizeof(uint32_t) * (size_t)nf);
+    l->ncand = nf;
+    l->events++;
+    if (l->ncand == 1 && l->events >= 2) learn_take(l, prev, cur, base);
+}
+
+int dc_hud_reserve(DcHudLearn *l, const uint8_t *ram, uint32_t ram_size)
+{
+    if (!l->addr || l->addr + 1 >= ram_size || l->addr < 1) return -1;
+    if (l->tag_off && ram[l->addr + l->tag_off] != l->tag) {
+        if (++l->bad > 120) {                                   /* 2 s: the stack is gone or moved - learn it again */
+            l->addr = 0; l->ncand = 0; l->events = 0; l->tag_off = 0; l->bad = 0;
+        }
+        return -1;
+    }
+    l->bad = 0;
+    return ram[l->addr];
+}
+
 /* ---------------------------------------------------------------- raster */
 static const char *const k_glyph[] = {
     /* 3x5, row by row */
