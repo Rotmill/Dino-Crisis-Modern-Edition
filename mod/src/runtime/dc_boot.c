@@ -576,6 +576,22 @@ void dc_boot_init(void)
                 SetCurrentDirectoryA(exe);
         }
     }
+#else
+    /* 17.11.2026: Linux - the same: data/ next to the executable, else its own folder (the .desktop entry or a
+     * terminal may start it from anywhere) */
+    char exe[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, exe, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        char *slash = strrchr(exe, '/');
+        if (slash) {
+            *slash = 0;
+            char data[MAX_PATH + 8];
+            snprintf(data, sizeof data, "%s/data", exe);
+            struct stat st;
+            if (!(stat(data, &st) == 0 && S_ISDIR(st.st_mode) && chdir(data) == 0) && chdir(exe) != 0)
+                fprintf(stderr, "boot: cannot enter the game folder %s\n", exe);
+        }
+    }
 #endif
 
     read_env_builtin("dc_env.cfg");
@@ -586,12 +602,14 @@ void dc_boot_init(void)
      * before. _IONBF, not _IOLBF: MSVC's ucrtbase rejects a line-buffered
      * stream with a NULL buffer through the invalid-parameter handler, and that
      * kills the process before main() runs. */
+#ifdef _WIN32
     FILE *r = freopen("NUL", "w", stderr);
     FILE *r2 = freopen("NUL", "w", stdout);
     (void)r; (void)r2;
-#ifdef _WIN32
     log_open();
 #endif
+    /* 17.11.2026: Linux keeps its stderr - a terminal shows it, the launcher (linux/native/dinocrisis-me) writes it to
+     * DinoCrisisME_log.txt; "NUL" would be an ordinary file there */
     setvbuf(stderr, NULL, _IONBF, 0);
     setvbuf(stdout, NULL, _IONBF, 0);
 }

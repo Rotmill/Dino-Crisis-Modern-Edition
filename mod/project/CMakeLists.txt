@@ -43,6 +43,10 @@ psxrecomp_add_runtime_target(DinoCrisisME
     DEFAULT_GAME_CONFIG_PATH  "game.toml"
 )
 
+# Cross-platform PNG decoding used by the native splash and texture-mod paths.
+# The installer copies mod/src/runtime and mod/src/include into this framework.
+target_sources(DinoCrisisME PRIVATE "${PSXRECOMP_ROOT}/runtime/src/dc_png.cpp")
+
 # Отладочный интерфейс (Dear ImGui: окно диагностики F2, подгонки F8, света F9)
 # из релиза убран целиком. Перекрестие на него больше не завязано — оно
 # рисуется средствами SDL в runtime/src/dc_reticle.c, там же и экранные
@@ -91,7 +95,7 @@ if(MSVC)
     string(APPEND DCME_RC "DCME_DATA RCDATA \"${DCME_PAK_RC}\"\n")
     file(WRITE "${CMAKE_BINARY_DIR}/dc_icon.rc" "${DCME_RC}")
     target_sources(DinoCrisisME PRIVATE "${CMAKE_BINARY_DIR}/dc_icon.rc")
-else()
+elseif(MINGW)
     # 10.10.2026: тот же ресурс под MinGW (Clang) - его собирает windres из llvm-mingw; пути прямыми слэшами
     enable_language(RC)
     # 11.10.2026: пути в .rc - от каталога сборки (компилятор ресурсов ищет их от своей рабочей папки - это он и есть), чтобы в
@@ -112,6 +116,15 @@ else()
     endif()
     file(WRITE "${CMAKE_BINARY_DIR}/dc_icon.rc" "${DCME_RC}")
     target_sources(DinoCrisisME PRIVATE "${CMAKE_BINARY_DIR}/dc_icon.rc")
+else()
+    # Native Unix builds keep the generated pack next to the ELF executable.
+    # PE RCDATA resources do not exist on Linux; dc_pak.c loads this file once
+    # and keeps it in memory for the lifetime of the process.
+    target_compile_definitions(DinoCrisisME PRIVATE DCME_DATA_PAK_PATH="dcme_data.pak")
+    add_custom_command(TARGET DinoCrisisME POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${DCME_PAK}" "$<TARGET_FILE_DIR:DinoCrisisME>/dcme_data.pak"
+        VERBATIM)
 endif()
 
 # Релиз без отладки (17.09.2026, игрок: «это релиз мода, тут не должно быть ни дебага, ни отладочных файлов»; из клавиш
@@ -134,7 +147,7 @@ if(MSVC)
     target_link_options(DinoCrisisME PRIVATE
         $<$<CONFIG:RelWithDebInfo>:/SUBSYSTEM:WINDOWS>
         $<$<CONFIG:RelWithDebInfo>:/ENTRY:mainCRTStartup>)
-else()
+elseif(MINGW)
     # 10.10.2026: MinGW (Clang). То же самое его средствами: оконная подсистема без консоли (-mwindows, точка входа
     # остаётся main), SDL_MAIN_HANDLED (каркас ставит его только для MSVC), FMT_CONSTEVAL= - {fmt} 9.1 каркаса с
     # consteval нового Clang в C++20 не собирается (config_loader.cpp).
@@ -151,4 +164,21 @@ else()
     if(DC_BUILD_NOAUTOIMPORT)
         target_compile_options(DinoCrisisME PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:-fno-auto-import>")
     endif()
+else()
+    # The framework uses SDL_MAIN_HANDLED on native hosts as well: main() is
+    # supplied by psxrecomp, not by SDL's platform shim.
+    # _GNU_SOURCE: dladdr, sched_getaffinity, SIGSTKSZ. dc_win32_posix.c: the Win32 calls of the mod runtime over POSIX.
+    target_compile_definitions(DinoCrisisME PRIVATE SDL_MAIN_HANDLED "FMT_CONSTEVAL=" _GNU_SOURCE)
+    target_compile_options(DinoCrisisME PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include exception>")
+    target_sources(DinoCrisisME PRIVATE "${PSXRECOMP_ROOT}/runtime/src/dc_win32_posix.c")
+    find_package(Vulkan REQUIRED)
+    find_package(PNG REQUIRED)
+    find_package(Threads REQUIRED)
+    # Movies from mods (dc_movie.cpp): FFmpeg instead of Media Foundation
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(DCME_FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale libswresample)
+    target_link_libraries(DinoCrisisME PRIVATE Vulkan::Vulkan PNG::PNG PkgConfig::DCME_FFMPEG Threads::Threads
+                          ${CMAKE_DL_LIBS})
+    # the game runs from the folder of the executable like on Windows (dcme_data.pak, dc_user.cfg, mods next to it)
+    set_target_properties(DinoCrisisME PROPERTIES BUILD_RPATH "$ORIGIN" INSTALL_RPATH "$ORIGIN")
 endif()

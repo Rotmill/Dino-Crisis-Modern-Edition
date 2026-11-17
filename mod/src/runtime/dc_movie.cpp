@@ -9,6 +9,11 @@
 //  * звук: dc_movie_audio декодирует звуковую дорожку MP4 целиком при старте, dc_mods.c кладёт её на канал XA ролика
 //    (та же подмена, что для речи из WAV).
 // DC_MODS=0 / DC_MODS_MOVIE=0 — выключить (dc_mods.c).
+//
+// 17.11.2026: Linux - the same module over FFmpeg (libavformat/libavcodec/libswscale/libswresample) instead of Media
+// Foundation: the Reader and the audio decode below have a POSIX twin; the thread, the timing and the exported calls
+// are shared.
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -17,7 +22,20 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <mferror.h>
+#else
+#include "dc_platform.h"
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavutil/imgutils.h>
+#include <libavutil/opt.h>
+#include <libswresample/swresample.h>
+#include <libswscale/swscale.h>
+}
+#endif
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 #include <stdio.h>
 #include <chrono>
 #include <condition_variable>
@@ -26,10 +44,17 @@
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
 #pragma comment(lib, "mfuuid.lib")
 #pragma comment(lib, "ole32.lib")
+#endif
 
 namespace {
+
+// ---------------------------------------------------------------- картинка
+struct Frame { std::vector<uint32_t> px; int w = 0, h = 0; double t = -1; };
+
+#ifdef _WIN32
 
 // 18.10.2026 (разбор кода): Media Foundation - не статическим импортом, а при первом ролике MP4. В Windows N и KN её нет
 // без Media Feature Pack, и exe с mfplat.dll/mfreadwrite.dll в таблице импорта там не запускался вовсе, даже без модов.
@@ -62,19 +87,6 @@ bool mf_start() {
 }
 
 template <class T> void release(T*& p) { if (p) { p->Release(); p = nullptr; } }
-
-// ---------------------------------------------------------------- картинка
-struct Frame { std::vector<uint32_t> px; int w = 0, h = 0; double t = -1; };
-
-std::mutex g_mu;
-std::condition_variable g_cv;
-std::thread g_thr;
-int g_req_id = -1;               // ролик, который сейчас читает игра (−1 — нет)
-std::wstring g_req_path;
-double g_req_t = 0;
-ULONGLONG g_req_tick = 0;        // когда пришёл последний видеосектор
-Frame g_show;                    // кадр для показа (под g_mu)
-uint64_t g_show_serial = 0;
 
 struct Reader {
     IMFSourceReader* r = nullptr;
@@ -150,11 +162,187 @@ struct Reader {
     }
 };
 
+struct ComScope {
+    ComScope() { CoInitializeEx(nullptr, COINIT_MULTITHREADED); }
+    ~ComScope() { CoUninitialize(); }
+};
+bool movie_backend_start() { return mf_start(); }
+#else
+// ---------------------------------------------------------------- FFmpeg (Linux)
+struct ComScope {};
+bool movie_backend_start() { return true; }
+
+std::string utf8_path(const std::wstring& w) {
+    char p[MAX_PATH];
+    return dc_posix_wpath(w.c_str(), p, sizeof p);
+}
+
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 24, 100)
+#define DC_AV_CH_LAYOUT 1           // FFmpeg 5.1+: AVChannelLayout
+#else
+#define DC_AV_CH_LAYOUT 0
+#endif
+
+int codec_channels(const AVCodecContext* c) {
+#if DC_AV_CH_LAYOUT
+    return c->ch_layout.nb_channels;
+#else
+    return c->channels;
+#endif
+}
+
+struct Reader {
+    AVFormatContext* fmt = nullptr;
+    AVCodecContext* dec = nullptr;
+    SwsContext* sws = nullptr;
+    AVFrame* fr = nullptr;
+    AVPacket* pkt = nullptr;
+    int vs = -1;
+    int w = 0, h = 0;
+    bool eof = false, flushing = false;
+    bool open(const std::wstring& path) {
+        close();
+        const std::string p = utf8_path(path);
+        if (avformat_open_input(&fmt, p.c_str(), nullptr, nullptr) < 0) { fmt = nullptr; return false; }
+        if (avformat_find_stream_info(fmt, nullptr) < 0) { close(); return false; }
+        const AVCodec* codec = nullptr;
+        vs = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0);
+        if (vs < 0 || !codec) { close(); return false; }
+        dec = avcodec_alloc_context3(codec);
+        if (!dec || avcodec_parameters_to_context(dec, fmt->streams[vs]->codecpar) < 0) { close(); return false; }
+        dec->thread_count = 0;                   // FFmpeg picks
+        if (avcodec_open2(dec, codec, nullptr) < 0) { close(); return false; }
+        fr = av_frame_alloc();
+        pkt = av_packet_alloc();
+        w = dec->width; h = dec->height;
+        eof = false; flushing = false;
+        return fr && pkt && w > 0 && h > 0;
+    }
+    void close() {
+        if (sws) { sws_freeContext(sws); sws = nullptr; }
+        if (fr) av_frame_free(&fr);
+        if (pkt) av_packet_free(&pkt);
+        if (dec) avcodec_free_context(&dec);
+        if (fmt) avformat_close_input(&fmt);
+        vs = -1; eof = false; flushing = false;
+    }
+    bool rewind() {
+        if (!fmt) return false;
+        const int r = av_seek_frame(fmt, vs, 0, AVSEEK_FLAG_BACKWARD);
+        avcodec_flush_buffers(dec);
+        eof = false; flushing = false;
+        return r >= 0;
+    }
+    // следующий кадр: пиксели BGRA сверху вниз и время (с)
+    bool next(Frame& f) {
+        if (!fmt || eof) return false;
+        for (;;) {
+            const int r = avcodec_receive_frame(dec, fr);
+            if (r == 0) break;
+            if (r == AVERROR_EOF) { eof = true; return false; }
+            if (r != AVERROR(EAGAIN)) { eof = true; return false; }
+            if (flushing) { eof = true; return false; }
+            const int rd = av_read_frame(fmt, pkt);
+            if (rd < 0) { flushing = true; avcodec_send_packet(dec, nullptr); continue; }
+            if (pkt->stream_index == vs) avcodec_send_packet(dec, pkt);
+            av_packet_unref(pkt);
+        }
+        sws = sws_getCachedContext(sws, fr->width, fr->height, (AVPixelFormat)fr->format, fr->width, fr->height,
+                                   AV_PIX_FMT_BGRA, SWS_BILINEAR, nullptr, nullptr, nullptr);
+        if (!sws) { av_frame_unref(fr); return false; }
+        f.w = fr->width; f.h = fr->height;
+        const int64_t ts = fr->best_effort_timestamp != AV_NOPTS_VALUE ? fr->best_effort_timestamp : fr->pts;
+        const int64_t st = fmt->streams[vs]->start_time != AV_NOPTS_VALUE ? fmt->streams[vs]->start_time : 0;
+        f.t = ts == AV_NOPTS_VALUE ? (f.t < 0 ? 0.0 : f.t + 1.0 / 30.0) : (double)(ts - st) * av_q2d(fmt->streams[vs]->time_base);
+        if (f.t < 0) f.t = 0;
+        f.px.resize((size_t)f.w * f.h);
+        uint8_t* dst[4] = {(uint8_t*)f.px.data(), nullptr, nullptr, nullptr};
+        int dst_stride[4] = {f.w * 4, 0, 0, 0};
+        sws_scale(sws, fr->data, fr->linesize, 0, fr->height, dst, dst_stride);
+        for (auto& c : f.px) c |= 0xFF000000u;
+        w = f.w; h = f.h;
+        av_frame_unref(fr);
+        return true;
+    }
+};
+
+// звуковая дорожка целиком: int16, первые два канала (или один), своя частота
+bool decode_audio(const std::wstring& path, std::vector<int16_t>& out, int& out_ch, int& rate) {
+    const std::string p = utf8_path(path);
+    AVFormatContext* fmt = nullptr;
+    if (avformat_open_input(&fmt, p.c_str(), nullptr, nullptr) < 0) return false;
+    bool ok = false;
+    AVCodecContext* dec = nullptr;
+    SwrContext* swr = nullptr;
+    AVFrame* fr = av_frame_alloc();
+    AVPacket* pkt = av_packet_alloc();
+    const AVCodec* codec = nullptr;
+    int as = -1;
+    if (avformat_find_stream_info(fmt, nullptr) >= 0)
+        as = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, &codec, 0);
+    if (as >= 0 && codec && fr && pkt && (dec = avcodec_alloc_context3(codec)) &&
+        avcodec_parameters_to_context(dec, fmt->streams[as]->codecpar) >= 0 && avcodec_open2(dec, codec, nullptr) >= 0) {
+        const int ch = codec_channels(dec);
+        rate = dec->sample_rate;
+        if (ch >= 1 && ch <= 8 && rate >= 4000) {
+            out_ch = ch >= 2 ? 2 : 1;
+#if DC_AV_CH_LAYOUT
+            AVChannelLayout ol;
+            av_channel_layout_default(&ol, out_ch);
+            if (swr_alloc_set_opts2(&swr, &ol, AV_SAMPLE_FMT_S16, rate, &dec->ch_layout, dec->sample_fmt, rate, 0, nullptr) < 0)
+                swr = nullptr;
+#else
+            const int64_t il = dec->channel_layout ? (int64_t)dec->channel_layout : av_get_default_channel_layout(ch);
+            swr = swr_alloc_set_opts(nullptr, av_get_default_channel_layout(out_ch), AV_SAMPLE_FMT_S16, rate, il,
+                                     dec->sample_fmt, rate, 0, nullptr);
+#endif
+            if (swr && swr_init(swr) >= 0) {
+                bool flushing = false;
+                for (;;) {
+                    const int r = avcodec_receive_frame(dec, fr);
+                    if (r == 0) {
+                        const int cap = swr_get_out_samples(swr, fr->nb_samples);
+                        const size_t o = out.size();
+                        out.resize(o + (size_t)cap * out_ch);
+                        uint8_t* dst = (uint8_t*)&out[o];
+                        const int got = swr_convert(swr, &dst, cap, (const uint8_t**)fr->extended_data, fr->nb_samples);
+                        out.resize(o + (size_t)(got > 0 ? got : 0) * out_ch);
+                        av_frame_unref(fr);
+                        continue;
+                    }
+                    if (r != AVERROR(EAGAIN) || flushing) break;
+                    if (av_read_frame(fmt, pkt) < 0) { flushing = true; avcodec_send_packet(dec, nullptr); continue; }
+                    if (pkt->stream_index == as) avcodec_send_packet(dec, pkt);
+                    av_packet_unref(pkt);
+                }
+                ok = !out.empty();
+            }
+        }
+    }
+    if (swr) swr_free(&swr);
+    if (pkt) av_packet_free(&pkt);
+    if (fr) av_frame_free(&fr);
+    if (dec) avcodec_free_context(&dec);
+    avformat_close_input(&fmt);
+    return ok;
+}
+#endif
+
+std::mutex g_mu;
+std::condition_variable g_cv;
+std::thread g_thr;
+int g_req_id = -1;               // ролик, который сейчас читает игра (−1 — нет)
+std::wstring g_req_path;
+double g_req_t = 0;
+ULONGLONG g_req_tick = 0;        // когда пришёл последний видеосектор
+Frame g_show;                    // кадр для показа (под g_mu)
+uint64_t g_show_serial = 0;
+
 bool g_stop = false;             // выход из игры: поток заканчивает работу (под g_mu)
 
 void worker() {
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    mf_start();
+    ComScope com;
+    movie_backend_start();
     Reader rd;
     int cur_id = -1;
     Frame have, ahead;          // показанный и следующий кадр
@@ -199,7 +387,6 @@ void worker() {
         }
     }
     rd.close();
-    CoUninitialize();
 }
 
 // 18.10.2026 (разбор кода): поток роликов жил до конца процесса, и при выходе из игры после MP4-мода деструктор
@@ -239,6 +426,17 @@ extern "C" const uint32_t* dc_movie_frame(int* w, int* h) {
 // звуковая дорожка MP4 целиком: стерео/моно int16 на своей частоте (*ch, *rate); 0 — дорожки нет или не читается
 extern "C" int dc_movie_audio(const wchar_t* path, int16_t** pcm, uint32_t* frames, int* ch, int* rate) {
     *pcm = nullptr; *frames = 0; *ch = 0; *rate = 0;
+#ifndef _WIN32
+    std::vector<int16_t> all;
+    int oc = 0, sr = 0;
+    if (!path || !decode_audio(path, all, oc, sr)) return 0;
+    const uint32_t fr = (uint32_t)(all.size() / (size_t)oc);
+    int16_t* out = (int16_t*)malloc(all.size() * 2);
+    if (!out || !fr) { free(out); return 0; }
+    memcpy(out, all.data(), all.size() * 2);
+    *pcm = out; *frames = fr; *ch = oc; *rate = sr;
+    return 1;
+#else
     int ok = 0;
     std::thread th([&] {                                     // свой поток: COM-апартамент вызывающего не трогаем
         struct Com { Com() { CoInitializeEx(nullptr, COINIT_MULTITHREADED); } ~Com() { CoUninitialize(); } } com;
@@ -296,4 +494,5 @@ extern "C" int dc_movie_audio(const wchar_t* path, int16_t** pcm, uint32_t* fram
     });
     th.join();
     return ok;
+#endif
 }

@@ -56,6 +56,14 @@
 #  include <fcntl.h>
 #  include <io.h>
 #endif
+/* 17.11.2026: Linux - the same Win32 calls over POSIX ('\' is a separator, names are found case-insensitively); dc_fopen
+ * is fopen with those path rules (plain fopen on Windows) */
+#include "dc_platform.h"
+#ifndef _WIN32
+#  include <dirent.h>
+#  include <pthread.h>
+#  include <sys/stat.h>
+#endif
 
 #ifndef MAX_PATH
 #  define MAX_PATH 260
@@ -111,46 +119,37 @@ static FILE *open_shared(const char *p)
     if (!fp) _close(fd);
     return fp;
 #else
-    return fopen(p, "rb");
+    return dc_fopen(p, "rb");   /* POSIX: an open file never blocks writers or a rename over it */
 #endif
 }
 
 /* 06.10.2026: size and time of a file as its folder lists it (0 - no such file): what "changed" means on the fly */
-#ifdef _WIN32
 static uint64_t fd_stamp(const WIN32_FIND_DATAA *fd)
 {
     const uint64_t t = (uint64_t)fd->ftLastWriteTime.dwHighDateTime << 32 | fd->ftLastWriteTime.dwLowDateTime;
     const uint64_t s = (uint64_t)fd->nFileSizeHigh << 32 | fd->nFileSizeLow;
     return (t ^ (s * 0x9E3779B97F4A7C15ull)) | 1u;
 }
-#endif
 static uint64_t file_stamp(const char *p)
 {
-#ifdef _WIN32
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA(p, &fd);
     if (h == INVALID_HANDLE_VALUE) return 0;
     FindClose(h);
     return (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 0 : fd_stamp(&fd);
-#else
-    FILE *f = fopen(p, "rb");
-    if (!f) return 0;
-    fclose(f);
-    return 1;
-#endif
 }
 
 static void root_dir(void)
 {
     if (s_root[0]) return;
-#ifdef _WIN32
     DWORD n = GetModuleFileNameA(NULL, s_root, (DWORD)sizeof s_root);
     if (n == 0 || n >= sizeof s_root) { strcpy(s_root, ".\\"); return; }
+#ifdef _WIN32
     char *sl = strrchr(s_root, '\\');
-    if (sl) sl[1] = 0; else strcpy(s_root, ".\\");
 #else
-    strcpy(s_root, "./");
+    char *sl = dc_last_sep(s_root);   /* "/home/.../DinoCrisisME" - the rest of the code appends "mods\\..." */
 #endif
+    if (sl) sl[1] = 0; else strcpy(s_root, ".\\");
 }
 
 /* 05.10.2026 (игрок: «посмотри для примера на структуру папок в PC-версии… может поменяешь где-то нейминг, иерархию»,
@@ -267,7 +266,6 @@ static void mods_src(char *out, size_t cap)
  * одного включённого пакета - вида нет, всё как было. Отчёт - data\mods_view\view.txt (слои, чей файл взят). DC_MODS_PACKS=0 -
  * пакеты не читаются.
  * ====================================================================================================================== */
-#ifdef _WIN32
 #define VP 1024                                   /* WCHAR в пути вида и пакетов */
 typedef struct { WCHAR *rel, *abs; int layer, kind; uint64_t size, mt; } VFile;
 enum { VK_PLAIN = 0, VK_LIST = 1, VK_EXE = 2 };
@@ -667,12 +665,6 @@ static int view_prepare(void)
             (unsigned)(GetTickCount64() - t0));
     return 2;                                      /* пересобран */
 }
-#else
-static int  s_view_on;
-static char s_view_dir[MAX_PATH];
-static int  s_nvexe;
-static int view_prepare(void) { return 0; }
-#endif
 
 /* папка, которую читают загрузчики: mods, а с включёнными пакетами (10.10) - их вид data\mods_view */
 static void mods_base(char *out, size_t cap)
@@ -699,7 +691,6 @@ static const char *const cats[] = { "rooms", "doors", "characters", "items", "sc
 /* файлы в подпапках mods, которых нет среди файлов игры (наши комнаты и коллизию разбирает dc_pak.c) — в журнал */
 static void report_strangers(const char *base)
 {
-#ifdef _WIN32
     for (size_t c = 0; c < sizeof cats / sizeof cats[0]; c++) {
         char pat[MAX_PATH];
         snprintf(pat, sizeof pat, "%s%s\\*", base, cats[c]);
@@ -722,9 +713,6 @@ static void report_strangers(const char *base)
         } while (FindNextFileA(h, &fd));
         FindClose(h);
     }
-#else
-    (void)base;
-#endif
 }
 
 static void audio_movie_load(const char *base);   /* звуки WAV и ролики MP4 — ниже */
@@ -858,7 +846,6 @@ static void big_table_patch(uint8_t *body)
 static int slus_apply_fp(uint8_t *body, FILE *fp);
 static int slus_apply(uint8_t *body)
 {
-#ifdef _WIN32
     if (s_view_on && s_nvexe > 0) {               /* 10.10: пакеты - правки каждого слоя по порядку (позже - главнее) */
         int ch = 0;
         for (int k = 0; k < s_nvexe; k++) {
@@ -867,11 +854,10 @@ static int slus_apply(uint8_t *body)
         }
         return ch;
     }
-#endif
     char base[MAX_PATH], p[MAX_PATH + 64];
     mods_base(base, sizeof base);
     snprintf(p, sizeof p, "%sother\\SLUS_009.22", base);
-    FILE *fp = fopen(p, "rb");
+    FILE *fp = dc_fopen(p, "rb");
     if (!fp) return 0;
     return slus_apply_fp(body, fp);
 }
@@ -1087,7 +1073,7 @@ static uint16_t le16m(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8));
 /* WAV → int16 с чередованием каналов; 8/16/24 бит PCM и 32 бит float; петля из smpl */
 static int wav_load(const char *path, int16_t **out, uint32_t *frames, int *ch, int *rate, int32_t *loop)
 {
-    FILE *fp = fopen(path, "rb");
+    FILE *fp = dc_fopen(path, "rb");
     if (!fp) return 0;
     fseek(fp, 0, SEEK_END);
     long n = ftell(fp);
@@ -1376,10 +1362,8 @@ static int xa_scan_file(DiscFile *f, const char *dir)
  * (dc_movie.cpp: (кадр − первый) / 30 с — как выгрузка), показ рисует его кадр. Звук MP4 — на канал XA ролика (первый канал
  * звука в файле), как речь из WAV. DC_MODS_MOVIE=0 — без роликов из mods.
  * ====================================================================================================================== */
-#ifdef _WIN32
 extern int  dc_movie_audio(const wchar_t *path, int16_t **pcm, uint32_t *frames, int *ch, int *rate);
 extern void dc_movie_at(int id, const wchar_t *path, double t);
-#endif
 typedef struct { DiscFile *f; wchar_t path[MAX_PATH]; uint32_t first; } DcMovie;
 static DcMovie *s_mov;
 static int      s_nmov;
@@ -1389,7 +1373,6 @@ static void movie_init(const char *base)
 {
     free(s_mov); s_mov = NULL; s_nmov = 0;
     s_mov_gen++;
-#ifdef _WIN32
     if (!env_on("DC_MODS", 1) || !env_on("DC_MODS_MOVIE", 1)) return;
     for (int i = 0; i < s_n; i++) {
         DiscFile *f = &s_f[i];
@@ -1457,15 +1440,11 @@ static void movie_init(const char *base)
         fprintf(stderr, "mods: movie\\%s\\%s.mp4 - instead of %s (first frame %u, sound %s)\n", stem, stem, f->name, first,
                 s_nxa > nxa_before ? "from the MP4" : "the game's");
     }
-#else
-    (void)base;
-#endif
 }
 
 /* сектор данных прочитан приводом (cdrom.c): видеосектор подменённого ролика — время его кадра в dc_movie.cpp */
 void dc_mods_movie_sector(uint32_t lba, const uint8_t *u)
 {
-#ifdef _WIN32
     if (!s_nmov || !u || u[0] != 0x60 || u[1] != 0x01 || u[2] != 0x01 || u[3] != 0x80) return;
     for (int i = 0; i < s_nmov; i++) {
         const DcMovie *m = &s_mov[i];
@@ -1474,16 +1453,12 @@ void dc_mods_movie_sector(uint32_t lba, const uint8_t *u)
         dc_movie_at(i + s_mov_gen * 4096, m->path, fr >= m->first ? (double)(fr - m->first) / 30.0 : 0.0);
         return;
     }
-#else
-    (void)lba; (void)u;
-#endif
 }
 
 /* таблицы звуков пусты (audio_movie_load отдала прежние в список keep) */
 static void audio_init(const char *base)
 {
     if (!env_on("DC_MODS", 1) || !env_on("DC_MODS_AUDIO", 1)) return;
-#ifdef _WIN32
     static const char *const se_groups[] = {"sound\\se\\room", "sound\\se\\door", "sound\\se\\weapon", "sound\\se\\common", "sound\\bgm"};
     int nsmp = 0, nxa = 0, nsong = 0;
     for (size_t g = 0; g < sizeof se_groups / sizeof se_groups[0]; g++) {
@@ -1526,9 +1501,6 @@ static void audio_init(const char *base)
         FindClose(h);
     }
     if (nsmp || nxa || nsong) fprintf(stderr, "mods: sounds from WAV - %d samples, %d XA channels, %d songs\n", nsmp, nxa, nsong);
-#else
-    (void)base;
-#endif
 }
 
 /* звуки WAV и ролики MP4 (06.10.2026: и снова, при подхвате на лету): декодированное прежде — в список keep, таблицы — заново
@@ -1796,7 +1768,6 @@ void dc_mods_cooked(uint32_t lba, uint8_t *buf)
  * ====================================================================================================================== */
 enum { RL_FILES = 1, RL_EXE = 2, RL_MESH = 4, RL_TEX = 8, RL_SND = 16, RL_MOV = 32, RL_VIEW = 64 };
 #define RL_ALL (RL_FILES | RL_EXE | RL_MESH | RL_TEX | RL_SND | RL_MOV | RL_VIEW)
-#ifdef _WIN32
 static volatile LONG     s_live_mask;          /* изменения ждут простоя привода */
 static volatile LONGLONG s_data_tick;          /* когда привод последний раз читал файл данных (не XA / STR) */
 static int               s_live;               /* сторож запущен */
@@ -1854,6 +1825,7 @@ static LONG live_bits(const WCHAR *n, int len)
     return (c2 >= 0 ? c2 : 0) | RL_VIEW;
 }
 
+#ifdef _WIN32
 static DWORD WINAPI live_thread(LPVOID unused)
 {
     (void)unused;
@@ -1905,11 +1877,144 @@ static DWORD WINAPI live_thread(LPVOID unused)
     CloseHandle(dir);
     return 0;
 }
+
+#else
+/* 17.11.2026: Linux - no ReadDirectoryChangesW. The watcher takes a fingerprint (names, sizes, times) of every entry of the
+ * first two levels of mods (a deeper folder counts as one entry: its whole subtree) once a second; what differs goes
+ * through live_bits like a Windows notice, and 0.7 s without new changes hands the mask over, as above. */
+typedef struct { char rel[320]; uint64_t fp; } LiveFp;
+
+static uint64_t live_fnv(uint64_t h, const void *p, size_t n)
+{
+    const uint8_t *b = (const uint8_t *)p;
+    for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
+    return h;
+}
+
+static uint64_t stat_fp(const struct stat *st)
+{
+    uint64_t v[3] = { (uint64_t)st->st_size, (uint64_t)st->st_mtime, (uint64_t)st->st_mode };
+    return live_fnv(0xCBF29CE484222325ull, v, sizeof v);
+}
+
+static uint64_t tree_fp(const char *dir, int depth)
+{
+    uint64_t h = 0xCBF29CE484222325ull;
+    DIR *d = opendir(dir);
+    if (!d) return h;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (de->d_name[0] == '.' && (!de->d_name[1] || (de->d_name[1] == '.' && !de->d_name[2]))) continue;
+        char p[MAX_PATH];
+        snprintf(p, sizeof p, "%s/%s", dir, de->d_name);
+        struct stat st;
+        if (stat(p, &st) != 0) continue;
+        const uint64_t e = S_ISDIR(st.st_mode) && depth < 16 ? tree_fp(p, depth + 1) : stat_fp(&st);
+        h ^= live_fnv(e, de->d_name, strlen(de->d_name));   /* xor: the order readdir gives does not matter */
+    }
+    closedir(d);
+    return h;
+}
+
+static void fp_add(LiveFp **v, int *n, int *cap, const char *rel, uint64_t fp)
+{
+    if (*n == *cap) {
+        const int nc = *cap ? *cap * 2 : 256;
+        LiveFp *nv = (LiveFp *)realloc(*v, (size_t)nc * sizeof *nv);
+        if (!nv) return;
+        *v = nv; *cap = nc;
+    }
+    snprintf((*v)[*n].rel, sizeof (*v)[*n].rel, "%s", rel);
+    (*v)[*n].fp = fp;
+    (*n)++;
+}
+
+/* rel as live_bits wants it: "T" a file in mods, "T\\C" a file in a folder, "T\\C\\*" something inside folder C */
+static int live_snapshot(const char *root, LiveFp **out, int *cap)
+{
+    int n = 0;
+    DIR *d = opendir(root);
+    if (!d) return 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (de->d_name[0] == '.' && (!de->d_name[1] || (de->d_name[1] == '.' && !de->d_name[2]))) continue;
+        char p[MAX_PATH], rel[320];
+        snprintf(p, sizeof p, "%s/%s", root, de->d_name);
+        struct stat st;
+        if (stat(p, &st) != 0) continue;
+        if (!S_ISDIR(st.st_mode)) { fp_add(out, &n, cap, de->d_name, stat_fp(&st)); continue; }
+        DIR *d2 = opendir(p);
+        if (!d2) continue;
+        struct dirent *e2;
+        while ((e2 = readdir(d2)) != NULL) {
+            if (e2->d_name[0] == '.' && (!e2->d_name[1] || (e2->d_name[1] == '.' && !e2->d_name[2]))) continue;
+            char p2[MAX_PATH];
+            snprintf(p2, sizeof p2, "%s/%s", p, e2->d_name);
+            struct stat s2;
+            if (stat(p2, &s2) != 0) continue;
+            if (S_ISDIR(s2.st_mode)) {
+                snprintf(rel, sizeof rel, "%s\\%s\\*", de->d_name, e2->d_name);
+                fp_add(out, &n, cap, rel, tree_fp(p2, 0));
+            } else {
+                snprintf(rel, sizeof rel, "%s\\%s", de->d_name, e2->d_name);
+                fp_add(out, &n, cap, rel, stat_fp(&s2));
+            }
+        }
+        closedir(d2);
+    }
+    closedir(d);
+    return n;
+}
+
+static LONG live_rel_bits(const char *rel)
+{
+    WCHAR w[340];
+    const int n = MultiByteToWideChar(CP_UTF8, 0, rel, -1, w, 340);
+    return n > 1 ? live_bits(w, n - 1) : 0;
+}
+
+static LONG live_diff(const LiveFp *a, int na, const LiveFp *b, int nb)
+{
+    LONG bits = 0;
+    for (int i = 0; i < nb; i++) {                 /* new or changed */
+        int k = 0;
+        while (k < na && strcmp(a[k].rel, b[i].rel)) k++;
+        if (k == na || a[k].fp != b[i].fp) bits |= live_rel_bits(b[i].rel);
+    }
+    for (int k = 0; k < na; k++) {                 /* gone */
+        int i = 0;
+        while (i < nb && strcmp(a[k].rel, b[i].rel)) i++;
+        if (i == nb) bits |= live_rel_bits(a[k].rel);
+    }
+    return bits;
+}
+
+static void *live_thread(void *unused)
+{
+    (void)unused;
+    char root[MAX_PATH];
+    dc_posix_path(s_live_base, root, sizeof root);
+    LiveFp *was = NULL, *now = NULL;
+    int cw = 0, cn = 0;
+    int nw = live_snapshot(root, &was, &cw);
+    LONG pend = 0;
+    ULONGLONG last = 0;
+    for (;;) {
+        Sleep(pend ? 250 : 1000);
+        const int nn = live_snapshot(root, &now, &cn);
+        const LONG b = live_diff(was, nw, now, nn);
+        LiveFp *t = was; was = now; now = t;
+        int tc = cw; cw = cn; cn = tc;
+        nw = nn;
+        if (b) { pend |= b; last = GetTickCount64(); continue; }
+        if (pend && GetTickCount64() - last >= 700) { InterlockedOr(&s_live_mask, pend); pend = 0; }
+    }
+    return NULL;
+}
 #endif
 
 static void live_start(const char *base)
 {
-#ifdef _WIN32
     if (s_live || !env_on("DC_MODS_LIVE", 1)) return;
     snprintf(s_live_base, sizeof s_live_base, "%s", base);
     const size_t n = strlen(s_live_base);
@@ -1919,38 +2024,33 @@ static void live_start(const char *base)
         fprintf(stderr, "mods: no folder %s - nothing to watch\n", s_live_base);
         return;
     }
+#ifdef _WIN32
     HANDLE t = CreateThread(NULL, 0, live_thread, NULL, 0, NULL);
     if (!t) return;
     SetThreadPriority(t, THREAD_PRIORITY_BELOW_NORMAL);
     CloseHandle(t);
+#else
+    pthread_t t;
+    if (pthread_create(&t, NULL, live_thread, NULL) != 0) return;
+    pthread_detach(t);
+#endif
     s_live = 1;
     fprintf(stderr, "mods: changes in the mods folder are picked up while the game runs (DC_MODS_LIVE=0 - off)\n");
-#else
-    (void)base;
-#endif
 }
 
 /* сектор прочитан приводом (cdrom.c): файл данных — подхват подождёт, пока игра не дочитает его (поток XA / STR — не ждёт) */
 void dc_mods_note_read(uint32_t lba)
 {
-#ifdef _WIN32
     if (!s_live) return;
     const DiscFile *f = find(dc_mods_virtual_home(lba));
     if (f && f->stream) return;
     s_data_tick = (LONGLONG)GetTickCount64();
-#else
-    (void)lba;
-#endif
 }
 
 int dc_mods_changed(void)
 {
-#ifdef _WIN32
     if (!s_live_mask) return 0;                    /* обычный случай: одно чтение */
     return GetTickCount64() - (ULONGLONG)s_data_tick >= 500u;
-#else
-    return 0;
-#endif
 }
 
 /* файлы игры, чей мод изменился (размер или время), появился или исчез, открываются заново; остальные не трогаются.
@@ -1958,7 +2058,6 @@ int dc_mods_changed(void)
 static int files_rescan(const char *base, int *big)
 {
     *big = 0;
-#ifdef _WIN32
     typedef struct { const char *cat; char name[32]; uint64_t stamp; } Seen;
     Seen *sv = NULL;
     int ns = 0, cs = 0;
@@ -2003,15 +2102,10 @@ static int files_rescan(const char *base, int *big)
     s_active = 0;
     for (int i = 0; i < s_n; i++) if (s_f[i].mode != M_NONE) s_active++;
     return changed;
-#else
-    (void)base;
-    return 0;
-#endif
 }
 
 void dc_mods_reload(void)
 {
-#ifdef _WIN32
     LONG m = InterlockedExchange(&s_live_mask, 0);
     if (!m) return;
     const ULONGLONG t0 = GetTickCount64();
@@ -2036,7 +2130,6 @@ void dc_mods_reload(void)
             (m & RL_FILES) ? " files" : "", (m & RL_EXE) ? " program" : "", (m & RL_MESH) ? " meshes" : "",
             (m & RL_TEX) ? " textures" : "", (m & RL_SND) ? " sounds" : "", (m & RL_MOV) ? " movies" : "", nf,
             (unsigned)(GetTickCount64() - t0));
-#endif
 }
 
 /* ======================================================================================================================
@@ -2233,7 +2326,6 @@ static void fks_bank_read(int k)
         const char *mods = dc_mods_dir();
         const int st = fks_bank_stage(bank);
         if (mods && st) {
-#ifdef _WIN32
             char pat[MAX_PATH];
             snprintf(pat, sizeof pat, "%srooms\\%s\\kinds\\*", mods, dc_room_name(cur));
             WIN32_FIND_DATAA fd;
@@ -2247,7 +2339,6 @@ static void fks_bank_read(int k)
                 } while (B->ridx0 < 0 && FindNextFileA(h, &fd));
                 FindClose(h);
             }
-#endif
         }
         if (B->ridx0 < 0) fprintf(stderr, "fksound: bank %d (stage %d) - no note and no kinds folder, its sounds stay the room's\n", k, st);
     }

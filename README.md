@@ -58,6 +58,8 @@ Your own Dino Crisis disc image (Track 1 `.bin` or `.cue`), one of:
 
 Windows 10 or 11, 64-bit, a graphics card with Vulkan.
 
+Linux: through Wine/Proton, or a native build (`installer/dcme_install_linux.py`) - see [linux/README.md](linux/README.md).
+
 ## Known issues
 
 - Integrated graphics. At the first start the game turns its graphics down once: Shadows off, Ambient Occlusion Low, Anti-Aliasing SMAA. You can change them in Modern Options > Graphics.

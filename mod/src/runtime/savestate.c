@@ -18,6 +18,9 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <io.h>
+#else
+#include <unistd.h>
+#include <sys/stat.h>
 #endif
 
 extern int  psx_get_in_exception(void);
@@ -124,20 +127,29 @@ void savestate_slot_set(int n) {
  * файлу на слот, как раньше: запись идёт во временный файл и подменяет старый, испорченная запись не задевает другие слоты
  * (в одном общем файле задела бы все). Прежние data\quicksave*.dcss и их .story переезжают туда при первом обращении; уже
  * лежащий в папке файл не перезаписывается. */
+#ifdef _WIN32
 #include <direct.h>
 #include <io.h>
+#define DC_SS_MKDIR(path) _mkdir(path)
+#define DC_SS_ACCESS(path) _access(path, 0)
+#define DC_SS_SEP "\\"
+#else
+#define DC_SS_MKDIR(path) mkdir(path, 0755)
+#define DC_SS_ACCESS(path) access(path, F_OK)
+#define DC_SS_SEP "/"
+#endif
 static void ss_dir_ready(void) {
     static int done = 0;
     if (done) return;
     done = 1;
-    _mkdir("quicksaves");
+    DC_SS_MKDIR("quicksaves");
     for (int s = 0; s < 100; s++) {
         char a[48], b[80];
         for (int st = 0; st < 2; st++) {
             if (s == 0) snprintf(a, sizeof(a), st ? "quicksave.dcss.story" : "quicksave.dcss");
             else        snprintf(a, sizeof(a), st ? "quicksave%d.dcss.story" : "quicksave%d.dcss", s);
-            snprintf(b, sizeof(b), "quicksaves\\%s", a);
-            if (_access(a, 0) == 0 && _access(b, 0) != 0) rename(a, b);
+            snprintf(b, sizeof(b), "quicksaves%s%s", DC_SS_SEP, a);
+            if (DC_SS_ACCESS(a) == 0 && DC_SS_ACCESS(b) != 0) rename(a, b);
         }
     }
 }
@@ -148,8 +160,8 @@ const char* savestate_path(void) {
     if (e && e[0]) { snprintf(path, sizeof(path), "%s", e); return path; }
 #ifdef DCME_RELEASE
     ss_dir_ready();
-    if (savestate_slot() == 0) snprintf(path, sizeof(path), "quicksaves\\quicksave.dcss");
-    else                       snprintf(path, sizeof(path), "quicksaves\\quicksave%d.dcss", savestate_slot());
+    if (savestate_slot() == 0) snprintf(path, sizeof(path), "quicksaves%squicksave.dcss", DC_SS_SEP);
+    else                       snprintf(path, sizeof(path), "quicksaves%squicksave%d.dcss", DC_SS_SEP, savestate_slot());
 #else
     if (savestate_slot() == 0) snprintf(path, sizeof(path), "quicksave.dcss");
     else                       snprintf(path, sizeof(path), "quicksave%d.dcss", savestate_slot());
