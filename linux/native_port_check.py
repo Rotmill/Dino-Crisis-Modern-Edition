@@ -39,8 +39,8 @@ def main() -> int:
     )
     require(
         "mod/src/runtime/dc_pak.c",
-        r'"%s/%s/%s"',
-        "native mod paths are not POSIX paths",
+        r'strcat\(exe, "mods/"\)',
+        "native mod paths must start from mods/ next to the executable",
     )
     require(
         "mod/src/runtime/savestate.c",
@@ -63,6 +63,10 @@ def main() -> int:
         r"pkg_check_modules\(DCME_FFMPEG",
         "FFmpeg (movies from mods) is not linked on Linux",
     )
+    require("mod/src/runtime/dc_pak.c", r"dc_exe_dir\(dir, sizeof dir\)",
+            "dcme_data.pak must be found next to the executable (the game works in data/)")
+    require("installer/dcme_install_linux.py", r"problems = verify_layout\(game_dir\)",
+            "the Linux setup must check the finished game folder")
     require("mod/src/runtime/dc_movie.cpp", r"avformat_open_input", "dc_movie.cpp has no FFmpeg decoder")
     require("mod/src/runtime/dc_mods.c", r"live_snapshot", "the mods watcher has no POSIX twin")
     require("mod/src/runtime/dc_boot.c", r'#ifdef _WIN32\s*\n\s*FILE \*r = freopen\("NUL"',

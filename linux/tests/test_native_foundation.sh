@@ -26,9 +26,34 @@ cc -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -pthread \
   "$ROOT/mod/src/runtime/dc_pak.c" \
   "$ROOT/mod/src/runtime/dc_win32_posix.c" \
   "$ROOT/linux/tests/test_native_pack.c" \
+  $([ "$(uname)" = Darwin ] && echo -Wl,-U,_dc_mods_dir) \
   -o "$TMP/test-native-pack"
 
 DCME_DATA_PAK="$TMP/dcme_data.pak" "$TMP/test-native-pack"
+
+# 18.11.2026 regression (Steam Deck: "the own kernel needs exe in game.toml"): the installed layout - the pack next to
+# the executable, the game working in data/ - must find the pack without DCME_DATA_PAK.
+mkdir -p "$TMP/game/data" "$TMP/stage"
+printf '[game]\nname = "t"\nexe = "SLUS_009.22"\n' > "$TMP/stage/game.toml"
+python3 - "$TMP/stage" "$TMP/game/dcme_data.pak" <<'PY'
+import os, struct, sys
+stage, out = sys.argv[1], sys.argv[2]
+names = sorted(os.listdir(stage)); blobs = [open(os.path.join(stage, n), 'rb').read() for n in names]
+head = 12 + sum(2 + len(n.encode()) + 1 + 8 for n in names)
+idx, body, off = b"", b"", head
+for n, b in zip(names, blobs):
+    idx += struct.pack("<H", len(n.encode())) + n.encode() + b"\0" + struct.pack("<II", off, len(b))
+    body += b + b"\0"; off += len(b) + 1
+open(out, "wb").write(b"DCMEPAK1" + struct.pack("<I", len(names)) + idx + body)
+PY
+cp "$TMP/test-native-pack" "$TMP/game/"
+(cd "$TMP/game/data" && env -u DCME_DATA_PAK "$TMP/game/test-native-pack" game)
+mkdir -p "$TMP/nopak/data"
+cp "$TMP/test-native-pack" "$TMP/nopak/"
+(cd "$TMP/nopak/data" && env -u DCME_DATA_PAK "$TMP/nopak/test-native-pack" none 2> "$TMP/nopak.err")
+grep -q "dcme_data.pak not found" "$TMP/nopak.err"
+
+python3 -I "$ROOT/linux/tests/test_linux_installer.py"
 
 cc -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -pthread \
   -I"$ROOT/mod/src/include" \

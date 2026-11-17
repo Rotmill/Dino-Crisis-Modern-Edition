@@ -76,6 +76,27 @@ release), else GCC. The game folder holds `DinoCrisisME`, `dcme_data.pak` (PE re
 `data/`, `mods/`, and the launcher `DinoCrisisME.sh`, which raises the stack limit to the 64 MB the Windows build links
 and writes `DinoCrisisME_log.txt`. A menu entry goes to `~/.local/share/applications/dinocrisis-me.desktop`.
 
+### Steam Deck / SteamOS
+
+SteamOS keeps its root filesystem read-only, so nothing is installed there: build and run inside a distrobox, whose
+home folder is the Deck's own.
+
+```sh
+distrobox create --name dcme --image archlinux:latest
+distrobox enter dcme
+sudo pacman -Syu --needed base-devel clang cmake ninja pkgconf git python sdl2 vulkan-icd-loader vulkan-headers \
+  vulkan-radeon libpng ffmpeg
+python3 installer/dcme_install_linux.py -DiscPath "$HOME/Games/iso/<Track 1>.bin" -InstallPath "$HOME/Games/DinoCrisisME"
+```
+
+Inside a distrobox the setup also writes `DinoCrisisME-host.sh`, which enters the container and starts the game; the
+menu entry uses it, and it is the file to add to Steam as a non-Steam game for Game Mode.
+
+At the end setup checks the finished folder (`verify_layout`): the program, `dcme_data.pak` next to it with
+`game.toml` (whose `exe` must be in `data/` and whose `disc` must exist), `dc_user.cfg` and `input.ini`. The game works
+in `data/`; `dc_pak.c` looks for the pack next to the executable first (`DCME_DATA_PAK` overrides it), and says so on
+stderr when there is none.
+
 ### How the port is put together
 
 - `mod/src/include/dc_win32_posix.h` + `mod/src/runtime/dc_win32_posix.c`: the Win32 subset the mod runtime uses

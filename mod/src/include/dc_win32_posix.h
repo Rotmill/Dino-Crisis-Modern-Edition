@@ -119,6 +119,9 @@ BOOL  MoveFileExW(const wchar_t *from, const wchar_t *to, DWORD flags);
 /* The running executable with '/' separators (readlink /proc/self/exe; _NSGetExecutablePath on macOS). */
 DWORD GetModuleFileNameA(void *module, char *out, DWORD cap);
 DWORD GetModuleFileNameW(void *module, wchar_t *out, DWORD cap);
+/* the folder of the running executable with a trailing '/', 0 when unknown. The game works in data/ (dc_boot.c), so
+ * anything that lies next to the executable (dcme_data.pak, mods/) is found from here, not from the working directory. */
+int dc_exe_dir(char *out, size_t cap);
 
 /* UTF-8 <-> UTF-32 with the Win32 contract: len -1 includes the terminator, cap 0 returns the needed size. */
 int MultiByteToWideChar(UINT cp, DWORD flags, const char *src, int len, wchar_t *dst, int cap);

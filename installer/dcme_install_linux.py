@@ -27,7 +27,9 @@ Steps:
   13  the menu entry (~/.local/share/applications)
 """
 import os
+import re
 import shutil
+import struct
 import subprocess
 import sys
 
@@ -190,6 +192,24 @@ def step_build_runtime(tools, fw, proj):
     return exe
 
 
+def distrobox_name():
+    """The distrobox this setup runs in (SteamOS: the root filesystem is read-only, so the build tools live in a
+    container), '' outside one. The game needs the container's libraries (FFmpeg, SDL2), so it is started through it."""
+    name = os.environ.get('CONTAINER_ID', '')
+    if name and (os.path.exists('/run/.containerenv') or os.path.exists('/.dockerenv') or os.environ.get('DISTROBOX_ENTER_PATH')):
+        return name
+    return ''
+
+
+HOST_LAUNCHER = r'''#!/usr/bin/env bash
+# Dino Crisis ME from the host (SteamOS Game Mode, the desktop menu): the game was built in the distrobox "%s" and
+# runs inside it, with its libraries. Nothing is installed on the read-only system partition.
+here=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)
+if [ -n "${CONTAINER_ID:-}" ]; then exec "$here/DinoCrisisME.sh" "$@"; fi
+exec distrobox enter %s -- "$here/DinoCrisisME.sh" "$@"
+'''
+
+
 def step_layout(game_dir, exe, proj):
     W.step_layout(game_dir, exe, None, proj)          # the folder as on Windows: data/, mods/, licences, old versions
     os.chmod(os.path.join(game_dir, 'DinoCrisisME'), 0o755)
@@ -203,6 +223,75 @@ def step_layout(game_dir, exe, proj):
     if os.path.isfile(icon_src):
         W.copy_file(icon_src, os.path.join(game_dir, 'DinoCrisisME.png'))
     write_log(L('launcher:', 'запуск:') + ' ' + launcher, 'ok')
+    box = distrobox_name()
+    if box:
+        host = os.path.join(game_dir, 'DinoCrisisME-host.sh')
+        with open(host, 'w', encoding='utf-8', newline='\n') as f:
+            f.write(HOST_LAUNCHER % (box, box))
+        os.chmod(host, 0o755)
+        write_log(L('distrobox "%s": to start from SteamOS (Game Mode, menu): %s' % (box, host),
+                    'distrobox "%s": запуск из SteamOS (игровой режим, меню): %s' % (box, host)), 'ok')
+    problems = verify_layout(game_dir)
+    if problems:
+        raise InstallError(L('The game folder is incomplete: ', 'Папка игры неполная: ') + '; '.join(problems))
+    write_log(L('checked: program, data pack with game.toml, game executable, disc image',
+                'проверено: программа, пакет данных с game.toml, исполняемый файл игры, образ'), 'ok')
+
+
+def read_pak(path):
+    """{name: bytes} of a dcme_data.pak (mod/tools/pack_data.py format); InstallError when it is not one."""
+    with open(path, 'rb') as f:
+        data = f.read()
+    if len(data) < 12 or data[:8] != b'DCMEPAK1':
+        raise InstallError(L('%s is not a data pack' % path, '%s - не пакет данных' % path))
+    count = struct.unpack_from('<I', data, 8)[0]
+    at, out = 12, {}
+    for _ in range(count):
+        nl = struct.unpack_from('<H', data, at)[0]
+        name = data[at + 2:at + 2 + nl].decode('utf-8')
+        off, size = struct.unpack_from('<II', data, at + 2 + nl + 1)
+        out[name] = data[off:off + size]
+        at += 2 + nl + 1 + 8
+    return out
+
+
+def verify_layout(game_dir):
+    """18.11.2026 (Steam Deck: "the own kernel needs exe in game.toml"): what the game reads at start is checked here,
+    where setup can still say what is wrong. The game works in data/ and finds the pack next to its executable
+    (dc_pak.c); game.toml inside the pack names the game executable (relative to data/) and the disc image."""
+    problems = []
+    exe = os.path.join(game_dir, 'DinoCrisisME')
+    pak = os.path.join(game_dir, 'dcme_data.pak')
+    data = os.path.join(game_dir, 'data')
+    if not os.access(exe, os.X_OK):
+        problems.append(L('no executable %s' % exe, 'нет программы %s' % exe))
+    if not os.path.isfile(pak):
+        problems.append(L('no data pack next to the program: %s' % pak, 'нет пакета данных рядом с программой: %s' % pak))
+    else:
+        entries = read_pak(pak)
+        for need in ('game.toml', 'dc_env.cfg'):
+            if need not in entries:
+                problems.append(L('%s is not in %s' % (need, pak), '%s нет в %s' % (need, pak)))
+        toml = entries.get('game.toml', b'').decode('utf-8', 'replace')
+
+        def field(key):
+            m = re.search(r'^\s*%s\s*=\s*"([^"]*)"' % key, toml, re.M)
+            return m.group(1) if m else ''
+        exe_field, disc_field = field('exe'), field('disc')
+        if 'game.toml' in entries and not exe_field:
+            problems.append(L('game.toml in the pack has no exe', 'в game.toml пакета нет exe'))
+        if exe_field and not os.path.isfile(os.path.join(data, exe_field)):
+            problems.append(L('the game executable %s is not in %s' % (exe_field, data),
+                              'исполняемого файла игры %s нет в %s' % (exe_field, data)))
+        if 'game.toml' in entries and not disc_field:
+            problems.append(L('game.toml in the pack has no disc', 'в game.toml пакета нет disc'))
+        elif disc_field and not os.path.isfile(os.path.join(data, disc_field)):
+            problems.append(L('the disc image %s is not where game.toml points' % disc_field,
+                              'образа %s нет там, куда указывает game.toml' % disc_field))
+    for name in ('dc_user.cfg', 'input.ini'):
+        if not os.path.isfile(os.path.join(data, name)):
+            problems.append(L('no %s in %s' % (name, data), 'нет %s в %s' % (name, data)))
+    return problems
 
 
 def step_shortcut(game_dir):
@@ -218,9 +307,10 @@ def step_shortcut(game_dir):
         def q(p):                                     # the Exec quoting of the desktop entry spec
             return '"' + p.replace('\\', '\\\\').replace('"', '\\"').replace('`', '\\`').replace('$', '\\$') + '"'
         icon = os.path.join(game_dir, 'DinoCrisisME.png')
+        # inside a distrobox the menu of the host starts it: through the container (DinoCrisisME-host.sh)
+        start = 'DinoCrisisME-host.sh' if distrobox_name() else 'DinoCrisisME.sh'
         text = ('[Desktop Entry]\nType=Application\nName=Dino Crisis ME\nComment=Dino Crisis - Modern Edition\n'
-                'Exec=%s\nPath=%s\nTerminal=false\nCategories=Game;\n' % (q(os.path.join(game_dir, 'DinoCrisisME.sh')),
-                                                                          game_dir))
+                'Exec=%s\nPath=%s\nTerminal=false\nCategories=Game;\n' % (q(os.path.join(game_dir, start)), game_dir))
         if os.path.isfile(icon):
             text += 'Icon=%s\n' % icon
         with open(desk, 'w', encoding='utf-8', newline='\n') as f:
@@ -281,6 +371,9 @@ def main(argv=None):
             write_log(L('freed', 'освобождено') + ' ' + W.n0(W.round_half_up(before / 1048576)) + ' ' + L('MB', 'МБ'), 'ok')
         write_log('==== ' + L('Done', 'Готово') + ' ====', 'step')
         write_log(L('Run:', 'Запуск:') + ' ' + os.path.join(game_dir, 'DinoCrisisME.sh'), 'ok')
+        if distrobox_name():
+            write_log(L('From SteamOS / Steam (Add a Non-Steam Game):', 'Из SteamOS / Steam (добавить стороннюю игру):')
+                      + ' ' + os.path.join(game_dir, 'DinoCrisisME-host.sh'), 'ok')
         return 0
     except InstallError as e:
         write_log(str(e), 'err')

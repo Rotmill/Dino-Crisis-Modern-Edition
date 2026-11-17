@@ -36,6 +36,8 @@ static PakEntry *s_ent   = NULL;
 static int       s_count = -1;          /* -1: not read yet */
 #ifndef _WIN32
 static unsigned char *s_pack_data = NULL;
+/* dc_mods.c in the game; absent in the unit tests that link dc_pak.c alone */
+extern const char *dc_mods_dir(void) __attribute__((weak));
 #endif
 
 static uint32_t rd16(const unsigned char *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8); }
@@ -56,13 +58,38 @@ static void pak_open(void)
     const unsigned char *p = hg ? (const unsigned char *)LockResource(hg) : NULL;
     uint32_t n = rs ? (uint32_t)SizeofResource(NULL, rs) : 0;
 #else
-    const char *path = getenv("DCME_DATA_PAK");
+    /* 18.11.2026 (Steam Deck: "the own kernel needs exe in game.toml"): the pack lies NEXT TO THE EXECUTABLE, and by
+     * now the working directory is data/ (dc_boot.c) - a bare relative name missed it, and with no pack there was no
+     * built-in game.toml. Order: DCME_DATA_PAK, a relative DCME_DATA_PAK_PATH against the executable's folder, then
+     * against the working directory (a pack copied into data/ by hand). */
+    char tried[2][MAX_PATH + 256];
+    int ntried = 0;
+    FILE *fp = NULL;
+    const char *env = getenv("DCME_DATA_PAK");
+    if (env && *env) {
+        snprintf(tried[ntried++], sizeof tried[0], "%s", env);
+        fp = fopen(env, "rb");
+    } else {
 #ifdef DCME_DATA_PAK_PATH
-    if (!path || !*path) path = DCME_DATA_PAK_PATH;
+        const char *name = DCME_DATA_PAK_PATH;
+#else
+        const char *name = "dcme_data.pak";
 #endif
-    if (!path || !*path) path = "dcme_data.pak";
-    FILE *fp = fopen(path, "rb");
-    if (!fp) return;
+        char dir[MAX_PATH];
+        if (name[0] != '/' && dc_exe_dir(dir, sizeof dir)) {
+            snprintf(tried[ntried], sizeof tried[0], "%s%.255s", dir, name);
+            fp = fopen(tried[ntried++], "rb");
+        }
+        if (!fp) {
+            snprintf(tried[ntried++], sizeof tried[0], "%s", name);
+            fp = fopen(name, "rb");
+        }
+    }
+    if (!fp) {
+        fprintf(stderr, "pak: dcme_data.pak not found (tried %s%s%s) - the game data, settings and game.toml are missing\n",
+                tried[0], ntried > 1 ? ", " : "", ntried > 1 ? tried[1] : "");
+        return;
+    }
     long file_n = -1;
     if (fseek(fp, 0, SEEK_END) == 0) file_n = ftell(fp);
     if (file_n < 0 || (unsigned long)file_n > 0xffffffffUL || fseek(fp, 0, SEEK_SET) != 0) {
@@ -177,14 +204,28 @@ static int mods_path(const char *key, char *out, size_t cap)
         return k > 0 && (size_t)k < cap;
     }
 #else
+    /* 18.11.2026: as on Windows - the folder dc_mods.c reads (mods/ next to the executable, or the package view); with
+     * DC_MODS=0 or without dc_mods.c (tests) mods/ next to the executable. DCME_MODS_DIR overrides both. */
+    char exe[MAX_PATH];
     const char *base = getenv("DCME_MODS_DIR");
-    if (!base || !*base) base = "mods";
+    char sep = '/';
+    if (!base || !*base) {
+        base = dc_mods_dir ? dc_mods_dir() : NULL;
+        if (base) sep = '\\';                         /* dc_mods.c joins with '\\'; dc_fopen takes both */
+    }
+    if (!base || !*base) {
+        if (!dc_exe_dir(exe, sizeof exe) || strlen(exe) + 6 >= sizeof exe) return 0;
+        strcat(exe, "mods/");
+        base = exe;
+    }
+    const size_t bl = strlen(base);
+    const int has_sep = bl && (base[bl - 1] == '/' || base[bl - 1] == '\\');
     for (size_t i = 0; i < sizeof k_mod_dirs / sizeof k_mod_dirs[0]; i++) {
         size_t L = strlen(k_mod_dirs[i].pak);
         if (strncmp(key, k_mod_dirs[i].pak, L) != 0) continue;
         const char *rest = key + L;
         if (!*rest || strchr(rest, '/')) return 0;
-        int k = snprintf(out, cap, "%s/%s/%s", base, k_mod_dirs[i].mods, rest);
+        int k = snprintf(out, cap, "%s%s%s%c%s", base, has_sep ? "" : "/", k_mod_dirs[i].mods, sep, rest);
         return k > 0 && (size_t)k < cap;
     }
 #endif
@@ -196,7 +237,11 @@ static DcMemFile *mods_open(const char *path)
 {
     char key[512], mp[1024];
     if (!dc_pak_norm(path, key, sizeof key) || !mods_path(key, mp, sizeof mp)) return NULL;
+#ifdef _WIN32
     FILE *fp = fopen(mp, "rb");
+#else
+    FILE *fp = dc_fopen(mp, "rb");               /* '\\' from dc_mods.c, names in any case */
+#endif
     if (!fp) return NULL;
     DcMemFile *f = NULL;
     unsigned char *buf = NULL;

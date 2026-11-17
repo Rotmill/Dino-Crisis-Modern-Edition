@@ -390,6 +390,19 @@ DWORD GetModuleFileNameA(void *module, char *out, DWORD cap)
     return (DWORD)n;
 }
 
+int dc_exe_dir(char *out, size_t cap)
+{
+    char p[MAX_PATH];
+    const DWORD n = GetModuleFileNameA(NULL, p, sizeof p);
+    if (!out || !cap || n == 0 || n >= sizeof p) return 0;
+    char *sl = strrchr(p, '/');
+    if (!sl) return 0;
+    sl[1] = 0;
+    if (strlen(p) + 1 > cap) return 0;
+    memcpy(out, p, strlen(p) + 1);
+    return 1;
+}
+
 DWORD GetModuleFileNameW(void *module, wchar_t *out, DWORD cap)
 {
     char u[MAX_PATH];
