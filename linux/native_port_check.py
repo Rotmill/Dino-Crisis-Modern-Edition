@@ -72,6 +72,17 @@ def main() -> int:
     require("mod/src/runtime/dc_boot.c", r'#ifdef _WIN32\s*\n\s*FILE \*r = freopen\("NUL"',
             "stderr must not be sent to a file named NUL on Linux")
 
+    # The Windows release does not run CMake: it compiles the list recorded in mod/build/game.plan.json. A runtime source
+    # missing there links on Linux and fails only on Windows - every one must be listed, but the Linux-only files.
+    import json
+    plan = json.loads((ROOT / "mod/build/game.plan.json").read_text(encoding="utf-8"))
+    planned = {pathlib.PurePosixPath(st.get("src") or "").name for st in plan["steps"] if st.get("compile")}
+    linux_only = {"dc_win32_posix.c", "dc_png.cpp"}
+    unplanned = [p.name for p in sorted((ROOT / "mod/src/runtime").glob("*"))
+                 if p.suffix in {".c", ".cpp"} and p.name not in planned and p.name not in linux_only]
+    if unplanned:
+        raise AssertionError("mod/build/game.plan.json: not compiled on Windows: " + ", ".join(unplanned))
+
     # A Windows header is a blocker unless it sits inside a block that is only compiled on Windows. The scan follows
     # #if/#ifdef/#elif/#else/#endif nesting (enough for this code base, not a full preprocessor).
     win_header = re.compile(r"^\s*#\s*include\s*[<\"](?:windows|d3d11|dxgi[0-9_]*|wincodec|mfapi|mfidl|mfreadwrite"

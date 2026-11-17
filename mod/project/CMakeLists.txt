@@ -46,6 +46,8 @@ psxrecomp_add_runtime_target(DinoCrisisME
 # Cross-platform PNG decoding used by the native splash and texture-mod paths.
 # The installer copies mod/src/runtime and mod/src/include into this framework.
 target_sources(DinoCrisisME PRIVATE "${PSXRECOMP_ROOT}/runtime/src/dc_png.cpp")
+# 18.11.2026: the PS1-style HUD (health, bleeding, rounds) - every platform; the Windows build plan lists it too
+target_sources(DinoCrisisME PRIVATE "${PSXRECOMP_ROOT}/runtime/src/dc_hud.c")
 
 # Отладочный интерфейс (Dear ImGui: окно диагностики F2, подгонки F8, света F9)
 # из релиза убран целиком. Перекрестие на него больше не завязано — оно

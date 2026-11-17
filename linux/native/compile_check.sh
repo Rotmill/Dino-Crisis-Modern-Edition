@@ -19,7 +19,7 @@ INC=(-I"$FW/runtime/include" -I"$FW/recompiler/src" -I"$FW/recompiler/lib/fmt/in
 CC=${CC:-cc}; CXX=${CXX:-c++}
 fail=0; n=0
 SRCS=$(sed -n '/set(PSXRECOMP_RUNTIME_SOURCES/,/^)/p' "$FW/runtime/runtime.cmake" | grep -o '/runtime/src/[^ ]*\|/recompiler/src/[^ ]*' )
-SRCS="$SRCS /runtime/src/bios_hle.c /runtime/src/hle_dispatch.c /runtime/src/stub_interpreter.c /runtime/src/dc_png.cpp /runtime/src/dc_win32_posix.c"
+SRCS="$SRCS /runtime/src/bios_hle.c /runtime/src/hle_dispatch.c /runtime/src/stub_interpreter.c /runtime/src/dc_png.cpp /runtime/src/dc_win32_posix.c /runtime/src/dc_hud.c"
 for rel in $SRCS; do
   src="$FW$rel"
   [ -n "$FILTER" ] && [[ "$rel" != *$FILTER* ]] && continue

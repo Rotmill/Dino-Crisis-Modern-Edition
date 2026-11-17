@@ -27,6 +27,7 @@ mod\tools\python\python.exe -I installer\dcme_install.py -DiscPath "D:\Dino Cris
 - Widescreen 16:9, 21:9 and 32:9 without stretching, or the original 4:3
 - Render resolution up to 4K, 30 to 1000 FPS
 - Many quality-of-life options
+- Optional HUD in the style of the PS1 game: health state, bleeding and the rounds in the gun (off by default: `hud.on=1` in `data/dc_user.cfg`, `hud.always=1` keeps it on screen)
 - Keyboard and mouse or a gamepad, every button can be remapped
 - Mod support: a mods folder the game picks up while running, and [Dino Crisis ME Studio](../../../Dino-Crisis-Studio) to export and replace characters, rooms, textures, sounds and videos
 
