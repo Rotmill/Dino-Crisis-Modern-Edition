@@ -108,6 +108,11 @@ push a stick or trigger far on) takes the input - on a Deck, an external pad suc
 controls. A pad chosen in Settings > CONTROLS > Gamepad Device stays the only one. The log lists what SDL sees (`pad: SDL sees ...`,
 `pad: ... is used - it takes the input`); `DC_PAD_FOLLOW=0` reads the first gamepad only, as before.
 
+**Vibration.** The game's own DualShock vibration (bites, shots, the dinosaurs' steps) reaches the active gamepad:
+the large motor as the low-frequency rumble, the small one as the high-frequency one. It stops when the game stops
+polling the pad (pause, loading). `pad.rumble` in `data/dc_user.cfg` sets the strength (0-100, default 100);
+`DC_RUMBLE=0` turns it off. The log says when it starts (`rumble: the game vibrates the pad ...`).
+
 **Setup output.** The setup is a terminal program only. On a terminal it redraws its steps in place (spinner, progress
 bars from the build's own `[n/m]`, `[OK]`/`[WARN]`/`[ERROR]`, one summary line per step); in a pipe, a file or with
 `TERM=dumb` it writes plain lines; `--verbose` prints every line of every tool; `NO_COLOR` turns colours off. The full

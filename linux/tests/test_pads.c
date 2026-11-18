@@ -71,7 +71,36 @@ int main(void)
 
     dc_pads_unwatch_all();
     SDL_JoystickClose(j1);
+
+    /* ---- the original vibration: the DualShock motor bytes of a 0x42 poll, mapped by 0x4D ---- */
+    {
+        uint8_t sm, lg;
+        const uint8_t unmapped[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+        const uint8_t libpad[6] = { 0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF };   /* the usual libpad map: small, large */
+        const uint8_t swapped[6] = { 0x01, 0xFF, 0x00, 0xFF, 0xFF, 0xFF };
+        const uint8_t both[6] = { 0x01, 0xC0, 0, 0, 0, 0 }, odd[6] = { 0x02, 0x40, 0x01, 0, 0, 0 };
+        dc_pads_motors(unmapped, both, &sm, &lg);
+        CHECK(sm == 0 && lg == 0);                             /* not set up by the game: still */
+        dc_pads_motors(libpad, both, &sm, &lg);
+        CHECK(sm == 1 && lg == 0xC0);
+        dc_pads_motors(libpad, odd, &sm, &lg);
+        CHECK(sm == 0 && lg == 0x40);                          /* the small motor reads bit 0 only */
+        dc_pads_motors(swapped, odd, &sm, &lg);
+        CHECK(sm == 1 && lg == 0x02);
+
+        Uint16 lo, hi;
+        dc_pads_rumble_levels(1, 255, 100, 16, &lo, &hi);
+        CHECK(lo == 0xFFFF && hi == 0xA000);
+        dc_pads_rumble_levels(0, 128, 50, 16, &lo, &hi);
+        CHECK(lo == 128u * 257u / 2u && hi == 0);
+        dc_pads_rumble_levels(1, 255, 0, 16, &lo, &hi);
+        CHECK(lo == 0 && hi == 0);                             /* strength 0: off */
+        dc_pads_rumble_levels(1, 255, 100, DC_PADS_RUMBLE_STALE_MS + 1, &lo, &hi);
+        CHECK(lo == 0 && hi == 0);                             /* the game stopped polling (pause): the motors stop */
+        dc_pads_rumble_levels(1, 999, 250, 0, &lo, &hi);
+        CHECK(lo == 0xFFFF && hi == 0xA000);                   /* out of range: clamped */
+    }
     SDL_Quit();
-    puts("gamepad watch test: ok");
+    puts("gamepad watch and vibration test: ok");
     return 0;
 }
