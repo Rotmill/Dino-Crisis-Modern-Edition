@@ -27,6 +27,7 @@ mod\tools\python\python.exe -I installer\dcme_install.py -DiscPath "D:\Dino Cris
 - Widescreen 16:9, 21:9 and 32:9 without stretching, or the original 4:3
 - Render resolution up to 4K, 30 to 1000 FPS
 - Many quality-of-life options
+- HUD in the style of the PS1 game, on by default in the world (hidden in menus, the inventory, scenes and movies): health state, bleeding, the rounds in the gun and the rounds carried. Settings > GAME > **HUD**: Off / Auto (shown on changes) / On (always shown); **F3** cycles the same. The rounds carried appear after two reloads of a weapon: the game learns where its ammo item lies and remembers it
 - Keyboard and mouse or a gamepad, every button can be remapped
 - Mod support: a mods folder the game picks up while running, and [Dino Crisis ME Studio](../../../Dino-Crisis-Studio) to export and replace characters, rooms, textures, sounds and videos
 
@@ -57,6 +58,8 @@ Your own Dino Crisis disc image (Track 1 `.bin` or `.cue`), one of:
 `.sbi` is the LibCrypt file of a PAL disc, next to the image (the same file DuckStation uses).
 
 Windows 10 or 11, 64-bit, a graphics card with Vulkan.
+
+Linux: through Wine/Proton, or a native build (`installer/dcme_install_linux.py`) - see [linux/README.md](linux/README.md).
 
 ## Known issues
 

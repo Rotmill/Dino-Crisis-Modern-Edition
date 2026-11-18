@@ -64,7 +64,11 @@
  * и рта копии совпадают с исходником байт в байт, глаза и рот — исходные, так что точный хеш вместо «≤ 8 несовпадений»
  * ничего не теряет. Откат: DC_FACE_V3=0 — файлы v3 не читаются (файлы v2 работают как были); релиз с файлами v2 —
  * rebuild.ps1 -FacesV2. */
+#ifdef _WIN32
 #include <io.h>
+#else
+#include "dc_platform.h"   /* 17.11.2026: Linux - _findfirst/_stat64 over POSIX (dc_win32_posix.h) */
+#endif
 extern uint8_t* memory_get_ram_ptr(void);           /* memory.c — челюсть пишет вершины модели */
 
 #define F2_MAXCH 12

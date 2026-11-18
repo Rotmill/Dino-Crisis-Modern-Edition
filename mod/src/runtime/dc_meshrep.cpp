@@ -23,8 +23,12 @@
 // модель — glTF/GLB, FBX или OBJ (ufbx.c, MIT); оружие в руке из папки персонажа (characters\<костюм>\<in_hand_XX>\) — только
 // для него, из weapons\ — для всех.
 // Откат: DC_MODS_MESHES=0. Разбор: DC_MESHREP_LOG=1 (ключи моделей, которые видит игра, и что заменено).
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include "dc_platform.h"   // 17.11.2026: Linux - the same Win32 calls over POSIX (dc_win32_posix.h)
+#endif
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -80,21 +84,30 @@ int gpu_env();                              // 06.10.2026 (2): DC_MESH_GPU (ни
 namespace {
 
 // ================================================================== JSON (то, что нужно glTF)
+// 17.11.2026: the key/value pair is its own struct - std::pair<std::string, Jv> inside Jv needs Jv complete, which
+// libc++ lets pass and libstdc++ (Linux) does not; first/second as before
+struct JvKV;
 struct Jv {
     enum Type { NUL, BOOL, NUM, STR, ARR, OBJ } t = NUL;
     double n = 0;
     std::string s;
     std::vector<Jv> a;
-    std::vector<std::pair<std::string, Jv>> o;
-    const Jv* get(const char* k) const {
-        if (t != OBJ) return nullptr;
-        for (const auto& kv : o)
-            if (kv.first == k) return &kv.second;
-        return nullptr;
-    }
+    std::vector<JvKV> o;
+    const Jv* get(const char* k) const;
     const Jv* at(size_t i) const { return (t == ARR && i < a.size()) ? &a[i] : nullptr; }
     size_t size() const { return t == ARR ? a.size() : 0; }
 };
+struct JvKV {
+    std::string first;
+    Jv second;
+    JvKV(std::string k, Jv v) : first(std::move(k)), second(std::move(v)) {}
+};
+const Jv* Jv::get(const char* k) const {
+    if (t != OBJ) return nullptr;
+    for (const auto& kv : o)
+        if (kv.first == k) return &kv.second;
+    return nullptr;
+}
 const Jv* jg(const Jv* v, const char* k) { return v ? v->get(k) : nullptr; }
 const Jv* ja(const Jv* v, size_t i) { return v ? v->at(i) : nullptr; }
 int ji(const Jv* v, int d = -1) { return (v && v->t == Jv::NUM) ? (int)v->n : d; }
@@ -785,6 +798,15 @@ bool ufbx_node_under(const ufbx_node* nd, const std::string& want) {
     return false;
 }
 // картинка материала: вложенные байты или файл (путь от модели, затем имя файла рядом с моделью)
+// absolute texture path in a model: "C:\..." on Windows, "\home\..." ('/' already turned into '\') on Linux
+inline bool path_is_abs(const std::wstring& w) {
+#ifdef _WIN32
+    return w.size() > 1 && w[1] == L':';
+#else
+    return !w.empty() && w[0] == L'\\';
+#endif
+}
+
 bool ufbx_tex(const ufbx_texture* tx, const std::wstring& dir, RTex& t) {
     if (!tx) return false;
     if (tx->content.size) {
@@ -798,7 +820,7 @@ bool ufbx_tex(const ufbx_texture* tx, const std::wstring& dir, RTex& t) {
         std::wstring w = u8w(std::string(s->data, s->length));
         for (auto& c : w) if (c == L'/') c = L'\\';
         const size_t sl = w.find_last_of(L'\\');
-        const std::wstring cands[2] = {(w.size() > 1 && w[1] == L':') ? w : dir + w, dir + (sl == std::wstring::npos ? w : w.substr(sl + 1))};
+        const std::wstring cands[2] = {path_is_abs(w) ? w : dir + w, dir + (sl == std::wstring::npos ? w : w.substr(sl + 1))};
         for (const std::wstring& c : cands)
             if (GetFileAttributesW(c.c_str()) != INVALID_FILE_ATTRIBUTES) { t.path = c; return true; }
     }

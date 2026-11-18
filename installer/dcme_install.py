@@ -662,6 +662,8 @@ def _long(path):
     """The \\\\?\\ form of a path: Windows then takes paths of 260 characters and more (the object files of the
     recompiler build under a long install path)."""
     full = os.path.abspath(path)
+    if os.name != 'nt':                               # 17.11.2026: Linux (dcme_install_linux.py) - no such prefix
+        return full
     if full.startswith('\\\\?\\'):
         return full
     if full.startswith('\\\\'):
@@ -1497,7 +1499,8 @@ def step_layout(game_dir, runtime_exe, sdl2_dir, proj):
                   + ' (%d), ' % moved + L('old files removed', 'старые файлы удалены') + ' (%d)' % removed, 'ok')
 
     copy_file(runtime_exe, os.path.join(game_dir, os.path.basename(runtime_exe)))
-    copy_file(os.path.join(sdl2_dir, 'lib', 'x64', 'SDL2.dll'), os.path.join(game_dir, 'SDL2.dll'))
+    if sdl2_dir:                                      # 17.11.2026: Linux - SDL2 of the system (dcme_install_linux.py)
+        copy_file(os.path.join(sdl2_dir, 'lib', 'x64', 'SDL2.dll'), os.path.join(game_dir, 'SDL2.dll'))
 
     # V3 (04.10.2026, the player: "a mods folder with subfolders in the folder the game is installed to"): the game looks
     # into mods at start - a file named like a game file replaces it (runtime/src/dc_mods.c; our rooms and collision -
@@ -1507,9 +1510,9 @@ def step_layout(game_dir, runtime_exe, sdl2_dir, proj):
     mods = os.path.join(game_dir, 'mods')
     for sub in ('rooms', 'doors', 'characters', 'weapons', 'items', 'screens', 'movie', 'sound\\bgm', 'sound\\se',
                 'sound\\voice', 'textures', 'collision', 'other'):
-        os.makedirs(os.path.join(mods, sub), exist_ok=True)
+        os.makedirs(os.path.join(mods, *sub.split('\\')), exist_ok=True)      # 17.11.2026: '\\' is no separator on Linux
     for old in ('sounds\\effects', 'sounds\\stage', 'sounds\\speech', 'sounds\\music', 'sounds', 'videos'):
-        p = os.path.join(mods, old)
+        p = os.path.join(mods, *old.split('\\'))
         if os.path.isdir(p) and not os.listdir(p):
             try:
                 os.rmdir(p)
@@ -1580,7 +1583,9 @@ def step_layout(game_dir, runtime_exe, sdl2_dir, proj):
     # 11.10.2026 (the player: "after the install an uninstall exe is needed in the same folder"): build_setup.ps1 builds
     # Uninstall.exe (installer\Uninstall.cs) and puts it into the package next to this script
     uninst = os.path.join(SCRIPT_DIR, 'Uninstall.exe')
-    if os.path.isfile(uninst):
+    if os.name != 'nt':
+        pass                                          # 17.11.2026: Linux - the game folder is removed as a whole
+    elif os.path.isfile(uninst):
         copy_file(uninst, os.path.join(game_dir, 'Uninstall.exe'))
     else:
         write_log(L('not in the package:', 'нет в пакете:') + ' Uninstall.exe', 'warn')

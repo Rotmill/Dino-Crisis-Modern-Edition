@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include <windows.h>
+#include "dc_platform.h"
 #include "pgxp.h"
 #include "gpu_sw_renderer.h"
 #include "cpu_state.h"
@@ -8124,7 +8124,12 @@ static float zc_shift_units(int lv, int big, float dep) {
 /* 17.09.2026 вечер (пункт 5): округление вершины для ключа двойников — инструкцией cvtss2si вместо вызова lrintf из
  * CRT (12 вызовов на полигон на каждом обходе). Режим округления тот же — MXCSR (к ближнему чётному), значения —
  * координаты комнаты, далеко от границ int32. DC_DUP_LRINTF=1 — прежний lrintf. */
+#if defined(__SSE__) || defined(_M_IX86) || defined(_M_X64)
 #include <xmmintrin.h>
+#define DC_HAVE_SSE_ROUND 1
+#else
+#define DC_HAVE_SSE_ROUND 0
+#endif
 static int rl_dup_lrintf_old(void) {
     static int v = -1;
     if (v < 0) { const char *e = getenv("DC_DUP_LRINTF"); v = (e && *e == '1') ? 1 : 0; }
@@ -8134,13 +8139,16 @@ static int rl_dup_lrintf_old(void) {
 static int rl_dup_lose(const float vv[][3], int nv, const float *TR, uint32_t rec) {
     if (!rl_dup_on() || nv < 3 || nv > 4) return 0;
     int32_t t[4][3];
-    if (rl_dup_lrintf_old()) {
+    if (rl_dup_lrintf_old() || !DC_HAVE_SSE_ROUND) {
         for (int k = 0; k < nv; k++)
             for (int c = 0; c < 3; c++) t[k][c] = (int32_t)lrintf(vv[k][c]);
-    } else {
+    }
+#if DC_HAVE_SSE_ROUND
+    else {
         for (int k = 0; k < nv; k++)
             for (int c = 0; c < 3; c++) t[k][c] = (int32_t)_mm_cvtss_si32(_mm_set_ss(vv[k][c]));
     }
+#endif
     for (int a = 1; a < nv; a++)                 /* порядок вершин не важен */
         for (int b = a; b > 0; b--) {
             int gt = (t[b-1][0] != t[b][0]) ? (t[b-1][0] > t[b][0]) :

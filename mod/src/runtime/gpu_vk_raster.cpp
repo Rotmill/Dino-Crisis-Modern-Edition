@@ -15,15 +15,23 @@
 // 1/w with GREATER compare, the same quantity the CPU z-buffer stores.
 
 #include "ptvk_core.h"
+#include "dc_platform.h"
 #include "gpu.h"          /* GpuDisplayInfo: display window for the interface squeeze */
 #include <vulkan/vulkan.h>
+#ifndef _WIN32
+#include "dc_png.h"       /* 17.11.2026: PNG from mods without WIC */
+#endif
+#ifdef _WIN32
 #include <windows.h>
 #include <vulkan/vulkan_win32.h>   /* 09.10: общая с Direct3D 11 текстура (DC_VK_SHARED) */
 #include <wincodec.h>
+#endif
 /* 10.10.2026: math.h явно - для Clang (libc++ не тянет его сам, как заголовки MSVC) */
 #include <math.h>
+#ifdef _WIN32
 #pragma comment(lib, "windowscodecs.lib")   /* 05.10: картинки PNG из mods (TEXREP) */
 #pragma comment(lib, "ole32.lib")
+#endif
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -1198,6 +1206,7 @@ static bool cmdSubmitAsync(int frame) {
     VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
     si.commandBufferCount = 1; si.pCommandBuffers = &s_cmd;
     /* 09.10: запись в общую с D3D11 текстуру — под её мьютексом (ключ 0 и на взятии, и на отдаче) */
+#ifdef _WIN32
     VkWin32KeyedMutexAcquireReleaseInfoKHR km{ VK_STRUCTURE_TYPE_WIN32_KEYED_MUTEX_ACQUIRE_RELEASE_INFO_KHR };
     const uint64_t key0 = 0; const uint32_t kto = 0xFFFFFFFFu;
     if (s_kmPending && s_dxMem && s_dxMutex) {
@@ -1205,6 +1214,7 @@ static bool cmdSubmitAsync(int frame) {
         km.releaseCount = 1; km.pReleaseSyncs = &s_dxMem; km.pReleaseKeys = &key0;
         si.pNext = &km;
     }
+#endif
     s_kmPending = 0;
     if (frame && s_shUboGpu) memcpy(s_shUboGpu, s_shUboShadow, sizeof s_shUboShadow);   /* 29.10.2026 (async), 30.10 (пункт 11): UBO кадра */
     LARGE_INTEGER tq0, tq1; QueryPerformanceCounter(&tq0);
@@ -5844,6 +5854,11 @@ static bool ensureTargets(int w, int h) {
 extern "C" int dcvk_shared_available(void) { return g_vk_d3d11_share; }
 /* handle — дескриптор текстуры D3D11 (B8G8R8A8, keyed mutex): NT или, при kmt, прежний общий; w x h — размер кадра. 0 — снять. */
 extern "C" int dcvk_shared_attach(void* handle, int w, int h, int kmt, int mutex) {
+#ifndef _WIN32
+    /* 17.11.2026: Linux - there is no D3D11 to share with (g_vk_d3d11_share stays 0); the frame is read back */
+    (void)handle; (void)w; (void)h; (void)kmt; (void)mutex;
+    return 0;
+#else
     if (!C || !C->device) return 0;
     struct GpuGuard { GpuGuard() { ptvk_gpu_lock(); } ~GpuGuard() { ptvk_gpu_unlock(); } } gpu_guard;
     vkDeviceWaitIdle(C->device);
@@ -5913,6 +5928,7 @@ extern "C" int dcvk_shared_attach(void* handle, int w, int h, int kmt, int mutex
     rlog("[VKR] shared: D3D11 texture %dx%d imported (%s handle, %llu bytes, type %u; image types 0x%X, handle types 0x%X, %d)\n",
          w, h, kmt ? "KMT" : "NT", (unsigned long long)mr.size, mai.memoryTypeIndex, mr.memoryTypeBits, hbits, hres);
     return 1;
+#endif
 }
 /* main.cpp перед рендером кадра: 1 — кадр в общую текстуру (если она того же размера), 0 — прежнее чтение целиком */
 extern "C" void dcvk_shared_use(int on) { s_dxUse = on ? 1 : 0; }
@@ -6311,9 +6327,11 @@ static uint64_t trep_stamp(const std::wstring& p) {
 }
 
 static void trep_worker(void) {
+#ifdef _WIN32
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     IWICImagingFactory* fac = nullptr;
     CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&fac));
+#endif
     for (;;) {
         int idx = -1;
         std::wstring path;
@@ -6332,6 +6350,16 @@ static void trep_worker(void) {
         std::vector<uint8_t> px;
         UINT w = 0, h = 0;
         bool ok = false;
+#ifndef _WIN32
+        /* 17.11.2026: Linux - libpng (dc_png.cpp), RGBA like the WIC converter gives */
+        {
+            int iw = 0, ih = 0;
+            if (!png.empty()) ok = dc_png_decode_memory(png.data(), png.size(), px, &iw, &ih, false);
+            else { char up[MAX_PATH]; ok = dc_png_decode_file(dc_posix_wpath(path.c_str(), up, sizeof up), px, &iw, &ih, false); }
+            if (ok && (iw <= 0 || ih <= 0 || iw > 8192 || ih > 8192)) ok = false;
+            if (ok) { w = (UINT)iw; h = (UINT)ih; } else px.clear();
+        }
+#else
         IWICBitmapDecoder* dec = nullptr;
         IWICBitmapFrameDecode* frame = nullptr;
         IWICFormatConverter* conv = nullptr;
@@ -6353,6 +6381,7 @@ static void trep_worker(void) {
         if (frame) frame->Release();
         if (dec) dec->Release();
         if (stm) stm->Release();
+#endif
         std::lock_guard<std::mutex> lk(s_trepMu);
         TRep& r = s_trep[idx];
         if (r.gen != gen0 || r.state != 1) continue;   /* 06.10.2026: перечитана или снята, пока декодировалась — не эта картинка */

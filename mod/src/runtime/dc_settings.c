@@ -2133,6 +2133,8 @@ void dc_menu_reset_page(int page) {
          * 21.10 вечер - строка называется «Movement Type» */
         const char *twin2 = NULL;
         if (!o->id && strcmp(o->title, "Movement Type") == 0) { twin = "inp.move.m"; twin2 = "inp.move.o"; }
+        /* 18.11.2026: the HUD row (Off / Auto / On) is kept in hud.on and hud.always */
+        if (!o->id && strcmp(o->title, "HUD") == 0) { twin = "hud.on"; twin2 = "hud.always"; }
         if (!o->id && !twin) continue;
         for (int k = 0; k < 2; k++) {
             const char *tw = k ? twin2 : twin;

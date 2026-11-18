@@ -2,15 +2,19 @@
 // buffer helpers, the 1x VRAM image and its upload, the GPU lock. Ported from KF2_PT; until 18.10.2026 the file
 // also held the hardware path tracer (F5), removed together with it. API is extern "C" (ptvk_core.h).
 #define _CRT_SECURE_NO_WARNINGS
+#ifdef _WIN32
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#endif
 #include <vulkan/vulkan.h>
 
 #include <cstdio>
 #include <cstring>
 #include <cstdarg>
 #include <cstdlib>
+#include <atomic>
+#include <mutex>
 #include <vector>
 /* 10.10.2026: math.h явно - для Clang (libc++ не тянет его сам, как заголовки MSVC) */
 #include <math.h>
@@ -224,6 +228,7 @@ extern "C" int ptvk_init(void)
         std::vector<VkExtensionProperties> xprops(nx);
         vkEnumerateDeviceExtensionProperties(s_phys, nullptr, &nx, xprops.data());
         bool hm = false, hk = false;
+#ifdef _WIN32
         for (uint32_t i = 0; i < nx; i++) {
             if (!strcmp(xprops[i].extensionName, "VK_KHR_external_memory_win32")) hm = true;
             if (!strcmp(xprops[i].extensionName, "VK_KHR_win32_keyed_mutex")) hk = true;
@@ -233,6 +238,7 @@ extern "C" int ptvk_init(void)
             devExts.push_back("VK_KHR_win32_keyed_mutex");
             g_vk_d3d11_share = 1;
         }
+#endif
         vlog("[VK] D3D11 shared texture (external memory win32 %d, keyed mutex %d): %s%c", hm ? 1 : 0, hk ? 1 : 0,
              g_vk_d3d11_share ? "available" : "no", 10);
         /* 24.10.2026: сколько видеопамяти занято и сколько её даёт система (ptvk_vram_usage, строки vram: журнала) */
@@ -353,10 +359,10 @@ static bool ensureCmd() {
  * это запрещает, итог - зависание или вылет в драйвере. Теперь занятую видеокарту ждём дальше: зависшую Windows
  * сбрасывает сама (TDR, около 2 с), и ожидание кончается VK_ERROR_DEVICE_LOST. Потеря (или минута без ответа) выключает
  * путь Vulkan до перезапуска: растр отдаёт пустой кадр, игра идёт с родной картинкой, main.cpp говорит игроку. */
-static volatile LONG s_vkLost = 0;
-extern "C" int ptvk_lost(void) { return s_vkLost ? 1 : 0; }
+static std::atomic<long> s_vkLost{ 0 };
+extern "C" int ptvk_lost(void) { return s_vkLost.load(std::memory_order_acquire) ? 1 : 0; }
 extern "C" void ptvk_mark_lost(int vkresult) {
-    if (InterlockedExchange(&s_vkLost, 1) == 0)
+    if (s_vkLost.exchange(1, std::memory_order_acq_rel) == 0)
         fprintf(stderr, "render: Vulkan device lost (VkResult %d) - Vulkan graphics are off until the game restarts\n", vkresult);
 }
 /* 29.10.2026: долгое ожидание забора - кто ждёт и чего (gpu_vk_raster.cpp: номера отправок, поток задания показа, замки) */
@@ -365,13 +371,13 @@ extern "C" void ptvk_set_wait_note(void (*fn)(VkFence)) { s_waitNote = fn; }
 /* 29.10.2026 (async, разбор 3): проба DC_TEST_SWAP_LOST_VK=1 (main.cpp test_lost) - с «потерей» устройства вывода теряется и
  * Vulkan, как при настоящем сбросе драйвера: следующее ожидание забора дожидается его (видеокарта и правда закончила) и
  * кончается потерей */
-static volatile LONG s_testLoseNext = 0;
-extern "C" void ptvk_test_lose_next(void) { InterlockedExchange(&s_testLoseNext, 1); }
+static std::atomic<long> s_testLoseNext{ 0 };
+extern "C" void ptvk_test_lose_next(void) { s_testLoseNext.store(1, std::memory_order_release); }
 extern "C" int ptvk_wait_fence(VkFence f) {
-    if (s_vkLost) return 0;
+    if (s_vkLost.load(std::memory_order_acquire)) return 0;
     for (int sec = 0; ; sec++) {
         const VkResult r = vkWaitForFences(s_device, 1, &f, VK_TRUE, 1000000000ULL);
-        if (r == VK_SUCCESS && s_testLoseNext && InterlockedExchange(&s_testLoseNext, 0)) {
+        if (r == VK_SUCCESS && s_testLoseNext.exchange(0, std::memory_order_acq_rel)) {
             fprintf(stderr, "render: test - the Vulkan device is lost too (DC_TEST_SWAP_LOST_VK)\n");
             ptvk_mark_lost((int)VK_ERROR_DEVICE_LOST);
             return 0;
@@ -506,7 +512,7 @@ extern "C" void ptvk_vram_clear_dirty(void) { s_vramDirty = false; }
 
 // Global GPU section lock (see ptvk_core.h): serializes the PT render thread
 // against the game-thread raster backend on the shared queue / VRAM image.
-static SRWLOCK s_gpuLock = SRWLOCK_INIT;
-extern "C" void ptvk_gpu_lock(void)   { AcquireSRWLockExclusive(&s_gpuLock); }
-extern "C" void ptvk_gpu_unlock(void) { ReleaseSRWLockExclusive(&s_gpuLock); }
+static std::mutex s_gpuLock;
+extern "C" void ptvk_gpu_lock(void)   { s_gpuLock.lock(); }
+extern "C" void ptvk_gpu_unlock(void) { s_gpuLock.unlock(); }
 

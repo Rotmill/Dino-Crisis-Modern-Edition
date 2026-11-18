@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROGRAM=${0##*/}
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+PACKAGE=${DCME_PACKAGE:-$ROOT}
+PREFIX=${WINEPREFIX:-${XDG_DATA_HOME:-$HOME/.local/share}/dcme/wineprefix}
+WINE_BIN=${DCME_WINE:-wine}
+WINEPATH_BIN=${DCME_WINEPATH:-winepath}
+DRY_RUN=0
+
+usage() {
+  cat <<EOF
+Usage:
+  $PROGRAM [--package DIR] [--prefix DIR] doctor
+  $PROGRAM [--package DIR] [--prefix DIR] [--dry-run] install DISC INSTALL_DIR
+  $PROGRAM [--prefix DIR] [--dry-run] run INSTALL_DIR [GAME_ARGS...]
+
+The install command needs the unpacked Windows release package (it contains
+mod/tools/python, mod/tools/llvm, mod/vulkan and SDL2), not only a source clone.
+
+Environment: DCME_PACKAGE, DCME_WINE, DCME_WINEPATH, WINEPREFIX.
+EOF
+}
+
+die() { printf '%s: %s\n' "$PROGRAM" "$*" >&2; exit 1; }
+note() { printf '%s\n' "$*"; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+run() {
+  if (( DRY_RUN )); then
+    printf '+'
+    printf ' %q' "$@"
+    printf '\n'
+  else
+    "$@"
+  fi
+}
+
+wine_env() {
+  WINEPREFIX=$PREFIX WINEDEBUG=${WINEDEBUG:--all} "$@"
+}
+
+to_windows_path() {
+  local path=$1
+  wine_env "$WINEPATH_BIN" -w "$path"
+}
+
+check_package() {
+  local missing=0 path
+  for path in \
+    installer/dcme_install.py \
+    mod/tools/python/python.exe \
+    mod/tools/llvm/bin/x86_64-w64-mingw32-clang.exe \
+    mod/vulkan/Include/vulkan/vulkan.h \
+    mod/build/game.plan.json; do
+    if [[ ! -e "$PACKAGE/$path" ]]; then
+      printf 'missing: %s\n' "$PACKAGE/$path" >&2
+      missing=1
+    fi
+  done
+  (( missing == 0 )) || die "use --package with an unpacked DinoCrisisME release package"
+}
+
+doctor() {
+  local failed=0
+  note "Dino Crisis ME Linux/Wine preflight"
+  if have "$WINE_BIN"; then note "ok: Wine ($WINE_BIN)"; else note "missing: $WINE_BIN"; failed=1; fi
+  if have "$WINEPATH_BIN"; then note "ok: winepath ($WINEPATH_BIN)"; else note "missing: $WINEPATH_BIN"; failed=1; fi
+  if have vulkaninfo; then
+    if vulkaninfo --summary >/dev/null 2>&1; then note "ok: Vulkan loader and device"; else note "failed: vulkaninfo --summary"; failed=1; fi
+  else
+    note "warning: vulkaninfo not found; install vulkan-tools to validate the Vulkan driver"
+  fi
+  if [[ -e "$PACKAGE/mod/tools/python/python.exe" ]]; then
+    if check_package; then note "ok: unpacked release package ($PACKAGE)"; fi
+  else
+    note "warning: this is a source checkout; pass --package DIR pointing to the unpacked release"
+  fi
+  note "prefix: $PREFIX"
+  return "$failed"
+}
+
+install_game() {
+  [[ $# -eq 2 ]] || die "install needs DISC and INSTALL_DIR"
+  check_package
+  have "$WINE_BIN" || die "$WINE_BIN not found"
+  have "$WINEPATH_BIN" || die "$WINEPATH_BIN not found"
+
+  local disc install_dir python script disc_win install_win script_win
+  disc=$(realpath -- "$1")
+  [[ -f "$disc" ]] || die "disc image not found: $1"
+  mkdir -p -- "$2" "$PREFIX"
+  install_dir=$(realpath -- "$2")
+  python=$(realpath -- "$PACKAGE/mod/tools/python/python.exe")
+  script=$(realpath -- "$PACKAGE/installer/dcme_install.py")
+  disc_win=$(to_windows_path "$disc")
+  install_win=$(to_windows_path "$install_dir")
+  script_win=$(to_windows_path "$script")
+
+  note "Installing into $install_dir with an isolated Wine prefix at $PREFIX"
+  run wine_env "$WINE_BIN" "$python" -I "$script_win" \
+    -DiscPath "$disc_win" -InstallPath "$install_win" -NoShortcut
+}
+
+run_game() {
+  [[ $# -ge 1 ]] || die "run needs INSTALL_DIR"
+  have "$WINE_BIN" || die "$WINE_BIN not found"
+  local install_dir exe
+  install_dir=$(realpath -- "$1")
+  shift
+  exe="$install_dir/DinoCrisisME.exe"
+  [[ -f "$exe" ]] || die "game executable not found: $exe"
+  cd -- "$install_dir"
+  run wine_env "$WINE_BIN" "$exe" "$@"
+}
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --package) [[ $# -ge 2 ]] || die "--package needs a directory"; PACKAGE=$2; shift 2 ;;
+    --prefix) [[ $# -ge 2 ]] || die "--prefix needs a directory"; PREFIX=$2; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    doctor|install|run) command=$1; shift; break ;;
+    *) die "unknown option or command: $1" ;;
+  esac
+done
+
+[[ ${command:-} ]] || { usage >&2; exit 2; }
+case $command in
+  doctor) doctor "$@" ;;
+  install) install_game "$@" ;;
+  run) run_game "$@" ;;
+esac

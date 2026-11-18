@@ -34,6 +34,11 @@ typedef struct { const char *name; const unsigned char *data; uint32_t size; } P
 
 static PakEntry *s_ent   = NULL;
 static int       s_count = -1;          /* -1: not read yet */
+#ifndef _WIN32
+static unsigned char *s_pack_data = NULL;
+/* dc_mods.c in the game; absent in the unit tests that link dc_pak.c alone */
+extern const char *dc_mods_dir(void) __attribute__((weak));
+#endif
 
 static uint32_t rd16(const unsigned char *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8); }
 static uint32_t rd32(const unsigned char *p)
@@ -52,6 +57,53 @@ static void pak_open(void)
     HGLOBAL hg = rs ? LoadResource(NULL, rs) : NULL;
     const unsigned char *p = hg ? (const unsigned char *)LockResource(hg) : NULL;
     uint32_t n = rs ? (uint32_t)SizeofResource(NULL, rs) : 0;
+#else
+    /* 18.11.2026 (Steam Deck: "the own kernel needs exe in game.toml"): the pack lies NEXT TO THE EXECUTABLE, and by
+     * now the working directory is data/ (dc_boot.c) - a bare relative name missed it, and with no pack there was no
+     * built-in game.toml. Order: DCME_DATA_PAK, a relative DCME_DATA_PAK_PATH against the executable's folder, then
+     * against the working directory (a pack copied into data/ by hand). */
+    char tried[2][MAX_PATH + 256];
+    int ntried = 0;
+    FILE *fp = NULL;
+    const char *env = getenv("DCME_DATA_PAK");
+    if (env && *env) {
+        snprintf(tried[ntried++], sizeof tried[0], "%s", env);
+        fp = fopen(env, "rb");
+    } else {
+#ifdef DCME_DATA_PAK_PATH
+        const char *name = DCME_DATA_PAK_PATH;
+#else
+        const char *name = "dcme_data.pak";
+#endif
+        char dir[MAX_PATH];
+        if (name[0] != '/' && dc_exe_dir(dir, sizeof dir)) {
+            snprintf(tried[ntried], sizeof tried[0], "%s%.255s", dir, name);
+            fp = fopen(tried[ntried++], "rb");
+        }
+        if (!fp) {
+            snprintf(tried[ntried++], sizeof tried[0], "%s", name);
+            fp = fopen(name, "rb");
+        }
+    }
+    if (!fp) {
+        fprintf(stderr, "pak: dcme_data.pak not found (tried %s%s%s) - the game data, settings and game.toml are missing\n",
+                tried[0], ntried > 1 ? ", " : "", ntried > 1 ? tried[1] : "");
+        return;
+    }
+    long file_n = -1;
+    if (fseek(fp, 0, SEEK_END) == 0) file_n = ftell(fp);
+    if (file_n < 0 || (unsigned long)file_n > 0xffffffffUL || fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return;
+    }
+    uint32_t n = (uint32_t)file_n;
+    s_pack_data = (unsigned char *)malloc(n ? n : 1);
+    if (!s_pack_data || fread(s_pack_data, 1, n, fp) != n) {
+        free(s_pack_data); s_pack_data = NULL; fclose(fp); return;
+    }
+    fclose(fp);
+    const unsigned char *p = s_pack_data;
+#endif
     if (!p || n < 12 || memcmp(p, "DCMEPAK1", 8) != 0) return;
     uint32_t count = rd32(p + 8);
     if (count == 0 || count > 65536) return;
@@ -72,7 +124,6 @@ static void pak_open(void)
     }
     s_ent = ent;
     s_count = (int)count;
-#endif
 }
 
 int dc_pak_norm(const char *path, char *out, size_t cap)
@@ -153,7 +204,30 @@ static int mods_path(const char *key, char *out, size_t cap)
         return k > 0 && (size_t)k < cap;
     }
 #else
-    (void)key; (void)out; (void)cap;
+    /* 18.11.2026: as on Windows - the folder dc_mods.c reads (mods/ next to the executable, or the package view); with
+     * DC_MODS=0 or without dc_mods.c (tests) mods/ next to the executable. DCME_MODS_DIR overrides both. */
+    char exe[MAX_PATH];
+    const char *base = getenv("DCME_MODS_DIR");
+    char sep = '/';
+    if (!base || !*base) {
+        base = dc_mods_dir ? dc_mods_dir() : NULL;
+        if (base) sep = '\\';                         /* dc_mods.c joins with '\\'; dc_fopen takes both */
+    }
+    if (!base || !*base) {
+        if (!dc_exe_dir(exe, sizeof exe) || strlen(exe) + 6 >= sizeof exe) return 0;
+        strcat(exe, "mods/");
+        base = exe;
+    }
+    const size_t bl = strlen(base);
+    const int has_sep = bl && (base[bl - 1] == '/' || base[bl - 1] == '\\');
+    for (size_t i = 0; i < sizeof k_mod_dirs / sizeof k_mod_dirs[0]; i++) {
+        size_t L = strlen(k_mod_dirs[i].pak);
+        if (strncmp(key, k_mod_dirs[i].pak, L) != 0) continue;
+        const char *rest = key + L;
+        if (!*rest || strchr(rest, '/')) return 0;
+        int k = snprintf(out, cap, "%s%s%s%c%s", base, has_sep ? "" : "/", k_mod_dirs[i].mods, sep, rest);
+        return k > 0 && (size_t)k < cap;
+    }
 #endif
     return 0;
 }
@@ -163,7 +237,11 @@ static DcMemFile *mods_open(const char *path)
 {
     char key[512], mp[1024];
     if (!dc_pak_norm(path, key, sizeof key) || !mods_path(key, mp, sizeof mp)) return NULL;
+#ifdef _WIN32
     FILE *fp = fopen(mp, "rb");
+#else
+    FILE *fp = dc_fopen(mp, "rb");               /* '\\' from dc_mods.c, names in any case */
+#endif
     if (!fp) return NULL;
     DcMemFile *f = NULL;
     unsigned char *buf = NULL;
@@ -248,7 +326,8 @@ const unsigned char *dc_embedded(const char *name, unsigned *size)
     return p;
 }
 
-#ifdef _WIN32
+/* 17.11.2026: on every platform - Linux has the same loaders (WIN32_FILE_ATTRIBUTE_DATA and the CRT types come from
+ * dc_win32_posix.h there) */
 int dcme_file_attr(const char *path, void *wfad)
 {
     size_t n = 0;
@@ -275,7 +354,7 @@ int dcme_stat64(const char *path, struct _stat64 *st)
     return -1;
 }
 
-/* _findfirst over the packed names, for a pattern "<folder>/*<end>" (one search at a time - the only caller is the
+/* _findfirst over the packed names, for a pattern "<folder>/<star><end>" (one search at a time - the only caller is the
  * faces folder scan) */
 static char s_fd_dir[400], s_fd_end[64];
 static int  s_fd_pos = -1;
@@ -311,7 +390,7 @@ intptr_t dcme_findfirst(const char *pattern, struct _finddata_t *fd)
     char *slash = strrchr(key, '/');
     if (!star || !slash || star < slash) return -1;
     slash[1] = 0;
-    snprintf(s_fd_dir, sizeof s_fd_dir, "%s", key);
+    snprintf(s_fd_dir, sizeof s_fd_dir, "%.399s", key);
     snprintf(s_fd_end, sizeof s_fd_end, "%s", star + 1);
     s_fd_pos = 0;
     return dcme_findnext(1, fd) == 0 ? 1 : -1;
@@ -323,4 +402,3 @@ int dcme_findclose(intptr_t h)
     s_fd_pos = -1;
     return 0;
 }
-#endif

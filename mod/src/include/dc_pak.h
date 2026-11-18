@@ -59,11 +59,14 @@ const unsigned char *dc_embedded(const char *name, unsigned *size);
 
 /* V3: stand-ins for the file calls of the loaders that read our data in a release (release_edits.py,
  * v3_data_inside): GetFileAttributesExA, _stat64, _findfirst/_findnext/_findclose over the packed names. */
-#ifdef _WIN32
 #include <stdint.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#ifdef _WIN32
 #include <io.h>
+#else
+#include "dc_platform.h"   /* WIN32_FILE_ATTRIBUTE_DATA, struct _stat64, struct _finddata_t (dc_win32_posix.h) */
+#endif
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -74,7 +77,6 @@ int      dcme_findnext(intptr_t h, struct _finddata_t *fd);
 int      dcme_findclose(intptr_t h);
 #ifdef __cplusplus
 }
-#endif
 #endif
 
 #endif

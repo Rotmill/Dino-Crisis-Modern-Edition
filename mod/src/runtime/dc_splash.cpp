@@ -41,6 +41,7 @@
 #include "dc_splash_layout.h"     /* прямоугольники, места подписей, коды языков — сгенерированы render.py */
 #include "dc_menu_atlas.h"        /* атлас строк меню настроек — тоже render.py */
 #include "dc_binds.h"             /* 04.10 (6): назначения кнопок — строки подстраниц и своя раскладка на вкладке клавиатуры */
+#include "dc_png.h"
 
 #include <SDL.h>
 
@@ -140,9 +141,9 @@ static bool png_decode(const unsigned char *data, size_t n, std::vector<unsigned
     return ok;
 }
 #else
-static bool png_decode(const unsigned char *, size_t, std::vector<unsigned char> &, int *, int *)
+static bool png_decode(const unsigned char *data, size_t size, std::vector<unsigned char> &pixels, int *w, int *h)
 {
-    return false;   /* декодер — компонент Windows; на других системах экраны просто не показываются */
+    return dc_png_decode_memory(data, size, pixels, w, h, true);
 }
 #endif
 
