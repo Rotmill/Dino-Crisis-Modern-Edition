@@ -105,7 +105,7 @@ cursor is kept in the window and put back to the centre every frame. The log say
 
 **Several gamepads.** Every connected gamepad is watched; with Gamepad Device on Auto, the one you press a button on (or
 push a stick or trigger far on) takes the input - on a Deck, an external pad such as an 8BitDo works next to the built-in
-controls. A pad chosen in Gamepad Device stays the only one. The log lists what SDL sees (`pad: SDL sees ...`,
+controls. A pad chosen in Settings > CONTROLS > Gamepad Device stays the only one. The log lists what SDL sees (`pad: SDL sees ...`,
 `pad: ... is used - it takes the input`); `DC_PAD_FOLLOW=0` reads the first gamepad only, as before.
 
 **Setup output.** The setup is a terminal program only. On a terminal it redraws its steps in place (spinner, progress
