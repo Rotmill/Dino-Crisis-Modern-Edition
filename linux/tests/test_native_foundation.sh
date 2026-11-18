@@ -63,6 +63,17 @@ cc -std=c11 -Wall -Wextra -Werror -DDC_HUD_NO_SDL \
   -o "$TMP/test-hud"
 "$TMP/test-hud"
 
+# 18.11.2026 regression (Steam Deck with an 8BitDo Ultimate): every gamepad is watched, the one in use is named.
+# SDL virtual gamepads, no hardware; skipped where SDL2 is not installed.
+if SDL_FLAGS=$(pkg-config --cflags --libs sdl2 2>/dev/null || sdl2-config --cflags --libs 2>/dev/null); then
+  # shellcheck disable=SC2086
+  cc -std=c11 -Wall -Wextra -Werror -I"$ROOT/mod/src/include" \
+    "$ROOT/mod/src/runtime/dc_pads.c" "$ROOT/linux/tests/test_pads.c" $SDL_FLAGS -o "$TMP/test-pads"
+  SDL_VIDEODRIVER=dummy "$TMP/test-pads"
+else
+  echo "gamepad watch test: skipped (no SDL2)"
+fi
+
 cc -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -pthread \
   -I"$ROOT/mod/src/include" \
   "$ROOT/linux/tests/test_dc_platform.c" \

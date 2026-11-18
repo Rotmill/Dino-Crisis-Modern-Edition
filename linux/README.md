@@ -103,6 +103,11 @@ cursor is kept in the window and put back to the centre every frame. The log say
 (`mouse: the camera reads the mouse - ...`); `DC_MOUSE_MODE=relative|warp|centre` forces one, for example in
 `DinoCrisisME.sh`.
 
+**Several gamepads.** Every connected gamepad is watched; with Gamepad Device on Auto, the one you press a button on (or
+push a stick or trigger far on) takes the input - on a Deck, an external pad such as an 8BitDo works next to the built-in
+controls. A pad chosen in Gamepad Device stays the only one. The log lists what SDL sees (`pad: SDL sees ...`,
+`pad: ... is used - it takes the input`); `DC_PAD_FOLLOW=0` reads the first gamepad only, as before.
+
 **Setup output.** The setup is a terminal program only. On a terminal it redraws its steps in place (spinner, progress
 bars from the build's own `[n/m]`, `[OK]`/`[WARN]`/`[ERROR]`, one summary line per step); in a pipe, a file or with
 `TERM=dumb` it writes plain lines; `--verbose` prints every line of every tool; `NO_COLOR` turns colours off. The full
