@@ -27,7 +27,7 @@ mod\tools\python\python.exe -I installer\dcme_install.py -DiscPath "D:\Dino Cris
 - Widescreen 16:9, 21:9 and 32:9 without stretching, or the original 4:3
 - Render resolution up to 4K, 30 to 1000 FPS
 - Many quality-of-life options
-- Optional HUD in the style of the PS1 game: health state, bleeding, the rounds in the gun and the rounds carried. **F3** cycles off / shown on changes / always shown (also `hud.on` and `hud.always` in `data/dc_user.cfg`). The rounds carried appear after two reloads of a weapon: the game learns where its ammo item lies and remembers it
+- HUD in the style of the PS1 game, on by default in the world (hidden in menus, the inventory, scenes and movies): health state, bleeding, the rounds in the gun and the rounds carried. **F3** cycles always shown / off / shown on changes (also `hud.on` and `hud.always` in `data/dc_user.cfg`). The rounds carried appear after two reloads of a weapon: the game learns where its ammo item lies and remembers it
 - Keyboard and mouse or a gamepad, every button can be remapped
 - Mod support: a mods folder the game picks up while running, and [Dino Crisis ME Studio](../../../Dino-Crisis-Studio) to export and replace characters, rooms, textures, sounds and videos
 

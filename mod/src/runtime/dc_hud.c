@@ -18,8 +18,8 @@
 
 #include <string.h>
 
-int g_opt_hud_on = 0;
-int g_opt_hud_always = 0;
+int g_opt_hud_on = 1;
+int g_opt_hud_always = 1;
 
 #define DC_HUD_HOLD   3.0f      /* seconds fully shown after a change */
 #define DC_HUD_IN     8.0f      /* fade in per second (0.125 s) */
